@@ -1,0 +1,8 @@
+pub(crate) mod btree;
+pub(crate) mod buffer_manager;
+pub mod database;
+pub(crate) mod error;
+pub(crate) mod page;
+pub mod table;
+
+pub use error::DatabaseError;
