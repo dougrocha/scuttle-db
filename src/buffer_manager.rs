@@ -1,7 +1,12 @@
-use miette::{Result, miette};
-use std::{collections::HashMap, path::PathBuf};
+use miette::{IntoDiagnostic, Result, miette};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::{Read, Seek, SeekFrom, Write},
+    path::PathBuf,
+};
 
-use crate::page::{Page, PageType};
+use crate::page::{PAGE_SIZE, Page, PageId, PageType};
 
 #[derive(Debug)]
 pub struct TableFile {
@@ -11,41 +16,32 @@ pub struct TableFile {
     pub page_count: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BufferManager {
-    buffer_pool: HashMap<u32, HashMap<u32, Page>>,
-    table_files: HashMap<u32, TableFile>,
+    buffer_pool: HashMap<String, HashMap<PageId, Page>>,
 }
 
 impl BufferManager {
     pub fn new() -> Self {
         Self {
             buffer_pool: HashMap::new(),
-            table_files: HashMap::new(),
         }
     }
 
-    pub fn get_page(&mut self, table_id: u32, page_id: u32) -> Result<&mut Page> {
-        // Check if page exists in cache first (using immutable borrow)
+    pub fn get_page(&mut self, table_name: &str, page_id: PageId) -> Result<&mut Page> {
+        // Check if page exists in cache first
         let page_exists = self
             .buffer_pool
-            .get(&table_id)
+            .get(table_name)
             .map(|pages| pages.contains_key(&page_id))
             .unwrap_or(false);
 
         if !page_exists {
-            // Page not in cache, need to load from disk
-            let file_path = self
-                .table_files
-                .get(&table_id)
-                .map(|tf| tf.file_path.clone())
-                .ok_or(miette!(format!("Table not found: {table_id}")))?;
-
-            let page = self.load_page_from_file(&file_path, page_id)?;
+            let page = self.load_page_from_file(table_name, page_id)?;
 
             // Insert into cache
             self.buffer_pool
-                .entry(table_id)
+                .entry(table_name.to_string())
                 .or_default()
                 .insert(page_id, page);
         }
@@ -53,14 +49,107 @@ impl BufferManager {
         // Return mutable reference to the cached page
         Ok(self
             .buffer_pool
-            .get_mut(&table_id)
+            .get_mut(table_name)
             .unwrap()
             .get_mut(&page_id)
             .unwrap())
     }
 
-    fn load_page_from_file(&mut self, _file_path: &PathBuf, _page_id: u32) -> Result<Page> {
-        // For now, create a dummy page - implement actual file loading later
-        Ok(Page::new(_page_id, PageType::Table))
+    fn load_page_from_file(&self, table_name: &str, page_id: PageId) -> Result<Page> {
+        let mut file = File::open(format!("./db/{table_name}.table")).into_diagnostic()?;
+
+        let mut buffer: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        let offset = (page_id as usize) * PAGE_SIZE;
+        file.seek(SeekFrom::Start(offset as u64))
+            .into_diagnostic()?;
+        file.read_exact(&mut buffer).into_diagnostic()?;
+
+        Ok(Page::from_bytes(buffer))
+    }
+
+    pub(crate) fn get_free_page(&mut self, table_name: &str, size: usize) -> Result<&mut Page> {
+        let max_pages = 1000;
+
+        // First, find a page ID that has space or doesn't exist
+        let mut target_page_id = None;
+
+        for page_id in 0..max_pages {
+            let page_exists = self
+                .buffer_pool
+                .get(table_name)
+                .map(|pages| pages.contains_key(&page_id))
+                .unwrap_or(false);
+
+            if page_exists {
+                // Check if existing page has space (read-only check)
+                let has_space = self
+                    .buffer_pool
+                    .get(table_name)
+                    .unwrap()
+                    .get(&page_id)
+                    .unwrap()
+                    .free_space()
+                    > size;
+
+                if has_space {
+                    target_page_id = Some(page_id);
+                    break;
+                }
+            } else {
+                // Page doesn't exist - we can use this ID
+                target_page_id = Some(page_id);
+                break;
+            }
+        }
+
+        let page_id = target_page_id.ok_or_else(|| miette!("No free page available."))?;
+
+        // Now handle the specific page
+        let page_exists = self
+            .buffer_pool
+            .get(table_name)
+            .map(|pages| pages.contains_key(&page_id))
+            .unwrap_or(false);
+
+        if !page_exists {
+            // Try to load from file, or create new page
+            match self.load_page_from_file(table_name, page_id) {
+                Ok(loaded_page) => {
+                    self.buffer_pool
+                        .entry(table_name.to_string())
+                        .or_default()
+                        .insert(page_id, loaded_page);
+                }
+                Err(_) => {
+                    // Create new page
+                    let new_page = Page::new(page_id, PageType::Table);
+                    self.buffer_pool
+                        .entry(table_name.to_string())
+                        .or_default()
+                        .insert(page_id, new_page);
+                }
+            }
+        }
+
+        // Return mutable reference to the page
+        Ok(self
+            .buffer_pool
+            .get_mut(table_name)
+            .unwrap()
+            .get_mut(&page_id)
+            .unwrap())
+    }
+
+    pub(crate) fn save_page(&mut self, table_name: &str, page_id: PageId) -> Result<()> {
+        let page = self.get_page(table_name, page_id)?;
+
+        let mut file = File::create(format!("./db/{table_name}.table")).into_diagnostic()?;
+
+        let offset = (page_id as usize) * PAGE_SIZE;
+        file.seek(SeekFrom::Start(offset as u64))
+            .into_diagnostic()?;
+        file.write_all(&page.to_bytes()).into_diagnostic()?;
+
+        Ok(())
     }
 }
