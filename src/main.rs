@@ -1,7 +1,7 @@
 use miette::{IntoDiagnostic, Result};
-use rust_database::database::Database;
+use scuttle_db::database::Database;
 
-use rust_database::table::{ColumnDefinition, DataType, Schema};
+use scuttle_db::table::{ColumnDefinition, DataType, Schema};
 
 fn main() -> Result<()> {
     // Delete to start from fresh right now
