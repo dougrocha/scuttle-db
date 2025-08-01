@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-use crate::page::{PAGE_SIZE, Page, PageId, PageType};
+use crate::page::{Page, PageId, PageType};
 
 #[derive(Debug)]
 pub struct TableFile {
@@ -58,8 +58,8 @@ impl BufferManager {
     fn load_page_from_file(&self, table_name: &str, page_id: PageId) -> Result<Page> {
         let mut file = File::open(format!("./db/{table_name}.table")).into_diagnostic()?;
 
-        let mut buffer: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
-        let offset = (page_id as usize) * PAGE_SIZE;
+        let mut buffer: [u8; Page::SIZE] = [0; Page::SIZE];
+        let offset = (page_id as usize) * Page::SIZE;
         file.seek(SeekFrom::Start(offset as u64))
             .into_diagnostic()?;
         file.read_exact(&mut buffer).into_diagnostic()?;
@@ -145,7 +145,7 @@ impl BufferManager {
 
         let mut file = File::create(format!("./db/{table_name}.table")).into_diagnostic()?;
 
-        let offset = (page_id as usize) * PAGE_SIZE;
+        let offset = (page_id as usize) * Page::SIZE;
         file.seek(SeekFrom::Start(offset as u64))
             .into_diagnostic()?;
         file.write_all(&page.to_bytes()).into_diagnostic()?;

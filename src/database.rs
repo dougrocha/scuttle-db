@@ -8,7 +8,8 @@ use crate::{
     DatabaseError,
     buffer_manager::BufferManager,
     page::{ItemId, PageHeader, PageId},
-    table::{Relation, Row, Schema},
+    parser::{ColumnList, ExecutionPlan, SqlParser},
+    table::{Relation, Row, Schema, Value},
 };
 
 #[derive(Debug)]
@@ -121,7 +122,7 @@ impl Database {
         let item_id = free_page.add_data(&encoded_data)?;
 
         // Note: save_page method needs to be implemented in BufferManager
-        // self.buffer_manager.save_page(table_name, page_id)?;
+        self.buffer_manager.save_page(table_name, page_id)?;
 
         Ok((page_id, item_id))
     }
@@ -163,5 +164,64 @@ impl Database {
         }
 
         Ok(found_rows)
+    }
+
+    pub fn execute_query(&mut self, query: &str) -> Result<Vec<Row>, DatabaseError> {
+        let mut parser = SqlParser::new(query);
+        let statement = parser
+            .parse()
+            .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {}", e)))?;
+
+        let plan = ExecutionPlan::from_statement(statement)
+            .map_err(|e| DatabaseError::InvalidQuery(format!("Plan error: {}", e)))?;
+
+        self.execute_plan(plan)
+    }
+
+    fn execute_plan(&mut self, plan: ExecutionPlan) -> Result<Vec<Row>, DatabaseError> {
+        match plan {
+            ExecutionPlan::TableScan {
+                table_name,
+                columns,
+            } => {
+                let all_rows = self.get_rows(&table_name)?;
+
+                match columns {
+                    ColumnList::All => Ok(all_rows),
+                    ColumnList::Columns(column_names) => {
+                        let table = self.get_table(&table_name)?;
+                        let column_indices: Result<Vec<usize>, DatabaseError> = column_names
+                            .iter()
+                            .map(|col_name| {
+                                table
+                                    .schema
+                                    .columns
+                                    .iter()
+                                    .position(|col| col.name == *col_name)
+                                    .ok_or_else(|| {
+                                        DatabaseError::InvalidQuery(format!(
+                                            "Column '{}' not found in table '{}'",
+                                            col_name, table_name
+                                        ))
+                                    })
+                            })
+                            .collect();
+
+                        let indices = column_indices?;
+
+                        let projected_rows: Vec<Row> = all_rows
+                            .into_iter()
+                            .map(|row| {
+                                let projected_values: Vec<Value> =
+                                    indices.iter().map(|&idx| row.values[idx].clone()).collect();
+                                Row::new(projected_values)
+                            })
+                            .collect();
+
+                        Ok(projected_rows)
+                    }
+                }
+            }
+        }
     }
 }
