@@ -6,7 +6,10 @@ use std::{
     path::PathBuf,
 };
 
-use crate::page::{Page, PageId, PageType};
+use crate::{
+    Serializable,
+    page::{Page, PageId, PageType},
+};
 
 #[derive(Debug)]
 pub struct TableFile {
@@ -70,7 +73,7 @@ impl BufferManager {
     pub(crate) fn get_free_page(&mut self, table_name: &str, size: usize) -> Result<&mut Page> {
         let max_pages = 1000;
 
-        // First, find a page ID that has space or doesn't exist
+        // Find a page ID that has space or does not exist
         let mut target_page_id = None;
 
         for page_id in 0..max_pages {
@@ -81,7 +84,7 @@ impl BufferManager {
                 .unwrap_or(false);
 
             if page_exists {
-                // Check if existing page has space (read-only check)
+                // Check if existing page has space
                 let has_space = self
                     .buffer_pool
                     .get(table_name)
@@ -96,7 +99,7 @@ impl BufferManager {
                     break;
                 }
             } else {
-                // Page doesn't exist - we can use this ID
+                // Page does not exist so we use the last page ID
                 target_page_id = Some(page_id);
                 break;
             }
@@ -104,7 +107,6 @@ impl BufferManager {
 
         let page_id = target_page_id.ok_or_else(|| miette!("No free page available."))?;
 
-        // Now handle the specific page
         let page_exists = self
             .buffer_pool
             .get(table_name)
@@ -112,7 +114,6 @@ impl BufferManager {
             .unwrap_or(false);
 
         if !page_exists {
-            // Try to load from file, or create new page
             match self.load_page_from_file(table_name, page_id) {
                 Ok(loaded_page) => {
                     self.buffer_pool
@@ -131,7 +132,6 @@ impl BufferManager {
             }
         }
 
-        // Return mutable reference to the page
         Ok(self
             .buffer_pool
             .get_mut(table_name)
