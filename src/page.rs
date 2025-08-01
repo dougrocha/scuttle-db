@@ -114,8 +114,10 @@ impl ItemPointer {
     pub fn mark_deleted(&mut self) {
         self.flags |= Self::DELETED_FLAG;
     }
+}
 
-    pub(crate) fn to_bytes(self) -> [u8; Self::SIZE] {
+impl Serializable<{ ItemPointer::SIZE }> for ItemPointer {
+    fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut data = [0; Self::SIZE];
         data[0..2].copy_from_slice(&self.offset.to_le_bytes());
         data[2..4].copy_from_slice(&self.length.to_le_bytes());
@@ -123,12 +125,12 @@ impl ItemPointer {
         data
     }
 
-    pub(crate) fn from_bytes(data: [u8; Self::SIZE]) -> Self {
+    fn from_bytes(data: [u8; Self::SIZE]) -> Self {
         let offset = u16::from_le_bytes(data[0..2].try_into().unwrap());
         let length = u16::from_le_bytes(data[2..4].try_into().unwrap());
         let flags = data[4];
 
-        Self {
+        ItemPointer {
             offset,
             length,
             flags,
@@ -151,28 +153,6 @@ impl Page {
         Self {
             header,
             data: [0; Page::SIZE - PageHeader::SIZE],
-        }
-    }
-
-    pub(crate) fn to_bytes(&self) -> [u8; Page::SIZE] {
-        let mut data = [0; Page::SIZE];
-        data[0..PageHeader::SIZE].copy_from_slice(&self.header.to_bytes());
-
-        data[PageHeader::SIZE..].copy_from_slice(&self.data);
-
-        data
-    }
-
-    pub(crate) fn from_bytes(data: [u8; Page::SIZE]) -> Self {
-        let header_data: [u8; PageHeader::SIZE] = data[0..PageHeader::SIZE].try_into().unwrap();
-        let header = PageHeader::from_bytes(header_data);
-
-        let mut page_data = [0; Page::SIZE - PageHeader::SIZE];
-        page_data.copy_from_slice(&data[PageHeader::SIZE..]);
-
-        Self {
-            header,
-            data: page_data,
         }
     }
 
@@ -238,6 +218,31 @@ impl Page {
             .chunks_exact(ItemPointer::SIZE)
             .take(self.header.item_count as usize)
             .map(|chunk| ItemPointer::from_bytes(chunk.try_into().unwrap()))
+    }
+}
+
+impl Serializable<{ Page::SIZE }> for Page {
+    fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let this = &self;
+        let mut data = [0; Page::SIZE];
+        data[0..PageHeader::SIZE].copy_from_slice(&this.header.to_bytes());
+
+        data[PageHeader::SIZE..].copy_from_slice(&this.data);
+
+        data
+    }
+
+    fn from_bytes(data: [u8; Self::SIZE]) -> Self {
+        let header_data: [u8; PageHeader::SIZE] = data[0..PageHeader::SIZE].try_into().unwrap();
+        let header = PageHeader::from_bytes(header_data);
+
+        let mut page_data = [0; Page::SIZE - PageHeader::SIZE];
+        page_data.copy_from_slice(&data[PageHeader::SIZE..]);
+
+        Page {
+            header,
+            data: page_data,
+        }
     }
 }
 
