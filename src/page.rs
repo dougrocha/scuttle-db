@@ -1,6 +1,6 @@
 use miette::Result;
 
-pub const PAGE_SIZE: usize = 8192;
+use crate::Serializable;
 
 pub type PageId = u32;
 pub type ItemId = u16;
@@ -31,35 +31,38 @@ pub struct PageHeader {
 
 impl PageHeader {
     // Follow Postgres Size
-    pub const SIZE: u16 = 24;
+    pub const SIZE: usize = 24;
 
     pub fn new(page_id: PageId, page_type: PageType) -> Self {
         Self {
             page_id,
             page_type,
-            lower: Self::SIZE,
-            upper: PAGE_SIZE as u16,
-            special: PAGE_SIZE as u16,
+            lower: Self::SIZE as u16,
+            upper: Page::SIZE as u16,
+            special: Page::SIZE as u16,
             item_count: 0,
         }
     }
+}
 
-    pub(crate) fn to_bytes(&self) -> [u8; Self::SIZE as usize] {
-        let mut data = [0; Self::SIZE as usize];
-        data[0..4].copy_from_slice(&self.page_id.to_le_bytes());
-        data[4] = match self.page_type {
+impl Serializable<{ PageHeader::SIZE }> for PageHeader {
+    fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let this = &self;
+        let mut data = [0; PageHeader::SIZE];
+        data[0..4].copy_from_slice(&this.page_id.to_le_bytes());
+        data[4] = match this.page_type {
             PageType::Table => 0,
             PageType::Catalog => 1,
             _ => panic!("Unsupported page type"),
         };
-        data[5..7].copy_from_slice(&self.lower.to_le_bytes());
-        data[7..9].copy_from_slice(&self.upper.to_le_bytes());
-        data[9..11].copy_from_slice(&self.item_count.to_le_bytes());
-        data[11..13].copy_from_slice(&self.special.to_le_bytes());
+        data[5..7].copy_from_slice(&this.lower.to_le_bytes());
+        data[7..9].copy_from_slice(&this.upper.to_le_bytes());
+        data[9..11].copy_from_slice(&this.item_count.to_le_bytes());
+        data[11..13].copy_from_slice(&this.special.to_le_bytes());
         data
     }
 
-    pub(crate) fn from_bytes(data: [u8; Self::SIZE as usize]) -> Self {
+    fn from_bytes(data: [u8; Self::SIZE]) -> Self {
         let page_id = u32::from_le_bytes(data[0..4].try_into().unwrap());
         let page_type = match data[4] {
             0 => PageType::Table,
@@ -72,7 +75,7 @@ impl PageHeader {
         let item_count = u16::from_le_bytes(data[9..11].try_into().unwrap());
         let special = u16::from_le_bytes(data[11..13].try_into().unwrap());
 
-        Self {
+        PageHeader {
             page_id,
             page_type,
             lower,
@@ -136,35 +139,36 @@ impl ItemPointer {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Page {
     pub header: PageHeader,
-    pub data: [u8; PAGE_SIZE - PageHeader::SIZE as usize],
+    pub data: [u8; Page::SIZE - PageHeader::SIZE],
 }
 
 impl Page {
+    pub const SIZE: usize = 8192;
+
     pub fn new(page_id: PageId, page_type: PageType) -> Self {
         let header = PageHeader::new(page_id, page_type);
 
         Self {
             header,
-            data: [0; PAGE_SIZE - PageHeader::SIZE as usize],
+            data: [0; Page::SIZE - PageHeader::SIZE],
         }
     }
 
-    pub(crate) fn to_bytes(&self) -> [u8; PAGE_SIZE] {
-        let mut data = [0; PAGE_SIZE];
-        data[0..PageHeader::SIZE as usize].copy_from_slice(&self.header.to_bytes());
+    pub(crate) fn to_bytes(&self) -> [u8; Page::SIZE] {
+        let mut data = [0; Page::SIZE];
+        data[0..PageHeader::SIZE].copy_from_slice(&self.header.to_bytes());
 
-        data[PageHeader::SIZE as usize..].copy_from_slice(&self.data);
+        data[PageHeader::SIZE..].copy_from_slice(&self.data);
 
         data
     }
 
-    pub(crate) fn from_bytes(data: [u8; PAGE_SIZE]) -> Self {
-        let header_data: [u8; PageHeader::SIZE as usize] =
-            data[0..PageHeader::SIZE as usize].try_into().unwrap();
+    pub(crate) fn from_bytes(data: [u8; Page::SIZE]) -> Self {
+        let header_data: [u8; PageHeader::SIZE] = data[0..PageHeader::SIZE].try_into().unwrap();
         let header = PageHeader::from_bytes(header_data);
 
-        let mut page_data = [0; PAGE_SIZE - PageHeader::SIZE as usize];
-        page_data.copy_from_slice(&data[PageHeader::SIZE as usize..]);
+        let mut page_data = [0; Page::SIZE - PageHeader::SIZE];
+        page_data.copy_from_slice(&data[PageHeader::SIZE..]);
 
         Self {
             header,
@@ -179,7 +183,7 @@ impl Page {
         }
 
         self.header.upper -= data.len() as u16;
-        let data_offset = self.header.upper as usize - PageHeader::SIZE as usize;
+        let data_offset = self.header.upper as usize - PageHeader::SIZE;
         self.data[data_offset..data_offset + data.len()].copy_from_slice(data);
 
         let item_pointer = ItemPointer::new(self.header.upper, data.len() as u16);
@@ -201,7 +205,7 @@ impl Page {
             .nth(item_id as usize)
             .ok_or(miette::miette!("Item not found."))?;
 
-        let start = item_pointer.offset as usize - PageHeader::SIZE as usize;
+        let start = item_pointer.offset as usize - PageHeader::SIZE;
         let end = start + item_pointer.length as usize;
 
         Ok(&self.data[start..end])
@@ -248,8 +252,8 @@ mod test {
         let page = Page::new(page_id, page_type);
         assert_eq!(page.header.page_id, page_id);
         assert_eq!(page.header.page_type, page_type);
-        assert_eq!(page.header.lower, PageHeader::SIZE);
-        assert_eq!(page.header.upper, PAGE_SIZE as u16);
+        assert_eq!(page.header.lower, PageHeader::SIZE as u16);
+        assert_eq!(page.header.upper, Page::SIZE as u16);
     }
 
     #[test]
@@ -263,9 +267,9 @@ mod test {
 
         assert_eq!(
             page.header.lower as usize,
-            PageHeader::SIZE as usize + ItemPointer::SIZE
+            PageHeader::SIZE + ItemPointer::SIZE
         );
-        assert_eq!(page.header.upper, PAGE_SIZE as u16 - data.len() as u16);
+        assert_eq!(page.header.upper, Page::SIZE as u16 - data.len() as u16);
         assert_eq!(page.header.item_count, 1);
 
         let item_pointer = page.item_pointers().next().unwrap();
@@ -275,7 +279,7 @@ mod test {
 
         assert_eq!(
             page.header.lower as usize,
-            PageHeader::SIZE as usize + ItemPointer::SIZE
+            PageHeader::SIZE + ItemPointer::SIZE
         );
 
         let item = page.get_item(item_id).expect("Item to exist");
@@ -309,7 +313,7 @@ mod test {
     #[test]
     pub fn test_add_without_enough_space() {
         let mut page = Page::new(0, PageType::Table);
-        let data = vec![0u8; PAGE_SIZE];
+        let data = vec![0u8; Page::SIZE];
 
         let item_id_res = page.add_data(&data);
 
@@ -378,14 +382,14 @@ mod test {
         let mut header = PageHeader::new(page_id, page_type);
         header.item_count += 1;
 
-        let mut page = [0u8; PAGE_SIZE];
-        page[0..PageHeader::SIZE as usize].copy_from_slice(&header.to_bytes());
+        let mut page = [0u8; Page::SIZE];
+        page[0..PageHeader::SIZE].copy_from_slice(&header.to_bytes());
 
         let data = b"testing page data";
-        let data_offset = header.upper as usize - PageHeader::SIZE as usize;
+        let data_offset = header.upper as usize - PageHeader::SIZE;
         page[data_offset..data_offset + data.len()].copy_from_slice(data);
 
-        let item_pointer = ItemPointer::new((PAGE_SIZE - data.len()) as u16, data.len() as u16);
+        let item_pointer = ItemPointer::new((Page::SIZE - data.len()) as u16, data.len() as u16);
         let item_pointer_bytes = item_pointer.to_bytes();
         page[header.lower as usize..header.lower as usize + ItemPointer::SIZE]
             .copy_from_slice(&item_pointer_bytes);

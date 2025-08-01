@@ -19,6 +19,28 @@ pub enum Statement {
     Delete,
 }
 
+#[derive(Debug)]
+pub enum ExecutionPlan {
+    TableScan {
+        table_name: String,
+        columns: ColumnList,
+    },
+}
+
+impl ExecutionPlan {
+    pub fn from_statement(statement: Statement) -> Result<ExecutionPlan> {
+        match statement {
+            Statement::Select { columns, table } => {
+                Ok(ExecutionPlan::TableScan {
+                    table_name: table,
+                    columns,
+                })
+            }
+            _ => Err(miette!("Unsupported statement for execution plan")),
+        }
+    }
+}
+
 pub struct SqlParser<'a> {
     lexer: Peekable<Lexer<'a>>,
 }

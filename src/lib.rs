@@ -11,3 +11,8 @@ pub mod table;
 pub use error::DatabaseError;
 
 pub const KEYWORDS: &[&str] = &["SELECT", "FROM", "WHERE", "INSERT", "CREATE", "TABLE"];
+
+pub(crate) trait Serializable<const N: usize>: Sized {
+    fn to_bytes(&self) -> [u8; N];
+    fn from_bytes(data: [u8; N]) -> Self;
+}
