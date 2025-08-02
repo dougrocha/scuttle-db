@@ -84,7 +84,7 @@ impl Database {
             let path = entry.path();
 
             if path.extension().and_then(|s| s.to_str()) == Some("table") {
-                let mut file = File::open(&path)?;
+                let _file = File::open(&path)?;
                 // TODO: Fix this decode from file
                 // let table: Relation = decode_from_std_read(&mut file, bincode::config::standard())?;
 
@@ -170,10 +170,10 @@ impl Database {
         let mut parser = SqlParser::new(query);
         let statement = parser
             .parse()
-            .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {}", e)))?;
+            .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))?;
 
         let plan = ExecutionPlan::from_statement(statement)
-            .map_err(|e| DatabaseError::InvalidQuery(format!("Plan error: {}", e)))?;
+            .map_err(|e| DatabaseError::InvalidQuery(format!("Plan error: {e}")))?;
 
         self.execute_plan(plan)
     }
@@ -183,6 +183,7 @@ impl Database {
             ExecutionPlan::TableScan {
                 table_name,
                 columns,
+                r#where: _,
             } => {
                 let all_rows = self.get_rows(&table_name)?;
 
@@ -200,8 +201,7 @@ impl Database {
                                     .position(|col| col.name == *col_name)
                                     .ok_or_else(|| {
                                         DatabaseError::InvalidQuery(format!(
-                                            "Column '{}' not found in table '{}'",
-                                            col_name, table_name
+                                            "Column '{col_name}' not found in table '{table_name}'",
                                         ))
                                     })
                             })
