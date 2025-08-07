@@ -1,6 +1,6 @@
 use miette::{Result, miette};
 
-use std::iter::Peekable;
+use std::{fmt, iter::Peekable};
 
 use crate::lexer::{Lexer, Token};
 
@@ -12,9 +12,17 @@ pub enum LiteralValue {
 
 #[derive(Debug, PartialEq)]
 pub enum BinaryOperator {
-    AND,
-    OR,
-    EQUAL,
+    Equal,
+    NotEqual,
+}
+
+impl BinaryOperator {
+    fn precedence(&self) -> u8 {
+        match self {
+            BinaryOperator::Equal => 0,
+            BinaryOperator::NotEqual => 0,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -26,6 +34,21 @@ pub enum Expression {
     },
     Column(String),
     Literal(LiteralValue),
+}
+
+impl fmt::Display for Expression {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Expression::BinaryOp { left, op, right } => {
+                write!(f, "({left} {op:?} {right})")
+            }
+            Expression::Column(name) => write!(f, "{name}"),
+            Expression::Literal(value) => match value {
+                LiteralValue::Number(num) => write!(f, "{num}"),
+                LiteralValue::String(s) => write!(f, "\"{s}\""),
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -117,9 +140,12 @@ impl<'a> SqlParser<'a> {
 
         let r#where: Option<Expression> = match self.expect_keyword("WHERE") {
             Ok(_) => {
-                let _expression = self.parse_where_expression();
+                let expression = match self.parse_where_expression(0) {
+                    Ok(expr) => expr,
+                    Err(e) => panic!("Failed to parse where expression: {e}"),
+                };
 
-                None
+                Some(expression)
             }
             Err(_) => None,
         };
@@ -156,12 +182,50 @@ impl<'a> SqlParser<'a> {
         Ok(ColumnList::Columns(columns))
     }
 
-    fn parse_where_expression(&mut self) -> Option<Expression> {
-        let next = self.lexer.next()?;
+    fn parse_where_expression(&mut self, min_prec: u8) -> Result<Expression> {
+        let mut lhs = self.parse_primary()?;
 
-        dbg!(next.unwrap());
+        while let Ok(op) = self.peek_binary_op() {
+            if op.precedence() < min_prec {
+                break;
+            }
+            // consume op
+            self.lexer.next();
 
-        None
+            let rhs = self.parse_where_expression(op.precedence() + 1)?;
+            lhs = Expression::BinaryOp {
+                left: Box::new(lhs),
+                op,
+                right: Box::new(rhs),
+            };
+        }
+
+        Ok(lhs)
+    }
+
+    fn parse_primary(&mut self) -> Result<Expression> {
+        match self.lexer.next() {
+            Some(Ok(Token::Identifier(identifier))) => {
+                Ok(Expression::Column(identifier.to_string()))
+            }
+            Some(Ok(Token::Number(num))) => Ok(Expression::Literal(LiteralValue::Number(num))),
+            Some(Ok(Token::String(s))) => {
+                Ok(Expression::Literal(LiteralValue::String(s.to_string())))
+            }
+            Some(Ok(Token::Asterisk)) => Ok(Expression::Column("*".to_string())),
+            token => Err(miette!("Expected primary expression, found: {:?}", token)),
+        }
+    }
+
+    fn peek_binary_op(&mut self) -> Result<BinaryOperator> {
+        match self.lexer.peek() {
+            Some(Ok(Token::Equal)) => Ok(BinaryOperator::Equal),
+            Some(Ok(Token::NotEqual)) => Ok(BinaryOperator::NotEqual),
+            Some(Ok(Token::Identifier(identifier))) => {
+                Err(miette!("Unexpected identifier: {:?}", identifier))
+            }
+            _ => Err(miette!("Expected binary operator, found none")),
+        }
     }
 
     fn expect_keyword(&mut self, expected: &str) -> Result<()> {
@@ -228,8 +292,8 @@ mod tests {
                 assert_eq!(
                     r#where,
                     Some(Expression::BinaryOp {
-                        left: Box::new(Expression::Literal(LiteralValue::String("id".to_string()))),
-                        op: BinaryOperator::EQUAL,
+                        left: Box::new(Expression::Column("id".to_string())),
+                        op: BinaryOperator::Equal,
                         right: Box::new(Expression::Literal(LiteralValue::Number(1.))),
                     })
                 );

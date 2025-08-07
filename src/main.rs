@@ -5,7 +5,7 @@ use scuttle_db::table::{ColumnDefinition, DataType, Row, Schema, Value};
 
 fn main() -> Result<()> {
     // Delete to start from fresh right now
-    // std::fs::remove_dir_all("./db").ok();
+    std::fs::remove_dir_all("./db").ok();
 
     miette::set_hook(Box::new(|_| {
         Box::new(
