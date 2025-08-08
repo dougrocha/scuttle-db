@@ -3,8 +3,11 @@ pub(crate) mod buffer_manager;
 pub mod database;
 pub(crate) mod error;
 pub(crate) mod lexer;
+pub(crate) mod logical_planner;
 pub(crate) mod page;
 pub(crate) mod parser;
+pub(crate) mod physical_planner;
+pub(crate) mod planner_context;
 pub(crate) mod system_catalog;
 pub mod table;
 

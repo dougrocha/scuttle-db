@@ -4,32 +4,36 @@ use std::{fmt, iter::Peekable};
 
 use crate::lexer::{Lexer, Token};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LiteralValue {
     Number(f64),
     String(String),
 }
 
-#[derive(Debug, PartialEq)]
-pub enum BinaryOperator {
+#[derive(Debug, Clone, PartialEq)]
+pub enum Operator {
     Equal,
     NotEqual,
+    And,
+    Or,
 }
 
-impl BinaryOperator {
+impl Operator {
     fn precedence(&self) -> u8 {
         match self {
-            BinaryOperator::Equal => 0,
-            BinaryOperator::NotEqual => 0,
+            Operator::Equal => 4,
+            Operator::NotEqual => 4,
+            Operator::And => 3,
+            Operator::Or => 2,
         }
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
     BinaryOp {
         left: Box<Expression>,
-        op: BinaryOperator,
+        op: Operator,
         right: Box<Expression>,
     },
     Column(String),
@@ -51,13 +55,13 @@ impl fmt::Display for Expression {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ColumnList {
     All,
     Columns(Vec<String>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Statement {
     Create,
     Select {
@@ -217,10 +221,10 @@ impl<'a> SqlParser<'a> {
         }
     }
 
-    fn peek_binary_op(&mut self) -> Result<BinaryOperator> {
+    fn peek_binary_op(&mut self) -> Result<Operator> {
         match self.lexer.peek() {
-            Some(Ok(Token::Equal)) => Ok(BinaryOperator::Equal),
-            Some(Ok(Token::NotEqual)) => Ok(BinaryOperator::NotEqual),
+            Some(Ok(Token::Equal)) => Ok(Operator::Equal),
+            Some(Ok(Token::NotEqual)) => Ok(Operator::NotEqual),
             Some(Ok(Token::Identifier(identifier))) => {
                 Err(miette!("Unexpected identifier: {:?}", identifier))
             }
@@ -293,7 +297,7 @@ mod tests {
                     r#where,
                     Some(Expression::BinaryOp {
                         left: Box::new(Expression::Column("id".to_string())),
-                        op: BinaryOperator::Equal,
+                        op: Operator::Equal,
                         right: Box::new(Expression::Literal(LiteralValue::Number(1.))),
                     })
                 );
