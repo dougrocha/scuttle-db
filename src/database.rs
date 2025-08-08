@@ -7,9 +7,12 @@ use std::{
 use crate::{
     DatabaseError,
     buffer_manager::BufferManager,
+    logical_planner::LogicalPlan,
     page::{ItemId, PageHeader, PageId},
     parser::{ColumnList, ExecutionPlan, SqlParser},
-    table::{Relation, Row, Schema, Value},
+    physical_planner::PhysicalPlan,
+    planner_context::PlannerContext,
+    table::{Relation, Row, Schema, Table, Value},
 };
 
 #[derive(Debug)]
@@ -110,7 +113,7 @@ impl Database {
         // Get schema first (separate borrow scope)
         let encoded_data = {
             let table = self.get_table(table_name).unwrap();
-            table.schema.encode_row(row)
+            table.schema().encode_row(row)
         };
 
         // Now get the page and insert data
@@ -147,7 +150,7 @@ impl Database {
                     continue;
                 }
 
-                let offset = item_pointer.offset as usize - PageHeader::SIZE as usize;
+                let offset = item_pointer.offset as usize - PageHeader::SIZE;
                 let length = item_pointer.length as usize;
 
                 let item_data = &page.data[offset..offset + length];
@@ -155,7 +158,7 @@ impl Database {
                     .tables
                     .get(table_name)
                     .unwrap()
-                    .schema
+                    .schema()
                     .decode_row(item_data)
                     .expect("Row should be decoded");
 
@@ -172,10 +175,62 @@ impl Database {
             .parse()
             .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))?;
 
-        let plan = ExecutionPlan::from_statement(statement)
-            .map_err(|e| DatabaseError::InvalidQuery(format!("Plan error: {e}")))?;
+        let execution_plan = ExecutionPlan::from_statement(statement.clone())
+            .map_err(|e| DatabaseError::InvalidQuery(format!("Execution Plan error: {e}")))?;
 
-        self.execute_plan(plan)
+        let context = PlannerContext::new(self);
+
+        let logical_plan = LogicalPlan::from_statement(statement)
+            .map_err(|e| DatabaseError::InvalidQuery(format!("Logical Plan error: {e}")))?;
+
+        let physical_plan = PhysicalPlan::from_logical_plan(logical_plan, &context)
+            .map_err(|e| DatabaseError::InvalidQuery(format!("Physical Plan error: {e}")))?;
+
+        let new = self.execute_physical_plan(physical_plan);
+        dbg!(new);
+
+        self.execute_plan(execution_plan)
+    }
+
+    fn execute_physical_plan(&mut self, plan: PhysicalPlan) -> Result<Vec<Row>, DatabaseError> {
+        match plan {
+            PhysicalPlan::SeqScan { table_name } => {
+                let all_rows = self.get_rows(&table_name)?;
+
+                Ok(all_rows)
+            }
+            PhysicalPlan::Filter { predicate, input } => {
+                let input = self.execute_physical_plan(*input)?;
+
+                let filtered_rows: Vec<Row> = input
+                    .into_iter()
+                    .filter(|row| {
+                        // Filters rows here using the parsed expression
+                        todo!()
+                    })
+                    .collect();
+                Ok(filtered_rows)
+            }
+            PhysicalPlan::Projection {
+                columns_indices,
+                input,
+            } => {
+                let input = self.execute_physical_plan(*input)?;
+
+                let projected_rows: Vec<Row> = input
+                    .into_iter()
+                    .map(|row| {
+                        let projected_values: Vec<Value> = columns_indices
+                            .iter()
+                            .map(|&idx| row.values[idx].clone())
+                            .collect();
+                        Row::new(projected_values)
+                    })
+                    .collect();
+
+                Ok(projected_rows)
+            }
+        }
     }
 
     fn execute_plan(&mut self, plan: ExecutionPlan) -> Result<Vec<Row>, DatabaseError> {
@@ -195,7 +250,7 @@ impl Database {
                             .iter()
                             .map(|col_name| {
                                 table
-                                    .schema
+                                    .schema()
                                     .columns
                                     .iter()
                                     .position(|col| col.name == *col_name)

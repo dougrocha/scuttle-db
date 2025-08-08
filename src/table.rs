@@ -202,8 +202,8 @@ impl Row {
 
 #[derive(Debug, Clone)]
 pub struct Relation {
-    pub name: String,
-    pub schema: Schema,
+    name: String,
+    schema: Schema,
 }
 
 impl Relation {
