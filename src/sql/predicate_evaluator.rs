@@ -53,6 +53,18 @@ impl PredicateEvaluator {
                 }
                 self.evaluate(right, row, schema)
             }
+            Operator::GreaterThan => {
+                let left_result = self.evaluate_expression(left, row, schema)?;
+                let right_result = self.evaluate_expression(right, row, schema)?;
+
+                Ok(self.values_greater_than(&left_result, &right_result))
+            }
+            Operator::LessThan => {
+                let left_result = self.evaluate_expression(left, row, schema)?;
+                let right_result = self.evaluate_expression(right, row, schema)?;
+
+                Ok(self.values_less_than(&left_result, &right_result))
+            }
         }
     }
 
@@ -99,6 +111,30 @@ impl PredicateEvaluator {
             (Value::Float(a), Value::Integer(b)) => (a - *b as f64).abs() < f64::EPSILON,
 
             _ => false,
+        }
+    }
+
+    fn values_less_than(&self, left: &Value, right: &Value) -> bool {
+        match (left, right) {
+            (Value::Integer(a), Value::Integer(b)) => a < b,
+            (Value::Float(a), Value::Float(b)) => a < b,
+            (Value::Integer(a), Value::Float(b)) => (*a as f64) < *b,
+            (Value::Float(a), Value::Integer(b)) => *a < (*b as f64),
+            _ => {
+                panic!("Unsupported comparison for types: {left:?} and {right:?}");
+            }
+        }
+    }
+
+    fn values_greater_than(&self, left: &Value, right: &Value) -> bool {
+        match (left, right) {
+            (Value::Integer(a), Value::Integer(b)) => a > b,
+            (Value::Float(a), Value::Float(b)) => a > b,
+            (Value::Integer(a), Value::Float(b)) => (*a as f64) > *b,
+            (Value::Float(a), Value::Integer(b)) => *a > (*b as f64),
+            _ => {
+                panic!("Unsupported comparison for types: {left:?} and {right:?}");
+            }
         }
     }
 }

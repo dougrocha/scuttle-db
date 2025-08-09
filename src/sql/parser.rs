@@ -16,15 +16,19 @@ pub enum Operator {
     NotEqual,
     And,
     Or,
+    GreaterThan,
+    LessThan,
 }
 
 impl Operator {
     fn precedence(&self) -> u8 {
         match self {
-            Operator::Equal => 4,
-            Operator::NotEqual => 4,
-            Operator::And => 3,
             Operator::Or => 2,
+            Operator::And => 3,
+            Operator::NotEqual => 4,
+            Operator::Equal => 4,
+            Operator::LessThan => 5,
+            Operator::GreaterThan => 5,
         }
     }
 }
@@ -225,6 +229,8 @@ impl<'a> SqlParser<'a> {
         match self.lexer.peek() {
             Some(Ok(Token::Equal)) => Ok(Operator::Equal),
             Some(Ok(Token::NotEqual)) => Ok(Operator::NotEqual),
+            Some(Ok(Token::GreaterThan)) => Ok(Operator::GreaterThan),
+            Some(Ok(Token::LessThan)) => Ok(Operator::LessThan),
             Some(Ok(Token::Identifier(identifier))) => {
                 Err(miette!("Unexpected identifier: {:?}", identifier))
             }
@@ -298,6 +304,33 @@ mod tests {
                     Some(Expression::BinaryOp {
                         left: Box::new(Expression::Column("id".to_string())),
                         op: Operator::Equal,
+                        right: Box::new(Expression::Literal(LiteralValue::Number(1.))),
+                    })
+                );
+            }
+            _ => panic!("Expected Select statement"),
+        }
+    }
+
+    #[test]
+    fn test_parser_select_with_where_clause_gt() {
+        let mut parser = SqlParser::new("SELECT * FROM users WHERE id > 1");
+        let stmt = parser.parse().unwrap();
+
+        match stmt {
+            Statement::Select {
+                columns,
+                table,
+                r#where,
+            } => {
+                assert!(matches!(columns, ColumnList::All));
+                assert_eq!(table, "users".to_string());
+                assert!(r#where.is_some());
+                assert_eq!(
+                    r#where,
+                    Some(Expression::BinaryOp {
+                        left: Box::new(Expression::Column("id".to_string())),
+                        op: Operator::GreaterThan,
                         right: Box::new(Expression::Literal(LiteralValue::Number(1.))),
                     })
                 );

@@ -15,6 +15,8 @@ pub enum Token<'a> {
 
     Equal,
     NotEqual,
+    GreaterThan,
+    LessThan,
 
     LeftParen,
     RightParen,
@@ -130,6 +132,16 @@ impl<'a> Iterator for Lexer<'a> {
                 self.rest = &self.rest[1..];
                 self.position += char.len_utf8();
                 Ok(Token::Equal)
+            }
+            '<' => {
+                self.rest = &self.rest[1..];
+                self.position += char.len_utf8();
+                Ok(Token::LessThan)
+            }
+            '>' => {
+                self.rest = &self.rest[1..];
+                self.position += char.len_utf8();
+                Ok(Token::GreaterThan)
             }
             '!' => {
                 if self.rest.len() > 1 && self.rest.chars().nth(1) == Some('=') {
