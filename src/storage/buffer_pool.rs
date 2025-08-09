@@ -6,10 +6,9 @@ use std::{
     path::PathBuf,
 };
 
-use crate::{
-    Serializable,
-    page::{Page, PageId, PageType},
-};
+use crate::Serializable;
+
+use super::page::{Page, PageId, PageType};
 
 #[derive(Debug)]
 pub struct TableFile {

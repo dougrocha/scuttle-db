@@ -1,7 +1,7 @@
 use crate::{
     DatabaseError,
-    page::PageId,
-    table::{Row, Schema, Table, Value},
+    db::table::{Row, Schema, Table, Value},
+    storage::page::PageId,
 };
 
 #[derive(Debug)]
@@ -21,6 +21,12 @@ impl SystemCatalog {
             schema: Schema::new(Vec::new()),
             page_id: PageId::default(),
         }
+    }
+}
+
+impl Default for SystemCatalog {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

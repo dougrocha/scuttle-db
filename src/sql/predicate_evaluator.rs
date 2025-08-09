@@ -1,9 +1,8 @@
 use miette::{Result, miette};
 
-use crate::{
-    parser::{Expression, LiteralValue, Operator},
-    table::{Row, Schema, Value},
-};
+use crate::db::table::{Row, Schema, Value};
+
+use super::parser::{Expression, LiteralValue, Operator};
 
 pub struct PredicateEvaluator;
 
@@ -71,7 +70,7 @@ impl PredicateEvaluator {
 
                 row.get_value(column_index)
                     .ok_or_else(|| miette!("Row doesn't have value at index {}", column_index))
-                    .map(|v| v.clone())
+                    .cloned()
             }
             Expression::Literal(literal) => Ok(self.literal_to_value(literal)),
             Expression::BinaryOp { .. } => {

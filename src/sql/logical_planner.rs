@@ -1,6 +1,6 @@
 use miette::{Result, miette};
 
-use crate::parser::{ColumnList, Expression, Statement};
+use super::parser::{ColumnList, Expression, Statement};
 
 #[derive(Debug)]
 pub enum LogicalPlan {
@@ -68,7 +68,8 @@ impl LogicalPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{Expression, LiteralValue, Operator, SqlParser};
+
+    use crate::sql::parser::{Expression, LiteralValue, Operator, SqlParser};
 
     #[test]
     fn test_table_scan_only() {

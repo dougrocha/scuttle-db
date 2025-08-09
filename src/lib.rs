@@ -1,18 +1,12 @@
-pub(crate) mod btree;
-pub(crate) mod buffer_pool;
-pub mod database;
-pub(crate) mod error;
-pub(crate) mod lexer;
-pub(crate) mod logical_planner;
-pub(crate) mod page;
-pub(crate) mod parser;
-pub(crate) mod physical_planner;
-pub(crate) mod planner_context;
-pub(crate) mod predicate_evaluator;
-pub(crate) mod system_catalog;
-pub mod table;
+pub(crate) mod catalog;
+pub(crate) mod common;
+pub(crate) mod db;
+pub(crate) mod sql;
+pub(crate) mod storage;
 
-pub use error::DatabaseError;
+pub use common::error::DatabaseError;
+pub use db::database::Database;
+pub use db::table::*;
 
 pub const KEYWORDS: &[&str] = &["SELECT", "FROM", "WHERE", "INSERT", "CREATE", "TABLE"];
 

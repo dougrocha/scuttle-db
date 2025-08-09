@@ -1,7 +1,6 @@
 use miette::{IntoDiagnostic, Result};
-use scuttle_db::database::Database;
 
-use scuttle_db::table::{ColumnDefinition, DataType, Row, Schema, Value};
+use scuttle_db::{ColumnDefinition, DataType, Database, Row, Schema, Value};
 
 fn main() -> Result<()> {
     // Delete to start from fresh right now
@@ -75,21 +74,18 @@ fn main() -> Result<()> {
 
     println!("\n=== Testing Query Execution ===");
 
-    // Test SELECT * FROM users
     println!("\nExecuting: SELECT * FROM users");
     let query_result = db.execute_query("SELECT * FROM users")?;
     for row in &query_result {
         println!("  {row:?}");
     }
 
-    // Test SELECT id, name FROM users
-    println!("\nExecuting: SELECT id, name FROM users");
-    let query_result = db.execute_query("SELECT id, name FROM users")?;
+    println!("\nExecuting: SELECT id, name, age FROM users WHERE age < 33");
+    let query_result = db.execute_query("SELECT id, name, age FROM users WHERE age < 33")?;
     for row in &query_result {
         println!("  {row:?}");
     }
 
-    // Test SELECT name FROM users
     println!("\nExecuting: SELECT name FROM users WHERE name = 'Alice'");
     let query_result = db.execute_query("SELECT name FROM users WHERE name = 'Alice'")?;
 

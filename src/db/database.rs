@@ -6,14 +6,15 @@ use std::{
 
 use crate::{
     DatabaseError,
-    buffer_pool::BufferPool,
-    logical_planner::LogicalPlan,
-    page::{ItemId, PageHeader, PageId},
-    parser::SqlParser,
-    physical_planner::PhysicalPlan,
-    planner_context::PlannerContext,
-    predicate_evaluator::PredicateEvaluator,
-    table::{Relation, Row, Schema, Table, Value},
+    db::table::{Relation, Row, Schema, Table, Value},
+    sql::{
+        logical_planner::LogicalPlan, parser::SqlParser, physical_planner::PhysicalPlan,
+        planner_context::PlannerContext, predicate_evaluator::PredicateEvaluator,
+    },
+    storage::{
+        buffer_pool::BufferPool,
+        page::{ItemId, PageHeader, PageId},
+    },
 };
 
 #[derive(Debug)]
@@ -132,8 +133,6 @@ impl Database {
     }
 
     pub fn get_rows(&mut self, table_name: &str) -> Result<Vec<Row>, DatabaseError> {
-        println!("Getting rows from table: {table_name}");
-
         let mut found_rows: Vec<Row> = Vec::new();
         let max_pages = 1000; // To prevent infinite loops
 

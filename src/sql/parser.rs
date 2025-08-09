@@ -2,7 +2,7 @@ use miette::{Result, miette};
 
 use std::{fmt, iter::Peekable};
 
-use crate::lexer::{Lexer, Token};
+use super::lexer::{Lexer, Token};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralValue {

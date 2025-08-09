@@ -1,6 +1,6 @@
 use miette::{IntoDiagnostic, Result};
 
-use crate::{
+use crate::db::{
     database::Database,
     table::{Schema, Table},
 };

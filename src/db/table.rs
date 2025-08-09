@@ -18,7 +18,7 @@ pub enum DataType {
     Float,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Value {
     Integer(i64),
     Text(String),

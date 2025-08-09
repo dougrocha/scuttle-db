@@ -1,6 +1,6 @@
 use miette::Result;
 
-use crate::{logical_planner::LogicalPlan, parser::Expression, planner_context::PlannerContext};
+use super::{logical_planner::LogicalPlan, parser::Expression, planner_context::PlannerContext};
 
 #[derive(Debug)]
 pub enum PhysicalPlan {
