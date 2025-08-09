@@ -1,4 +1,4 @@
-use miette::Result;
+use miette::{IntoDiagnostic, Result};
 use std::{
     fs::File,
     path::{Path, PathBuf},
@@ -9,9 +9,10 @@ use crate::{
     buffer_manager::BufferManager,
     logical_planner::LogicalPlan,
     page::{ItemId, PageHeader, PageId},
-    parser::{ColumnList, ExecutionPlan, SqlParser},
+    parser::SqlParser,
     physical_planner::PhysicalPlan,
     planner_context::PlannerContext,
+    predicate_evaluator::PredicateEvaluator,
     table::{Relation, Row, Schema, Table, Value},
 };
 
@@ -169,47 +170,44 @@ impl Database {
         Ok(found_rows)
     }
 
-    pub fn execute_query(&mut self, query: &str) -> Result<Vec<Row>, DatabaseError> {
+    pub fn execute_query(&mut self, query: &str) -> Result<Vec<Row>> {
         let mut parser = SqlParser::new(query);
         let statement = parser
             .parse()
-            .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))?;
-
-        let execution_plan = ExecutionPlan::from_statement(statement.clone())
-            .map_err(|e| DatabaseError::InvalidQuery(format!("Execution Plan error: {e}")))?;
-
-        let context = PlannerContext::new(self);
+            .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))
+            .into_diagnostic()?;
 
         let logical_plan = LogicalPlan::from_statement(statement)
-            .map_err(|e| DatabaseError::InvalidQuery(format!("Logical Plan error: {e}")))?;
+            .map_err(|e| DatabaseError::InvalidQuery(format!("Logical Plan error: {e}")))
+            .into_diagnostic()?;
 
+        let context = PlannerContext::new(self);
         let physical_plan = PhysicalPlan::from_logical_plan(logical_plan, &context)
-            .map_err(|e| DatabaseError::InvalidQuery(format!("Physical Plan error: {e}")))?;
+            .map_err(|e| DatabaseError::InvalidQuery(format!("Physical Plan error: {e}")))
+            .into_diagnostic()?;
 
-        let new = self.execute_physical_plan(physical_plan);
-        dbg!(new);
-
-        self.execute_plan(execution_plan)
+        self.execute_physical_plan(physical_plan)
     }
 
-    fn execute_physical_plan(&mut self, plan: PhysicalPlan) -> Result<Vec<Row>, DatabaseError> {
+    fn execute_physical_plan(&mut self, plan: PhysicalPlan) -> Result<Vec<Row>> {
         match plan {
             PhysicalPlan::SeqScan { table_name } => {
-                let all_rows = self.get_rows(&table_name)?;
+                let all_rows = self.get_rows(&table_name).into_diagnostic()?;
 
                 Ok(all_rows)
             }
             PhysicalPlan::Filter { predicate, input } => {
-                let input = self.execute_physical_plan(*input)?;
+                let table_name = PhysicalPlan::extract_table_name(&input)?.to_string();
+                let input_rows = self.execute_physical_plan(*input)?;
 
-                let filtered_rows: Vec<Row> = input
+                let schema = self.get_table(&table_name).into_diagnostic()?.schema();
+
+                let evaluator = PredicateEvaluator {};
+
+                Ok(input_rows
                     .into_iter()
-                    .filter(|row| {
-                        // Filters rows here using the parsed expression
-                        todo!()
-                    })
-                    .collect();
-                Ok(filtered_rows)
+                    .filter(|row| evaluator.evaluate(&predicate, row, schema).unwrap_or(false))
+                    .collect())
             }
             PhysicalPlan::Projection {
                 columns_indices,
@@ -229,53 +227,6 @@ impl Database {
                     .collect();
 
                 Ok(projected_rows)
-            }
-        }
-    }
-
-    fn execute_plan(&mut self, plan: ExecutionPlan) -> Result<Vec<Row>, DatabaseError> {
-        match plan {
-            ExecutionPlan::TableScan {
-                table_name,
-                columns,
-                r#where: _,
-            } => {
-                let all_rows = self.get_rows(&table_name)?;
-
-                match columns {
-                    ColumnList::All => Ok(all_rows),
-                    ColumnList::Columns(column_names) => {
-                        let table = self.get_table(&table_name)?;
-                        let column_indices: Result<Vec<usize>, DatabaseError> = column_names
-                            .iter()
-                            .map(|col_name| {
-                                table
-                                    .schema()
-                                    .columns
-                                    .iter()
-                                    .position(|col| col.name == *col_name)
-                                    .ok_or_else(|| {
-                                        DatabaseError::InvalidQuery(format!(
-                                            "Column '{col_name}' not found in table '{table_name}'",
-                                        ))
-                                    })
-                            })
-                            .collect();
-
-                        let indices = column_indices?;
-
-                        let projected_rows: Vec<Row> = all_rows
-                            .into_iter()
-                            .map(|row| {
-                                let projected_values: Vec<Value> =
-                                    indices.iter().map(|&idx| row.values[idx].clone()).collect();
-                                Row::new(projected_values)
-                            })
-                            .collect();
-
-                        Ok(projected_rows)
-                    }
-                }
             }
         }
     }

@@ -77,27 +77,24 @@ fn main() -> Result<()> {
 
     // Test SELECT * FROM users
     println!("\nExecuting: SELECT * FROM users");
-    let query_result = db.execute_query("SELECT * FROM users").into_diagnostic()?;
+    let query_result = db.execute_query("SELECT * FROM users")?;
     for row in &query_result {
-        println!("  {:?}", row);
+        println!("  {row:?}");
     }
 
     // Test SELECT id, name FROM users
     println!("\nExecuting: SELECT id, name FROM users");
-    let query_result = db
-        .execute_query("SELECT id, name FROM users")
-        .into_diagnostic()?;
+    let query_result = db.execute_query("SELECT id, name FROM users")?;
     for row in &query_result {
-        println!("  {:?}", row);
+        println!("  {row:?}");
     }
 
     // Test SELECT name FROM users
-    println!("\nExecuting: SELECT name FROM users");
-    let query_result = db
-        .execute_query("SELECT name FROM users")
-        .into_diagnostic()?;
+    println!("\nExecuting: SELECT name FROM users WHERE name = 'Alice'");
+    let query_result = db.execute_query("SELECT name FROM users WHERE name = 'Alice'")?;
+
     for row in &query_result {
-        println!("  {:?}", row);
+        println!("  {row:?}");
     }
 
     Ok(())

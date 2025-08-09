@@ -30,7 +30,7 @@ impl PhysicalPlan {
                 }
             }
             LogicalPlan::Projection { columns, input } => {
-                let table_name = Self::extract_table_name(&input)?;
+                let table_name = LogicalPlan::extract_table_name(&input)?;
                 let schema = context.get_schema(table_name)?;
 
                 let columns_indices = columns
@@ -50,11 +50,11 @@ impl PhysicalPlan {
         Ok(plan)
     }
 
-    fn extract_table_name(plan: &LogicalPlan) -> Result<&str> {
+    pub fn extract_table_name(plan: &PhysicalPlan) -> Result<&str> {
         match plan {
-            LogicalPlan::TableScan { table_name } => Ok(table_name),
-            LogicalPlan::Filter { input, .. } => Self::extract_table_name(input),
-            LogicalPlan::Projection { input, .. } => Self::extract_table_name(input),
+            PhysicalPlan::SeqScan { table_name } => Ok(table_name),
+            PhysicalPlan::Filter { input, .. } => Self::extract_table_name(input),
+            PhysicalPlan::Projection { input, .. } => Self::extract_table_name(input),
         }
     }
 }

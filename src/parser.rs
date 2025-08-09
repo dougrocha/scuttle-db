@@ -10,7 +10,7 @@ pub enum LiteralValue {
     String(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Operator {
     Equal,
     NotEqual,

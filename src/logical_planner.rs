@@ -55,6 +55,14 @@ impl LogicalPlan {
 
         Ok(plan)
     }
+
+    pub fn extract_table_name(plan: &LogicalPlan) -> Result<&str> {
+        match plan {
+            LogicalPlan::TableScan { table_name } => Ok(table_name),
+            LogicalPlan::Filter { input, .. } => Self::extract_table_name(input),
+            LogicalPlan::Projection { input, .. } => Self::extract_table_name(input),
+        }
+    }
 }
 
 #[cfg(test)]
