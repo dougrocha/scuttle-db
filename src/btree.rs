@@ -257,7 +257,9 @@ where
             BTreeNode::LeafNode(leaf) => {
                 write!(f, "{}Leaf: [", indent)?;
                 for (i, (key, value)) in leaf.entries.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{:?}:{:?}", key, value)?;
                 }
                 writeln!(f, "]")
@@ -265,7 +267,9 @@ where
             BTreeNode::Internal(internal) => {
                 write!(f, "{}Internal: [", indent)?;
                 for (i, key) in internal.keys.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{:?}", key)?;
                 }
                 writeln!(f, "]")?;
@@ -305,11 +309,11 @@ mod tests {
     #[test]
     fn test_leaf_node_splitting() {
         let mut tree = BTree::new(3);
-        
+
         for i in 1..=6 {
             tree.insert(i, format!("value_{}", i));
         }
-        
+
         assert!(matches!(tree.root, Some(BTreeNode::Internal(_))));
     }
 
@@ -317,36 +321,37 @@ mod tests {
     fn test_multiple_insertions_maintain_order() {
         let mut tree = BTree::new(3);
         let values = vec![50, 30, 70, 20, 40, 60, 80, 10, 25, 35, 45];
-        
+
         for val in values {
             tree.insert(val, format!("value_{}", val));
         }
-        
+
         assert!(!tree.is_empty());
     }
 
     #[test]
     fn test_duplicate_insertions() {
         let mut tree = BTree::new(3);
-        
+
         tree.insert(10, "first".to_string());
         tree.insert(10, "second".to_string());
         tree.insert(20, "twenty".to_string());
         tree.insert(10, "third".to_string());
-        
+
         assert!(!tree.is_empty());
     }
     #[test]
     fn test_contains_key() {
         let mut tree = BTree::new(3);
-        
+
         tree.insert("key1".to_string(), "value1".to_string());
         tree.insert("key2".to_string(), "value2".to_string());
         tree.insert("key3".to_string(), "value3".to_string());
-        
+
         assert!(tree.contains_key(&"key1".to_string()));
         assert!(tree.contains_key(&"key2".to_string()));
         assert!(tree.contains_key(&"key3".to_string()));
         assert!(!tree.contains_key(&"key4".to_string()));
         assert!(!tree.contains_key(&"nonexistent".to_string()));
-    }}
+    }
+}

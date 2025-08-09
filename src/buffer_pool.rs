@@ -20,21 +20,21 @@ pub struct TableFile {
 }
 
 #[derive(Debug, Default)]
-pub struct BufferManager {
-    buffer_pool: HashMap<String, HashMap<PageId, Page>>,
+pub struct BufferPool {
+    pool: HashMap<String, HashMap<PageId, Page>>,
 }
 
-impl BufferManager {
+impl BufferPool {
     pub fn new() -> Self {
         Self {
-            buffer_pool: HashMap::new(),
+            pool: HashMap::new(),
         }
     }
 
     pub fn get_page(&mut self, table_name: &str, page_id: PageId) -> Result<&mut Page> {
         // Check if page exists in cache first
         let page_exists = self
-            .buffer_pool
+            .pool
             .get(table_name)
             .map(|pages| pages.contains_key(&page_id))
             .unwrap_or(false);
@@ -43,7 +43,7 @@ impl BufferManager {
             let page = self.load_page_from_file(table_name, page_id)?;
 
             // Insert into cache
-            self.buffer_pool
+            self.pool
                 .entry(table_name.to_string())
                 .or_default()
                 .insert(page_id, page);
@@ -51,7 +51,7 @@ impl BufferManager {
 
         // Return mutable reference to the cached page
         Ok(self
-            .buffer_pool
+            .pool
             .get_mut(table_name)
             .unwrap()
             .get_mut(&page_id)
@@ -78,7 +78,7 @@ impl BufferManager {
 
         for page_id in 0..max_pages {
             let page_exists = self
-                .buffer_pool
+                .pool
                 .get(table_name)
                 .map(|pages| pages.contains_key(&page_id))
                 .unwrap_or(false);
@@ -86,7 +86,7 @@ impl BufferManager {
             if page_exists {
                 // Check if existing page has space
                 let has_space = self
-                    .buffer_pool
+                    .pool
                     .get(table_name)
                     .unwrap()
                     .get(&page_id)
@@ -108,7 +108,7 @@ impl BufferManager {
         let page_id = target_page_id.ok_or_else(|| miette!("No free page available."))?;
 
         let page_exists = self
-            .buffer_pool
+            .pool
             .get(table_name)
             .map(|pages| pages.contains_key(&page_id))
             .unwrap_or(false);
@@ -116,7 +116,7 @@ impl BufferManager {
         if !page_exists {
             match self.load_page_from_file(table_name, page_id) {
                 Ok(loaded_page) => {
-                    self.buffer_pool
+                    self.pool
                         .entry(table_name.to_string())
                         .or_default()
                         .insert(page_id, loaded_page);
@@ -124,7 +124,7 @@ impl BufferManager {
                 Err(_) => {
                     // Create new page
                     let new_page = Page::new(page_id, PageType::Table);
-                    self.buffer_pool
+                    self.pool
                         .entry(table_name.to_string())
                         .or_default()
                         .insert(page_id, new_page);
@@ -133,7 +133,7 @@ impl BufferManager {
         }
 
         Ok(self
-            .buffer_pool
+            .pool
             .get_mut(table_name)
             .unwrap()
             .get_mut(&page_id)

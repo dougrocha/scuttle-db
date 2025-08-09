@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     DatabaseError,
-    buffer_manager::BufferManager,
+    buffer_pool::BufferPool,
     logical_planner::LogicalPlan,
     page::{ItemId, PageHeader, PageId},
     parser::SqlParser,
@@ -19,7 +19,7 @@ use crate::{
 #[derive(Debug)]
 pub struct Database {
     pub tables: std::collections::BTreeMap<String, Relation>,
-    pub buffer_manager: BufferManager,
+    pub buffer_manager: BufferPool,
 
     data_directory: PathBuf,
 }
@@ -31,7 +31,7 @@ impl Database {
 
         Self {
             tables: std::collections::BTreeMap::default(),
-            buffer_manager: BufferManager::new(),
+            buffer_manager: BufferPool::new(),
 
             data_directory: data_directory.as_ref().to_path_buf(),
         }

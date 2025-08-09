@@ -1,5 +1,5 @@
 pub(crate) mod btree;
-pub(crate) mod buffer_manager;
+pub(crate) mod buffer_pool;
 pub mod database;
 pub(crate) mod error;
 pub(crate) mod lexer;
