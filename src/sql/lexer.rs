@@ -37,10 +37,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn parse(&mut self) -> Vec<Token> {
-        todo!()
-    }
-
     fn skip_whitespace(&mut self) {
         let non_whitespace_pos = self
             .rest
