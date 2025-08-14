@@ -18,6 +18,12 @@ use crate::{
 };
 
 #[derive(Debug)]
+pub struct QueryResponse<'a> {
+    pub relation: &'a Relation,
+    pub rows: Vec<Row>,
+}
+
+#[derive(Debug)]
 pub struct Database {
     pub tables: std::collections::BTreeMap<String, Relation>,
     pub buffer_manager: BufferPool,
@@ -169,14 +175,14 @@ impl Database {
         Ok(found_rows)
     }
 
-    pub fn execute_query(&mut self, query: &str) -> Result<Vec<Row>> {
+    pub fn execute_query(&mut self, query: &str) -> Result<QueryResponse<'_>> {
         let mut parser = SqlParser::new(query);
         let statement = parser
             .parse()
             .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))
             .into_diagnostic()?;
 
-        let logical_plan = LogicalPlan::from_statement(statement)
+        let logical_plan = LogicalPlan::from_statement(statement.clone())
             .map_err(|e| DatabaseError::InvalidQuery(format!("Logical Plan error: {e}")))
             .into_diagnostic()?;
 
@@ -185,7 +191,13 @@ impl Database {
             .map_err(|e| DatabaseError::InvalidQuery(format!("Physical Plan error: {e}")))
             .into_diagnostic()?;
 
-        self.execute_physical_plan(physical_plan)
+        let rows = self.execute_physical_plan(physical_plan)?;
+        let table = self.get_table(statement.table_name()).unwrap();
+
+        Ok(QueryResponse {
+            relation: table,
+            rows,
+        })
     }
 
     fn execute_physical_plan(&mut self, plan: PhysicalPlan) -> Result<Vec<Row>> {

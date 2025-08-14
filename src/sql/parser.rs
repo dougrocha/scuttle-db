@@ -82,6 +82,16 @@ pub enum Statement {
     Delete,
 }
 
+impl Statement {
+    pub fn table_name(&self) -> &str {
+        match self {
+            Statement::Select { table, .. } => table,
+            Statement::Update { table, .. } => table,
+            _ => panic!("NOT SUPPORTED YET"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ExecutionPlan {
     TableScan {
