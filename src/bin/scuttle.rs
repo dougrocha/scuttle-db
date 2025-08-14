@@ -1,4 +1,6 @@
-use miette::{IntoDiagnostic, Result};
+use std::io::{BufRead, BufReader, Read, Write, stdin, stdout};
+
+use miette::{IntoDiagnostic, Result, miette};
 
 use scuttle_db::{ColumnDefinition, DataType, Database, Row, Schema, Value};
 
@@ -72,26 +74,61 @@ fn main() -> Result<()> {
     println!("Database created successfully!");
     println!("Tables: {:?}", db.tables.keys().collect::<Vec<_>>());
 
-    println!("\n=== Testing Query Execution ===");
+    let mut buf = String::new();
 
-    println!("\nExecuting: SELECT * FROM users");
-    let query_result = db.execute_query("SELECT * FROM users")?;
-    for row in &query_result {
-        println!("  {row:?}");
+    let mut stdin = stdin().lock();
+    let mut stdout = stdout().lock();
+
+    loop {
+        if buf.is_empty() {
+            stdout.write_all("DB: ".as_bytes()).into_diagnostic()?
+        } else {
+            stdout.write_all("*  ".as_bytes()).into_diagnostic()?;
+        }
+        stdout.flush().into_diagnostic()?;
+
+        let Ok(_) = stdin.read_line(&mut buf) else {
+            return Err(miette!("Input reading failed"));
+        };
+
+        let input = buf.trim();
+        if input == "exit" {
+            break;
+        }
+
+        let query_result = db.execute_query(input)?;
+
+        query_result.iter().for_each(|row| {
+            let _ = stdout
+                .write_all(format!("{:?}\n", row).as_bytes())
+                .into_diagnostic();
+        });
+
+        stdout.flush().into_diagnostic()?;
+        buf.clear();
     }
 
-    println!("\nExecuting: SELECT id, name, age FROM users WHERE age < 33");
-    let query_result = db.execute_query("SELECT id, name, age FROM users WHERE age < 33")?;
-    for row in &query_result {
-        println!("  {row:?}");
-    }
-
-    println!("\nExecuting: SELECT name FROM users WHERE name = 'Alice'");
-    let query_result = db.execute_query("SELECT name FROM users WHERE name = 'Alice'")?;
-
-    for row in &query_result {
-        println!("  {row:?}");
-    }
+    //
+    // println!("\n=== Testing Query Execution ===");
+    //
+    // println!("\nExecuting: SELECT * FROM users");
+    // let query_result = db.execute_query("SELECT * FROM users")?;
+    // for row in &query_result {
+    //     println!("  {row:?}");
+    // }
+    //
+    // println!("\nExecuting: SELECT id, name, age FROM users WHERE age < 33");
+    // let query_result = db.execute_query("SELECT id, name FROM users WHERE age < 33")?;
+    // for row in &query_result {
+    //     println!("  {row:?}");
+    // }
+    //
+    // println!("\nExecuting: SELECT name FROM users WHERE name = 'Alice'");
+    // let query_result = db.execute_query("SELECT name FROM users WHERE name = 'Alice'")?;
+    //
+    // for row in &query_result {
+    //     println!("  {row:?}");
+    // }
 
     Ok(())
 }
