@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Read, Write, stdin, stdout};
+use std::io::{BufRead, Write, stdin, stdout};
 
 use miette::{IntoDiagnostic, Result, miette};
 
@@ -98,37 +98,37 @@ fn main() -> Result<()> {
 
         let query_result = db.execute_query(input)?;
 
-        query_result.iter().for_each(|row| {
+        stdout
+            .write_all(format!("{: <8}", query_result.relation.name).as_bytes())
+            .into_diagnostic()?;
+
+        query_result.relation.schema.columns.iter().for_each(|col| {
             let _ = stdout
-                .write_all(format!("{:?}\n", row).as_bytes())
+                .write_all(format!(" | {: <8}", col.name).as_bytes())
                 .into_diagnostic();
+        });
+
+        let _ = stdout.write_all(b"\n").into_diagnostic();
+
+        query_result.rows.iter().enumerate().for_each(|(idx, row)| {
+            let _ = stdout
+                .write_all(format!("{: <8}", idx).as_bytes())
+                .into_diagnostic();
+
+            row.values.iter().for_each(|value| {
+                let _ = stdout
+                    .write_all(format!(" | {: <8}", value.to_string()).as_bytes())
+                    .into_diagnostic();
+            });
+
+            let _ = stdout.write_all(b"\n").into_diagnostic();
         });
 
         stdout.flush().into_diagnostic()?;
         buf.clear();
     }
 
-    //
-    // println!("\n=== Testing Query Execution ===");
-    //
-    // println!("\nExecuting: SELECT * FROM users");
-    // let query_result = db.execute_query("SELECT * FROM users")?;
-    // for row in &query_result {
-    //     println!("  {row:?}");
-    // }
-    //
-    // println!("\nExecuting: SELECT id, name, age FROM users WHERE age < 33");
-    // let query_result = db.execute_query("SELECT id, name FROM users WHERE age < 33")?;
-    // for row in &query_result {
-    //     println!("  {row:?}");
-    // }
-    //
-    // println!("\nExecuting: SELECT name FROM users WHERE name = 'Alice'");
-    // let query_result = db.execute_query("SELECT name FROM users WHERE name = 'Alice'")?;
-    //
-    // for row in &query_result {
-    //     println!("  {row:?}");
-    // }
+    println!("Exiting Scuttle");
 
     Ok(())
 }

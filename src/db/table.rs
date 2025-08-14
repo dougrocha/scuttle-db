@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use miette::{Result, miette};
 
 use crate::DatabaseError;
@@ -25,6 +27,18 @@ pub enum Value {
     Boolean(bool),
     Float(f64),
     Null,
+}
+
+impl Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Integer(i) => write!(f, "{}", i),
+            Value::Text(s) => write!(f, "{}", s),
+            Value::Boolean(b) => write!(f, "{}", b),
+            Value::Float(fl) => write!(f, "{}", fl),
+            Value::Null => write!(f, "NULL"),
+        }
+    }
 }
 
 impl Value {
