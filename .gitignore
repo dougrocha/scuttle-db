@@ -2,3 +2,10 @@
 # will have compiled files and executables
 debug
 target
+
+# Example databases (created by running examples)
+example_dbs/
+
+# Test databases (only at root, not src/db/*)
+/db
+*.db

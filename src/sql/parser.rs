@@ -3,24 +3,45 @@ use miette::{Result, miette};
 use std::{fmt, iter::Peekable};
 
 use super::lexer::{Lexer, Token};
+use crate::keyword::Keyword;
 
+/// A literal value in SQL (number or string).
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralValue {
+    /// Numeric literal
     Number(f64),
+
+    /// String literal
     String(String),
 }
 
+/// Binary comparison operators for WHERE clauses.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Operator {
+    /// Equality (=)
     Equal,
+
+    /// Inequality (!=)
     NotEqual,
+
+    /// Logical AND (not yet used)
     And,
+
+    /// Logical OR (not yet used)
     Or,
+
+    /// Greater than (>)
     GreaterThan,
+
+    /// Less than (<)
     LessThan,
 }
 
 impl Operator {
+    /// Returns the precedence level of this operator.
+    ///
+    /// Higher numbers = higher precedence. Used for parsing expressions
+    /// with correct operator associativity.
     fn precedence(&self) -> u8 {
         match self {
             Operator::Or => 2,
@@ -33,14 +54,26 @@ impl Operator {
     }
 }
 
+/// An expression in a WHERE clause.
+///
+/// Expressions form a tree structure representing the filtering logic.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
     BinaryOp {
+        /// Left operand
         left: Box<Expression>,
+
+        /// Operator
         op: Operator,
+
+        /// Right operand
         right: Box<Expression>,
     },
+
+    /// Column reference (e.g., `age`, `name`)
     Column(String),
+
+    /// Literal value (e.g., `25`, `'Alice'`)
     Literal(LiteralValue),
 }
 
@@ -59,30 +92,57 @@ impl fmt::Display for Expression {
     }
 }
 
+/// Column list in a SELECT statement.
 #[derive(Debug, Clone)]
 pub enum ColumnList {
+    /// SELECT * (all columns)
     All,
+
+    /// SELECT col1, col2, ... (specific columns)
     Columns(Vec<String>),
 }
 
+/// A SQL statement (top-level AST node).
+///
+/// Currently only SELECT is fully implemented.
 #[derive(Debug, Clone)]
 pub enum Statement {
+    /// CREATE statement (not yet implemented)
     Create,
+
+    /// SELECT statement
     Select {
+        /// Columns to select (* or specific list)
         columns: ColumnList,
+
+        /// Table to select from
         table: String,
+
+        /// Optional WHERE clause
         r#where: Option<Expression>,
     },
+
+    /// UPDATE statement (not yet implemented)
     Update {
+        /// Table to update
         table: String,
+
+        /// Columns to update
         columns: Vec<String>,
+
+        /// New values
         values: Vec<String>,
     },
+
+    /// INSERT statement (not yet implemented)
     Insert,
+
+    /// DELETE statement (not yet implemented)
     Delete,
 }
 
 impl Statement {
+    /// Extracts the table name from this statement.
     pub fn table_name(&self) -> &str {
         match self {
             Statement::Select { table, .. } => table,
@@ -92,51 +152,31 @@ impl Statement {
     }
 }
 
-#[derive(Debug)]
-pub enum ExecutionPlan {
-    TableScan {
-        table_name: String,
-        columns: ColumnList,
-        r#where: Option<Expression>,
-    },
-}
-
-impl ExecutionPlan {
-    pub fn from_statement(statement: Statement) -> Result<ExecutionPlan> {
-        match statement {
-            Statement::Select {
-                columns,
-                table,
-                r#where,
-            } => Ok(ExecutionPlan::TableScan {
-                table_name: table,
-                columns,
-                r#where,
-            }),
-            _ => Err(miette!("Unsupported statement for execution plan")),
-        }
-    }
-}
-
+/// SQL parser that converts tokens into an AST.
+///
+/// Uses recursive descent parsing with a peekable token stream.
 pub struct SqlParser<'a> {
+    /// Token stream from the lexer
     lexer: Peekable<Lexer<'a>>,
 }
 
 impl<'a> SqlParser<'a> {
+    /// Creates a new parser for the given SQL query string.
     pub fn new(query: &'a str) -> Self {
         Self {
             lexer: Lexer::new(query).peekable(),
         }
     }
 
+    /// Parses the query and returns the top-level AST node (Statement).
     pub fn parse(&mut self) -> Result<Statement> {
         let Some(Ok(token)) = self.lexer.peek() else {
             return Err(miette!("Error occured while parsing"));
         };
 
         let statement = match token {
-            Token::Keyword(keyword) => match *keyword {
-                "SELECT" => self.parse_select_statement()?,
+            Token::Keyword(keyword) => match keyword {
+                Keyword::Select => self.parse_select_statement()?,
                 _ => return Err(miette!("Unsupported keyword: {:?}", keyword)),
             },
             _ => return Err(miette!("Unexpected token: {:?}", token)),
@@ -146,17 +186,17 @@ impl<'a> SqlParser<'a> {
     }
 
     fn parse_select_statement(&mut self) -> Result<Statement> {
-        self.expect_keyword("SELECT")?;
+        self.expect_keyword(Keyword::Select)?;
 
         let columns = self.parse_column_list()?;
 
-        self.expect_keyword("FROM")?;
+        self.expect_keyword(Keyword::From)?;
         let table = match self.lexer.next() {
             Some(Ok(Token::Identifier(table_name))) => table_name.to_string(),
             _ => return Err(miette!("Expected table name after FROM")),
         };
 
-        let r#where: Option<Expression> = match self.expect_keyword("WHERE") {
+        let r#where: Option<Expression> = match self.expect_keyword(Keyword::Where) {
             Ok(_) => {
                 let expression = match self.parse_where_expression(0) {
                     Ok(expr) => expr,
@@ -248,12 +288,12 @@ impl<'a> SqlParser<'a> {
         }
     }
 
-    fn expect_keyword(&mut self, expected: &str) -> Result<()> {
+    fn expect_keyword(&mut self, expected: Keyword) -> Result<()> {
         match self.lexer.next() {
             Some(Ok(Token::Keyword(keyword))) if keyword == expected => Ok(()),
-            Some(Ok(token)) => Err(miette!("Expected '{}', found: {:?}", expected, token)),
+            Some(Ok(token)) => Err(miette!("Expected '{:?}', found: {:?}", expected, token)),
             Some(Err(e)) => Err(miette!("Lexer error: {:?}", e)),
-            None => Err(miette!("Expected '{}', found end of input", expected)),
+            None => Err(miette!("Expected '{:?}', found end of input", expected)),
         }
     }
 }

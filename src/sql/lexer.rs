@@ -1,34 +1,69 @@
+use std::str::FromStr;
+
 use miette::{Result, miette};
 
-use crate::KEYWORDS;
+use crate::keyword::Keyword;
 
+/// A token in the SQL language.
 #[derive(Debug, PartialEq)]
 pub enum Token<'a> {
-    Keyword(&'a str),
+    /// SQL keyword (SELECT, FROM, WHERE, etc.) - always uppercase
+    Keyword(Keyword),
+
+    /// Table name, column name, or other identifier
     Identifier(&'a str),
+
+    /// Numeric literal (integer or floating point)
     Number(f64),
+
+    /// String literal (quotes not included)
     String(&'a str),
 
+    /// Boolean
+    Boolean(bool),
+
+    /// Comma (,) - list separator
     Comma,
+
+    /// Asterisk (*) - wildcard
     Asterisk,
+
+    /// Semicolon (;) - statement terminator
     SemiColon,
 
+    /// Equal (=) - comparison
     Equal,
+
+    /// Not equal (!=) - comparison
     NotEqual,
+
+    /// Greater than (>) - comparison
     GreaterThan,
+
+    /// Less than (<) - comparison
     LessThan,
 
+    /// Left parenthesis - not yet used
     LeftParen,
+
+    /// Right parenthesis - not yet used
     RightParen,
 }
 
+/// SQL lexer that tokenizes a query string.
 pub(crate) struct Lexer<'a> {
+    /// The complete original query string
     pub whole: &'a str,
+
+    /// The remaining portion to tokenize
     pub rest: &'a str,
+
+    /// Current byte position
     pub position: usize,
 }
 
 impl<'a> Lexer<'a> {
+    /// Creates a new lexer for the given SQL query string.
     pub fn new(input: &'a str) -> Self {
         Self {
             whole: input,
@@ -37,6 +72,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Advances the lexer past any whitespace characters.
     fn skip_whitespace(&mut self) {
         let non_whitespace_pos = self
             .rest
@@ -49,6 +85,9 @@ impl<'a> Lexer<'a> {
         self.rest = &self.rest[non_whitespace_pos..];
     }
 
+    /// Consumes a word (identifier or keyword) from the input.
+    ///
+    /// Stops at whitespace, comma, or semicolon.
     fn consume_word(&mut self) -> Option<&'a str> {
         if self.rest.is_empty() {
             return None;
@@ -66,6 +105,10 @@ impl<'a> Lexer<'a> {
         if word.is_empty() { None } else { Some(word) }
     }
 
+    /// Consumes a string literal from the input.
+    ///
+    /// Expects the opening quote to have already been consumed.
+    /// Reads until the closing quote character.
     fn consume_string(&mut self, closing: char) -> &'a str {
         let mut end_index = 1;
         while end_index < self.rest.len() {
@@ -82,6 +125,9 @@ impl<'a> Lexer<'a> {
         string_value
     }
 
+    /// Consumes a numeric literal from the input.
+    ///
+    /// Reads digits and optional decimal point.
     fn consume_number(&mut self) -> &'a str {
         let number_end = self
             .rest
@@ -166,8 +212,8 @@ impl<'a> Iterator for Lexer<'a> {
             _ if char.is_alphabetic() => {
                 let word = self.consume_word()?;
 
-                if KEYWORDS.contains(&word) {
-                    Ok(Token::Keyword(word))
+                if let Ok(kw) = Keyword::from_str(word) {
+                    Ok(Token::Keyword(kw))
                 } else {
                     Ok(Token::Identifier(word))
                 }
@@ -198,9 +244,9 @@ mod tests {
     fn test_lexer() {
         let mut lexer = Lexer::new("SELECT * FROM users");
 
-        assert_token_eq(lexer.next(), Token::Keyword("SELECT"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
         assert_token_eq(lexer.next(), Token::Asterisk);
-        assert_token_eq(lexer.next(), Token::Keyword("FROM"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
         assert_token_eq(lexer.next(), Token::Identifier("users"));
         assert!(lexer.next().is_none());
     }
@@ -209,9 +255,9 @@ mod tests {
     fn test_lexer_with_spaces() {
         let mut lexer = Lexer::new("  SELECT   *  FROM    users  ");
 
-        assert_token_eq(lexer.next(), Token::Keyword("SELECT"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
         assert_token_eq(lexer.next(), Token::Asterisk);
-        assert_token_eq(lexer.next(), Token::Keyword("FROM"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
         assert_token_eq(lexer.next(), Token::Identifier("users"));
         assert!(lexer.next().is_none());
     }
@@ -220,13 +266,13 @@ mod tests {
     fn test_lexer_with_columns() {
         let mut lexer = Lexer::new("SELECT id, name, email FROM users");
 
-        assert_token_eq(lexer.next(), Token::Keyword("SELECT"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
         assert_token_eq(lexer.next(), Token::Identifier("id"));
         assert_token_eq(lexer.next(), Token::Comma);
         assert_token_eq(lexer.next(), Token::Identifier("name"));
         assert_token_eq(lexer.next(), Token::Comma);
         assert_token_eq(lexer.next(), Token::Identifier("email"));
-        assert_token_eq(lexer.next(), Token::Keyword("FROM"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
         assert_token_eq(lexer.next(), Token::Identifier("users"));
         assert!(lexer.next().is_none());
     }
@@ -235,11 +281,11 @@ mod tests {
     fn test_lexer_with_where() {
         let mut lexer = Lexer::new("SELECT id FROM users WHERE name = 'Alice'");
 
-        assert_token_eq(lexer.next(), Token::Keyword("SELECT"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
         assert_token_eq(lexer.next(), Token::Identifier("id"));
-        assert_token_eq(lexer.next(), Token::Keyword("FROM"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
         assert_token_eq(lexer.next(), Token::Identifier("users"));
-        assert_token_eq(lexer.next(), Token::Keyword("WHERE"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::Where));
         assert_token_eq(lexer.next(), Token::Identifier("name"));
         assert_token_eq(lexer.next(), Token::Equal);
         assert_token_eq(lexer.next(), Token::String("Alice"));

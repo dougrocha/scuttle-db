@@ -96,7 +96,14 @@ fn main() -> Result<()> {
             break;
         }
 
-        let query_result = db.execute_query(input)?;
+        let query_result = match db.execute_query(input) {
+            Ok(res) => res,
+            Err(err) => {
+                println!("{:?}", err.with_source_code(input.to_string()));
+                buf.clear();
+                continue;
+            }
+        };
 
         stdout
             .write_all(format!("{: <8}", query_result.relation.name).as_bytes())

@@ -1,32 +1,29 @@
-use std::{error::Error, fmt};
+use miette::Diagnostic;
 
-#[derive(Debug)]
+/// Errors that can occur during database operations.
+#[derive(Debug, Diagnostic, thiserror::Error)]
 pub enum DatabaseError {
-    IoError(std::io::Error),
+    /// An I/O error occurred while reading or writing data.
+    #[error("IO Error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    /// Data serialization or deserialization failed.
+    #[error("Serialization Error: {0}")]
     SerializationError(String),
+
+    /// The requested table does not exist.
+    #[error("Table not found: {0}")]
     TableNotFound(String),
+
+    /// The requested column does not exist in the schema.
+    #[error("Column not found: {0}")]
     ColumnNotFound(String),
+
+    /// A type mismatch occurred (e.g., wrong value type for column).
+    #[error("Type mismatch: {0}")]
     TypeMismatch(String),
+
+    /// The SQL query is invalid or malformed.
+    #[error("Invalid query: {0}")]
     InvalidQuery(String),
-}
-
-impl Error for DatabaseError {}
-
-impl fmt::Display for DatabaseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DatabaseError::IoError(e) => write!(f, "IO Error: {}", e),
-            DatabaseError::SerializationError(e) => write!(f, "Serialization Error: {}", e),
-            DatabaseError::TableNotFound(name) => write!(f, "Table not found: {}", name),
-            DatabaseError::ColumnNotFound(name) => write!(f, "Column not found: {}", name),
-            DatabaseError::TypeMismatch(msg) => write!(f, "Type mismatch: {}", msg),
-            DatabaseError::InvalidQuery(msg) => write!(f, "Invalid query: {}", msg),
-        }
-    }
-}
-
-impl From<std::io::Error> for DatabaseError {
-    fn from(value: std::io::Error) -> Self {
-        Self::IoError(value)
-    }
 }

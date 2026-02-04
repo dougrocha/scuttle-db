@@ -1,7 +1,7 @@
 use crate::{
-    DatabaseError,
     db::table::{Row, Schema, Table, Value},
     storage::page::PageId,
+    DatabaseError,
 };
 
 #[derive(Debug)]

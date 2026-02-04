@@ -4,9 +4,23 @@ use crate::db::table::{Row, Schema, Value};
 
 use super::parser::{Expression, LiteralValue, Operator};
 
+/// Evaluates SQL predicate expressions against table rows.
+///
+/// The `PredicateEvaluator` takes parsed SQL expressions (typically from WHERE clauses)
+/// and evaluates them against individual rows to determine if they match the criteria.
+/// It supports:
+/// - Comparison operators: `=`, `!=`, `>`, `<`
+/// - Logical operators: `AND`, `OR`
+/// - Type coercion between integers and floats
+/// - Column references and literal values
 pub struct PredicateEvaluator;
 
 impl PredicateEvaluator {
+    /// Evaluates an SQL expression against a row and returns whether it matches.
+    ///
+    /// This is the main entry point for predicate evaluation. It recursively evaluates
+    /// the expression tree and returns a boolean result indicating whether the row
+    /// satisfies the predicate.
     pub fn evaluate(&self, expression: &Expression, row: &Row, schema: &Schema) -> Result<bool> {
         match expression {
             Expression::BinaryOp { left, op, right } => {
@@ -20,6 +34,11 @@ impl PredicateEvaluator {
         }
     }
 
+    /// Evaluates a binary operation expression.
+    ///
+    /// Handles comparison operators (`=`, `!=`, `>`, `<`) and logical operators
+    /// (`AND`, `OR`). For comparison operators, both sides are evaluated to values
+    /// and compared. For logical operators, short-circuit evaluation is used.
     fn evaluate_binary_op(
         &self,
         left: &Expression,
@@ -68,6 +87,12 @@ impl PredicateEvaluator {
         }
     }
 
+    /// Evaluates an expression to a concrete value.
+    ///
+    /// Converts an expression (column reference or literal) into an actual value
+    /// that can be used in comparisons. For column references, retrieves the value
+    /// from the row using the schema. For literals, converts them to the appropriate
+    /// `Value` type.
     fn evaluate_expression(
         &self,
         expression: &Expression,
@@ -91,6 +116,7 @@ impl PredicateEvaluator {
         }
     }
 
+    /// Converts a parsed literal value to a database `Value`.
     fn literal_to_value(&self, literal: &LiteralValue) -> Value {
         match literal {
             LiteralValue::Number(n) => Value::Float(*n),
@@ -98,6 +124,11 @@ impl PredicateEvaluator {
         }
     }
 
+    /// Compares two values for equality with type coercion.
+    ///
+    /// Supports comparing values of the same type, and automatically coerces
+    /// between `Integer` and `Float` types. Floating-point comparisons use
+    /// an epsilon tolerance to handle precision issues.
     fn values_equal(&self, left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Integer(a), Value::Integer(b)) => a == b,
@@ -114,6 +145,10 @@ impl PredicateEvaluator {
         }
     }
 
+    /// Compares two values using the less-than operator with type coercion.
+    ///
+    /// Supports numeric comparisons between `Integer` and `Float` types,
+    /// with automatic type coercion when needed.
     fn values_less_than(&self, left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Integer(a), Value::Integer(b)) => a < b,
@@ -126,6 +161,10 @@ impl PredicateEvaluator {
         }
     }
 
+    /// Compares two values using the greater-than operator with type coercion.
+    ///
+    /// Supports numeric comparisons between `Integer` and `Float` types,
+    /// with automatic type coercion when needed.
     fn values_greater_than(&self, left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Integer(a), Value::Integer(b)) => a > b,

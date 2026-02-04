@@ -1,4 +1,4 @@
-use miette::{IntoDiagnostic, Result, miette};
+use miette::{miette, IntoDiagnostic, Result};
 use std::{
     collections::HashMap,
     fs::File,
