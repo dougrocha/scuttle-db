@@ -5,11 +5,14 @@ use std::{fmt, iter::Peekable};
 use super::lexer::{Lexer, Token};
 use crate::keyword::Keyword;
 
-/// A literal value in SQL (number or string).
+/// A literal value in SQL
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralValue {
-    /// Numeric literal
-    Number(f64),
+    /// Float
+    Float(f64),
+
+    /// Float
+    Integer(i64),
 
     /// String literal
     String(String),
@@ -85,7 +88,8 @@ impl fmt::Display for Expression {
             }
             Expression::Column(name) => write!(f, "{name}"),
             Expression::Literal(value) => match value {
-                LiteralValue::Number(num) => write!(f, "{num}"),
+                LiteralValue::Float(num) => write!(f, "{num}"),
+                LiteralValue::Integer(num) => write!(f, "{num}"),
                 LiteralValue::String(s) => write!(f, "\"{s}\""),
             },
         }
@@ -266,7 +270,8 @@ impl<'a> SqlParser<'a> {
             Some(Ok(Token::Identifier(identifier))) => {
                 Ok(Expression::Column(identifier.to_string()))
             }
-            Some(Ok(Token::Number(num))) => Ok(Expression::Literal(LiteralValue::Number(num))),
+            Some(Ok(Token::Float(num))) => Ok(Expression::Literal(LiteralValue::Float(num))),
+            Some(Ok(Token::Integer(num))) => Ok(Expression::Literal(LiteralValue::Integer(num))),
             Some(Ok(Token::String(s))) => {
                 Ok(Expression::Literal(LiteralValue::String(s.to_string())))
             }
@@ -354,7 +359,7 @@ mod tests {
                     Some(Expression::BinaryOp {
                         left: Box::new(Expression::Column("id".to_string())),
                         op: Operator::Equal,
-                        right: Box::new(Expression::Literal(LiteralValue::Number(1.))),
+                        right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
                     })
                 );
             }
@@ -381,7 +386,7 @@ mod tests {
                     Some(Expression::BinaryOp {
                         left: Box::new(Expression::Column("id".to_string())),
                         op: Operator::GreaterThan,
-                        right: Box::new(Expression::Literal(LiteralValue::Number(1.))),
+                        right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
                     })
                 );
             }

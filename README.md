@@ -70,12 +70,6 @@ cargo run
 
 This starts an interactive REPL where you can execute SQL queries.
 
-### Running Examples
-
-```bash
-cargo run --example 01_basic_operations
-```
-
 ## Architecture
 
 ### Query Pipeline
@@ -151,8 +145,8 @@ SELECT * FROM users WHERE name = 'Alice'
 ## Documentation
 
 - **API Docs**: Run `cargo doc --open` to view comprehensive API documentation
-- **Examples**: See `examples/01_basic_operations.rs` for a complete walkthrough
 - **Code**: Inline documentation throughout the codebase explains design decisions
+- **Agent Guidelines**: See `AGENTS.md` for coding conventions and development workflow
 
 ## Development Roadmap
 
@@ -207,8 +201,6 @@ scuttle-db/
 │   └── catalog/
 │       ├── mod.rs          # Catalog module declarations
 │       └── system_catalog.rs  # Metadata storage (WIP)
-├── examples/
-│   └── 01_basic_operations.rs  # Comprehensive example
 ├── AGENTS.md               # Coding guidelines for AI agents
 └── README.md               # This file
 ```

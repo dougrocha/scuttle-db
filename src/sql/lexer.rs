@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use miette::{Result, miette};
+use miette::{IntoDiagnostic, Result, miette};
 
 use crate::keyword::Keyword;
 
@@ -13,8 +13,11 @@ pub enum Token<'a> {
     /// Table name, column name, or other identifier
     Identifier(&'a str),
 
-    /// Numeric literal (integer or floating point)
-    Number(f64),
+    /// Integer
+    Integer(i64),
+
+    /// Float literal
+    Float(f64),
 
     /// String literal (quotes not included)
     String(&'a str),
@@ -51,6 +54,7 @@ pub enum Token<'a> {
 }
 
 /// SQL lexer that tokenizes a query string.
+#[derive(Clone, Copy)]
 pub(crate) struct Lexer<'a> {
     /// The complete original query string
     pub whole: &'a str,
@@ -128,17 +132,33 @@ impl<'a> Lexer<'a> {
     /// Consumes a numeric literal from the input.
     ///
     /// Reads digits and optional decimal point.
-    fn consume_number(&mut self) -> &'a str {
+    fn consume_number(&mut self) -> Result<Token<'a>> {
+        let mut is_float = false;
+
         let number_end = self
             .rest
-            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .find(|c: char| {
+                if c == '.' {
+                    is_float = true;
+                }
+
+                !c.is_ascii_digit() && c != '.'
+            })
             .unwrap_or(self.rest.len());
 
         let number_str = &self.rest[..number_end];
         self.position += number_end;
         self.rest = &self.rest[number_end..];
 
-        number_str
+        let token = if is_float {
+            let float = number_str.parse::<f64>().into_diagnostic()?;
+            Token::Float(float)
+        } else {
+            let int = number_str.parse::<i64>().into_diagnostic()?;
+            Token::Integer(int)
+        };
+
+        Ok(token)
     }
 }
 
@@ -203,10 +223,10 @@ impl<'a> Iterator for Lexer<'a> {
                 Ok(Token::String(string_value))
             }
             _ if char.is_ascii_digit() => {
-                let number_str = self.consume_number();
-                match number_str.parse::<f64>() {
-                    Ok(num) => Ok(Token::Number(num)),
-                    Err(_) => Err(miette!("Invalid number format: {}", number_str)),
+                let num_token = self.consume_number();
+                match num_token {
+                    Ok(num) => Ok(num),
+                    Err(err) => Err(err),
                 }
             }
             _ if char.is_alphabetic() => {
@@ -289,6 +309,19 @@ mod tests {
         assert_token_eq(lexer.next(), Token::Identifier("name"));
         assert_token_eq(lexer.next(), Token::Equal);
         assert_token_eq(lexer.next(), Token::String("Alice"));
+        assert!(lexer.next().is_none());
+    }
+
+    #[test]
+    fn test_number() {
+        let mut lexer = Lexer::new("5.0 5");
+
+        let mut peek = lexer.peekable();
+        println!("Peek: {:?}", peek.peek());
+
+        assert_token_eq(lexer.next(), Token::Float(5.0));
+        assert_token_eq(lexer.next(), Token::Integer(5));
+
         assert!(lexer.next().is_none());
     }
 }

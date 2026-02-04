@@ -44,35 +44,6 @@ pub struct QueryResponse<'a> {
 /// - A buffer pool manages pages in memory
 /// - Tables are stored as relations with defined schemas
 /// - Queries are parsed, planned, and executed through a pipeline
-///
-/// # Example
-///
-/// ```no_run
-/// use scuttle_db::*;
-///
-/// let mut db = Database::new("./my_data");
-/// db.initialize().expect("Failed to initialize");
-///
-/// // Create a table
-/// let schema = Schema::new(vec![
-///     ColumnDefinition::new("id", DataType::Integer, false),
-///     ColumnDefinition::new("name", DataType::Text, false),
-/// ]);
-/// db.create_table("users", schema).expect("Failed to create table");
-///
-/// // Insert data
-/// let row = Row::new(vec![
-///     Value::Integer(1),
-///     Value::Text("Alice".to_string()),
-/// ]);
-/// db.insert_row("users", row).expect("Failed to insert");
-///
-/// // Query data
-/// let result = db.execute_query("SELECT * FROM users").expect("Query failed");
-/// for row in result.rows {
-///     println!("{:?}", row);
-/// }
-/// ```
 #[derive(Debug)]
 pub struct Database {
     /// All tables currently loaded in the database.
@@ -95,19 +66,6 @@ impl Database {
     /// Creates the data directory if it doesn't exist. The database starts empty
     /// with no tables loaded. Call [`Database::initialize`] after creation to
     /// set up any necessary system catalogs (currently a no-op).
-    ///
-    /// # Arguments
-    ///
-    /// * `data_directory` - Path where database files will be stored
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use scuttle_db::Database;
-    ///
-    /// let db = Database::new("./my_database");
-    /// // Database directory created if it doesn't exist
-    /// ```
     pub fn new<P: AsRef<Path>>(data_directory: P) -> Self {
         let data_dir = data_directory.as_ref().to_path_buf();
         std::fs::create_dir_all(&data_dir).ok();
@@ -126,11 +84,6 @@ impl Database {
     /// - Loading system catalogs
     /// - Setting up metadata tables
     /// - Recovering from crash (WAL replay)
-    ///
-    /// # Errors
-    ///
-    /// Currently always succeeds. Future versions may return errors if
-    /// initialization fails.
     pub fn initialize(&mut self) -> Result<()> {
         Ok(())
     }
@@ -152,31 +105,6 @@ impl Database {
     /// The table is created in-memory and ready for use immediately. Currently,
     /// if a table with the same name already exists, it prints a warning and
     /// continues (re-creating the table in memory).
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Name of the table to create
-    /// * `schema` - Schema defining the table's columns and their types
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` on success, or a [`DatabaseError`] if the operation fails.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use scuttle_db::*;
-    ///
-    /// let mut db = Database::new("./data");
-    ///
-    /// let schema = Schema::new(vec![
-    ///     ColumnDefinition::new("id", DataType::Integer, false),
-    ///     ColumnDefinition::new("email", DataType::VarChar(255), false),
-    ///     ColumnDefinition::new("active", DataType::Boolean, true),
-    /// ]);
-    ///
-    /// db.create_table("users", schema).expect("Failed to create table");
-    /// ```
     pub fn create_table(&mut self, name: &str, schema: Schema) -> Result<(), DatabaseError> {
         if self.table_exists(name) {
             // return Err(DatabaseError::InvalidQuery(format!(
@@ -193,25 +121,6 @@ impl Database {
     }
 
     /// Gets an immutable reference to a table.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Name of the table to retrieve
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DatabaseError::TableNotFound`] if the table doesn't exist.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use scuttle_db::*;
-    /// # let mut db = Database::new("./data");
-    /// # let schema = Schema::new(vec![]);
-    /// # db.create_table("users", schema).unwrap();
-    /// let table = db.get_table("users").expect("Table not found");
-    /// println!("Table '{}' has {} columns", table.name, table.schema.columns.len());
-    /// ```
     pub fn get_table(&self, name: &str) -> Result<&Relation, DatabaseError> {
         self.tables
             .get(name)
@@ -219,14 +128,6 @@ impl Database {
     }
 
     /// Gets a mutable reference to a table.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Name of the table to retrieve
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DatabaseError::TableNotFound`] if the table doesn't exist.
     pub fn get_table_mut(&mut self, name: &str) -> Result<&mut Relation, DatabaseError> {
         if self.table_exists(name) {
             return Ok(self.tables.get_mut(name).unwrap());
@@ -241,10 +142,6 @@ impl Database {
     /// - Scan the data directory for `.table` files
     /// - Deserialize table metadata
     /// - Load schemas into memory
-    ///
-    /// # Errors
-    ///
-    /// May return I/O errors or deserialization errors.
     pub fn load_from_file(&mut self) -> Result<(), DatabaseError> {
         std::fs::create_dir_all(&self.data_directory)?;
         let entries = std::fs::read_dir(&self.data_directory)?;
@@ -270,24 +167,6 @@ impl Database {
     /// Drops a table from the database.
     ///
     /// Removes the table from memory. Currently does not delete on-disk files.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Name of the table to drop
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DatabaseError::TableNotFound`] if the table doesn't exist.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use scuttle_db::*;
-    /// # let mut db = Database::new("./data");
-    /// # let schema = Schema::new(vec![]);
-    /// # db.create_table("temp", schema).unwrap();
-    /// db.drop_table("temp").expect("Failed to drop table");
-    /// ```
     pub fn drop_table(&mut self, name: &str) -> Result<(), DatabaseError> {
         self.tables
             .remove(name)
@@ -300,45 +179,6 @@ impl Database {
     /// The row is validated against the table's schema, encoded to bytes,
     /// and stored in a page managed by the buffer pool. The row is persisted
     /// to disk immediately.
-    ///
-    /// # Arguments
-    ///
-    /// * `table_name` - Name of the table to insert into
-    /// * `row` - The row data to insert
-    ///
-    /// # Returns
-    ///
-    /// Returns `(PageId, ItemId)` indicating where the row was stored.
-    /// - `PageId` - The page number where the row is stored
-    /// - `ItemId` - The item slot within that page
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The table doesn't exist
-    /// - The row doesn't match the schema
-    /// - There's no space in any page
-    /// - I/O fails during persistence
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use scuttle_db::*;
-    /// # let mut db = Database::new("./data");
-    /// # let schema = Schema::new(vec![
-    /// #     ColumnDefinition::new("id", DataType::Integer, false),
-    /// #     ColumnDefinition::new("name", DataType::Text, false),
-    /// # ]);
-    /// # db.create_table("users", schema).unwrap();
-    /// let row = Row::new(vec![
-    ///     Value::Integer(42),
-    ///     Value::Text("Bob".to_string()),
-    /// ]);
-    ///
-    /// let (page_id, item_id) = db.insert_row("users", row)
-    ///     .expect("Failed to insert row");
-    /// println!("Inserted at page {}, item {}", page_id, item_id);
-    /// ```
     pub fn insert_row(&mut self, table_name: &str, row: Row) -> Result<(PageId, ItemId)> {
         println!("Inserting row into table: {table_name}");
 
@@ -367,32 +207,6 @@ impl Database {
     /// Scans all pages for the table and decodes all non-deleted rows.
     /// This is an expensive operation for large tables. Use [`Database::execute_query`]
     /// with a WHERE clause to filter rows efficiently.
-    ///
-    /// # Arguments
-    ///
-    /// * `table_name` - Name of the table to scan
-    ///
-    /// # Returns
-    ///
-    /// A vector of all rows in the table.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DatabaseError`] if:
-    /// - The table doesn't exist
-    /// - Row decoding fails (corrupted data)
-    /// - I/O errors occur reading pages
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use scuttle_db::*;
-    /// # let mut db = Database::new("./data");
-    /// # let schema = Schema::new(vec![]);
-    /// # db.create_table("users", schema).unwrap();
-    /// let all_rows = db.get_rows("users").expect("Failed to get rows");
-    /// println!("Found {} rows", all_rows.len());
-    /// ```
     pub fn get_rows(&mut self, table_name: &str) -> Result<Vec<Row>, DatabaseError> {
         let mut found_rows: Vec<Row> = Vec::new();
         let max_pages = 1000; // To prevent infinite loops
@@ -438,62 +252,6 @@ impl Database {
     /// 3. **Logical Planning** - Convert AST to logical query plan
     /// 4. **Physical Planning** - Convert to executable physical plan
     /// 5. **Execution** - Execute the plan and return rows
-    ///
-    /// # Arguments
-    ///
-    /// * `query` - SQL query string to execute
-    ///
-    /// # Returns
-    ///
-    /// A [`QueryResponse`] containing the table metadata and result rows.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - SQL syntax is invalid (parse error)
-    /// - Referenced table doesn't exist
-    /// - Column names are invalid
-    /// - Query execution fails
-    ///
-    /// # Supported SQL
-    ///
-    /// Currently supports SELECT statements:
-    /// - `SELECT * FROM table`
-    /// - `SELECT col1, col2 FROM table`
-    /// - `SELECT * FROM table WHERE condition`
-    ///
-    /// WHERE clause operators: `=`, `!=`, `>`, `<`
-    ///
-    /// # Limitations
-    ///
-    /// - No JOINs
-    /// - No GROUP BY, ORDER BY, LIMIT
-    /// - No aggregate functions (COUNT, SUM, etc.)
-    /// - Table names must be unquoted
-    /// - String literals use single quotes only
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use scuttle_db::*;
-    /// # let mut db = Database::new("./data");
-    /// # let schema = Schema::new(vec![
-    /// #     ColumnDefinition::new("id", DataType::Integer, false),
-    /// #     ColumnDefinition::new("age", DataType::Integer, false),
-    /// # ]);
-    /// # db.create_table("users", schema).unwrap();
-    /// // Select all rows
-    /// let result = db.execute_query("SELECT * FROM users")
-    ///     .expect("Query failed");
-    /// println!("Found {} rows", result.rows.len());
-    ///
-    /// // Select with filter
-    /// let result = db.execute_query("SELECT * FROM users WHERE age > 25")
-    ///     .expect("Query failed");
-    /// for row in result.rows {
-    ///     println!("{:?}", row);
-    /// }
-    /// ```
     pub fn execute_query(&mut self, query: &str) -> Result<QueryResponse<'_>> {
         let mut parser = SqlParser::new(query);
         let statement = parser

@@ -1,4 +1,4 @@
-use miette::{miette, Result};
+use miette::{Result, miette};
 
 use super::parser::{ColumnList, Expression, Statement};
 
@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn test_filter_without_projection() {
-        let query = "SELECT * FROM products WHERE price = 100";
+        let query = "SELECT * FROM products WHERE price = 100.0";
         let statement = SqlParser::new(query)
             .parse()
             .expect("Failed to parse query");
@@ -127,7 +127,7 @@ mod tests {
                         assert!(matches!(*left, Expression::Column(ref col) if col == "price"));
                         assert!(matches!(op, Operator::Equal));
                         assert!(
-                            matches!(*right, Expression::Literal(LiteralValue::Number(n)) if n == 100.0)
+                            matches!(*right, Expression::Literal(LiteralValue::Float(n)) if n == 100.0)
                         );
                     }
                     _ => panic!("Expected BinaryOp predicate"),
@@ -164,7 +164,7 @@ mod tests {
                                 );
                                 assert!(matches!(op, Operator::Equal));
                                 assert!(
-                                    matches!(*right, Expression::Literal(LiteralValue::Number(n)) if n == 1.0)
+                                    matches!(*right, Expression::Literal(LiteralValue::Integer(n)) if n == 1)
                                 );
                             }
                             _ => panic!("Expected BinaryOp predicate"),

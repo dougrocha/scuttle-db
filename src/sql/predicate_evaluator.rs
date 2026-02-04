@@ -29,7 +29,8 @@ impl PredicateEvaluator {
             Expression::Column(_) => {
                 Err(miette!("Column expression cannot be evaluated as boolean"))
             }
-            Expression::Literal(LiteralValue::Number(n)) => Ok(*n != 0.0),
+            Expression::Literal(LiteralValue::Float(n)) => Ok(*n != 0.0),
+            Expression::Literal(LiteralValue::Integer(n)) => Ok(*n != 0),
             Expression::Literal(LiteralValue::String(s)) => Ok(!s.is_empty()),
         }
     }
@@ -119,7 +120,8 @@ impl PredicateEvaluator {
     /// Converts a parsed literal value to a database `Value`.
     fn literal_to_value(&self, literal: &LiteralValue) -> Value {
         match literal {
-            LiteralValue::Number(n) => Value::Float(*n),
+            LiteralValue::Float(n) => Value::Float(*n),
+            LiteralValue::Integer(n) => Value::Integer(*n),
             LiteralValue::String(s) => Value::Text(s.clone()),
         }
     }
