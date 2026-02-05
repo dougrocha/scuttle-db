@@ -41,6 +41,11 @@ fn main() -> Result<()> {
             data_type: DataType::Integer,
             nullable: false,
         },
+        ColumnDefinition {
+            name: "is_active".to_string(),
+            data_type: DataType::Boolean,
+            nullable: true,
+        },
     ]);
 
     let _ = db.create_table("users", schema.clone());
@@ -52,6 +57,7 @@ fn main() -> Result<()> {
             Value::Integer(1),
             Value::Text("Alice".to_string()),
             Value::Integer(30),
+            Value::Null,
         ]),
     );
     let _ = db.insert_row(
@@ -60,6 +66,7 @@ fn main() -> Result<()> {
             Value::Integer(2),
             Value::Text("Bob".to_string()),
             Value::Integer(25),
+            Value::Null,
         ]),
     );
     let _ = db.insert_row(
@@ -68,6 +75,7 @@ fn main() -> Result<()> {
             Value::Integer(3),
             Value::Text("Charlie".to_string()),
             Value::Integer(35),
+            Value::Boolean(true),
         ]),
     );
 

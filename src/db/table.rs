@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use miette::{Result, miette};
 
-use crate::{DatabaseError, sql::parser::LiteralValue};
+use crate::{DatabaseError, db::bitmap::NullBitmap, sql::parser::LiteralValue};
 
 /// Trait for table-like structures.
 ///
@@ -198,15 +198,31 @@ impl Schema {
     ///
     /// Internal method used by the storage layer to serialize rows into pages.
     /// Each value is encoded according to its type:
-    /// - Integer: 8 bytes (little-endian i64)
+    /// - Integer/Float: 8 bytes (little-endian i64)
     /// - Text/VarChar: 4-byte length + UTF-8 bytes
-    /// - Boolean/Float: Not yet implemented
-    pub(crate) fn encode_row(&self, row: Row) -> Vec<u8> {
+    /// - Boolean: 1 Bit
+    pub(crate) fn encode_row(&self, row: Row) -> Result<Vec<u8>> {
         let mut bytes = vec![];
 
+        let mut bitmap = NullBitmap::new(self.columns.len());
+        for (i, value) in row.values.iter().enumerate() {
+            if matches!(value, Value::Null) {
+                bitmap.set_null(i);
+            }
+        }
+
+        bytes.extend_from_slice(&bitmap.bytes);
+
         for (value, column) in row.values.iter().zip(self.columns.iter()) {
+            if let Value::Null = value {
+                continue;
+            }
+
             match (column.data_type, value) {
                 (DataType::Integer, Value::Integer(number)) => {
+                    bytes.extend_from_slice(&number.to_le_bytes());
+                }
+                (DataType::Float, Value::Float(number)) => {
                     bytes.extend_from_slice(&number.to_le_bytes());
                 }
                 (DataType::Text, Value::Text(text)) => {
@@ -225,8 +241,9 @@ impl Schema {
                     bytes.extend_from_slice(&length.to_le_bytes());
                     bytes.extend_from_slice(text_bytes);
                 }
-                // (DataType::Boolean, Value::Boolean(_)) => todo!(),
-                // (DataType::Float, Value::Float(_)) => todo!(),
+                (DataType::Boolean, Value::Boolean(b)) => {
+                    bytes.push(if *b { 1 } else { 0 });
+                }
                 _ => panic!(
                     "Column type ({:?}) and value ({:?}) combination not implemented",
                     column.data_type, value
@@ -234,7 +251,7 @@ impl Schema {
             }
         }
 
-        bytes
+        Ok(bytes)
     }
 
     /// Decodes a row from bytes read from storage.
@@ -245,9 +262,13 @@ impl Schema {
         let mut values = Vec::new();
         let mut offset = 0;
 
-        for column in &self.columns {
-            if offset >= bytes.len() {
-                return Err(miette!("Not enough data to decode column {}", column.name));
+        let bitmap = NullBitmap::from_bytes(bytes, self.columns.len())?;
+        offset += bitmap.bytes.len();
+
+        for (idx, column) in self.columns.iter().enumerate() {
+            if bitmap.is_null(idx) {
+                values.push(Value::Null);
+                continue;
             }
 
             match column.data_type {
@@ -260,6 +281,25 @@ impl Schema {
                     let value = i64::from_le_bytes(num_bytes);
                     values.push(Value::Integer(value));
                     offset += 8;
+                }
+                DataType::Float => {
+                    if offset + 8 > bytes.len() {
+                        return Err(miette!("Not enough bytes for float value"));
+                    }
+                    let mut num_bytes = [0u8; 8];
+                    num_bytes.copy_from_slice(&bytes[offset..offset + 8]);
+                    let value = f64::from_le_bytes(num_bytes);
+                    values.push(Value::Float(value));
+                    offset += 8;
+                }
+                DataType::Boolean => {
+                    if offset + 1 > bytes.len() {
+                        return Err(miette!("Not enough bytes for boolean value"));
+                    }
+                    let raw_byte = bytes[offset];
+                    let bool_val = raw_byte != 0;
+                    values.push(Value::Boolean(bool_val));
+                    offset += 1;
                 }
                 DataType::Text | DataType::VarChar(_) => {
                     if offset + 4 > bytes.len() {
@@ -284,7 +324,6 @@ impl Schema {
                         }
                     }
                 }
-                _ => todo!(),
             }
         }
 

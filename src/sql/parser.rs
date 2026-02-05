@@ -8,17 +8,10 @@ use crate::keyword::Keyword;
 /// A literal value in SQL
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralValue {
-    /// Float
-    Float(f64),
-
-    /// Float
     Integer(i64),
-
-    /// String literal
+    Float(f64),
     String(String),
-
     Boolean(bool),
-
     Null,
 }
 
@@ -31,10 +24,10 @@ pub enum Operator {
     /// Inequality (!=)
     NotEqual,
 
-    /// Logical AND (not yet used)
+    /// Logical AND
     And,
 
-    /// Logical OR (not yet used)
+    /// Logical OR
     Or,
 
     /// Greater than (>)
@@ -42,21 +35,25 @@ pub enum Operator {
 
     /// Less than (<)
     LessThan,
+    Add,
+    Multiply,
+    Divide,
+    Subtract,
 }
 
 impl Operator {
-    /// Returns the precedence level of this operator.
+    /// Returns the binding power (precedence) of this operator.
     ///
-    /// Higher numbers = higher precedence. Used for parsing expressions
-    /// with correct operator associativity.
+    /// This defines the "Order of Operations". Operators with a higher number
+    /// bind tighter and are evaluated first.
     fn precedence(&self) -> u8 {
         match self {
             Operator::Or => 2,
             Operator::And => 3,
-            Operator::NotEqual => 4,
-            Operator::Equal => 4,
-            Operator::LessThan => 5,
-            Operator::GreaterThan => 5,
+
+            Operator::NotEqual | Operator::Equal | Operator::LessThan | Operator::GreaterThan => 5,
+            Operator::Add | Operator::Subtract => 7,
+            Operator::Multiply | Operator::Divide => 10,
         }
     }
 }
@@ -206,15 +203,8 @@ impl<'a> SqlParser<'a> {
             _ => return Err(miette!("Expected table name after FROM")),
         };
 
-        let r#where: Option<Expression> = match self.expect_keyword(Keyword::Where) {
-            Ok(_) => {
-                let expression = match self.parse_where_expression(0) {
-                    Ok(expr) => expr,
-                    Err(e) => panic!("Failed to parse where expression: {e}"),
-                };
-
-                Some(expression)
-            }
+        let r#where = match self.expect_keyword(Keyword::Where) {
+            Ok(_) => Some(self.parse_expression(0)?),
             Err(_) => None,
         };
 
@@ -250,7 +240,7 @@ impl<'a> SqlParser<'a> {
         Ok(ColumnList::Columns(columns))
     }
 
-    fn parse_where_expression(&mut self, min_prec: u8) -> Result<Expression> {
+    fn parse_expression(&mut self, min_prec: u8) -> Result<Expression> {
         let mut lhs = self.parse_primary()?;
 
         while let Ok(op) = self.peek_binary_op() {
@@ -260,7 +250,7 @@ impl<'a> SqlParser<'a> {
             // consume op
             self.lexer.next();
 
-            let rhs = self.parse_where_expression(op.precedence() + 1)?;
+            let rhs = self.parse_expression(op.precedence() + 1)?;
             lhs = Expression::BinaryOp {
                 left: Box::new(lhs),
                 op,
@@ -277,15 +267,33 @@ impl<'a> SqlParser<'a> {
             .next()
             .ok_or(miette!("Unexpected end of input"))??;
 
-        match token {
-            Token::Identifier(i) => Ok(Expression::Column(i.to_string())),
-            Token::Integer(i) => Ok(Expression::Literal(LiteralValue::Integer(i))),
-            Token::Float(f) => Ok(Expression::Literal(LiteralValue::Float(f))),
-            Token::String(s) => Ok(Expression::Literal(LiteralValue::String(s.to_string()))),
-            Token::Asterisk => Ok(Expression::Column("*".to_string())),
+        let token = match token {
+            Token::Boolean(b) => Expression::Literal(LiteralValue::Boolean(b)),
+            Token::Integer(i) => Expression::Literal(LiteralValue::Integer(i)),
+            Token::Float(f) => Expression::Literal(LiteralValue::Float(f)),
+            Token::String(s) => Expression::Literal(LiteralValue::String(s.to_string())),
 
-            t => Err(miette!("Expected a column or value, but found {:?}", t)),
-        }
+            Token::Identifier(i) => Expression::Column(i.to_string()),
+
+            Token::Asterisk => Expression::Column("*".to_string()),
+
+            Token::LeftParen => {
+                let expr = self.parse_expression(0)?;
+
+                match self.lexer.next() {
+                    Some(Ok(Token::RightParen)) => expr,
+                    Some(Ok(t)) => return Err(miette!("Expected ')', found {:?}", t)),
+                    Some(Err(e)) => return Err(e),
+                    None => return Err(miette!("Expected ')', found EOF")),
+                }
+            }
+
+            t => {
+                return Err(miette!("Expected a column or value, but found {:?}", t));
+            }
+        };
+
+        Ok(token)
     }
 
     fn peek_binary_op(&mut self) -> Result<Operator> {
@@ -298,6 +306,15 @@ impl<'a> SqlParser<'a> {
             Token::NotEqual => Ok(Operator::NotEqual),
             Token::GreaterThan => Ok(Operator::GreaterThan),
             Token::LessThan => Ok(Operator::LessThan),
+
+            Token::Plus => Ok(Operator::Add),
+            Token::Minus => Ok(Operator::Subtract),
+            Token::Asterisk => Ok(Operator::Multiply),
+            Token::Slash => Ok(Operator::Divide),
+
+            Token::Keyword(Keyword::And) => Ok(Operator::And),
+            Token::Keyword(Keyword::Or) => Ok(Operator::Or),
+
             t => Err(miette!("Expected a binary operator, but found {:?}", t)),
         }
     }

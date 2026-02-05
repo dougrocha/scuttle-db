@@ -8,8 +8,11 @@ use crate::{
     DatabaseError,
     db::table::{Relation, Row, Schema, Table, Value},
     sql::{
-        logical_planner::LogicalPlan, parser::SqlParser, physical_planner::PhysicalPlan,
-        planner_context::PlannerContext, predicate_evaluator::PredicateEvaluator,
+        evaluator::{Evaluator, predicate::PredicateEvaluator},
+        logical_planner::LogicalPlan,
+        parser::SqlParser,
+        physical_planner::PhysicalPlan,
+        planner_context::PlannerContext,
     },
     storage::{
         buffer_pool::BufferPool,
@@ -185,7 +188,7 @@ impl Database {
         // Get schema first (separate borrow scope)
         let encoded_data = {
             let table = self.get_table(table_name).unwrap();
-            table.schema().encode_row(row)
+            table.schema().encode_row(row)?
         };
 
         // Now get the page and insert data
@@ -261,6 +264,8 @@ impl Database {
         let logical_plan = LogicalPlan::from_statement(statement.clone())
             .map_err(|e| DatabaseError::InvalidQuery(format!("Logical Plan error: {e}")))?;
 
+        dbg!(&logical_plan);
+
         let context = PlannerContext::new(self);
         let physical_plan = PhysicalPlan::from_logical_plan(logical_plan, &context)
             .map_err(|e| DatabaseError::InvalidQuery(format!("Physical Plan error: {e}")))?;
@@ -295,7 +300,7 @@ impl Database {
 
                 let schema = self.get_table(&table_name).into_diagnostic()?.schema();
 
-                let evaluator = PredicateEvaluator {};
+                let evaluator = PredicateEvaluator;
 
                 Ok(input_rows
                     .into_iter()

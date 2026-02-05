@@ -11,6 +11,8 @@ pub enum Keyword {
     Insert,
     Create,
     Table,
+    And,
+    Or,
 }
 
 impl FromStr for Keyword {
@@ -24,15 +26,12 @@ impl FromStr for Keyword {
             "INSERT" => Self::Insert,
             "CREATE" => Self::Create,
             "TABLE" => Self::Table,
+
+            "AND" => Self::And,
+            "OR" => Self::Or,
             _ => return Err(()),
         };
 
         Ok(s)
-    }
-}
-
-impl Keyword {
-    pub fn is_keyword(s: &str) -> bool {
-        s.parse::<Keyword>().is_ok()
     }
 }

@@ -10,53 +10,33 @@ pub enum Token<'a> {
     /// SQL keyword (SELECT, FROM, WHERE, etc.) - always uppercase
     Keyword(Keyword),
 
-    /// Table name, column name, or other identifier
+    /// Literals
     Identifier(&'a str),
-
-    /// Integer
     Integer(i64),
-
-    /// Float literal
     Float(f64),
-
-    /// String literal (quotes not included)
     String(&'a str),
-
-    /// Boolean
     Boolean(bool),
+    Null,
 
-    /// Comma (,) - list separator
     Comma,
-
-    /// Asterisk (*) - wildcard
-    Asterisk,
-
-    /// Semicolon (;) - statement terminator
     SemiColon,
-
-    /// Equal (=) - comparison
     Equal,
-
-    /// Not equal (!=) - comparison
     NotEqual,
-
-    /// Greater than (>) - comparison
     GreaterThan,
-
-    /// Less than (<) - comparison
     LessThan,
-
-    /// Left parenthesis - not yet used
     LeftParen,
-
-    /// Right parenthesis - not yet used
     RightParen,
+    Asterisk,
+    Plus,
+    Minus,
+    Slash,
 }
 
 /// SQL lexer that tokenizes a query string.
 #[derive(Clone, Copy)]
 pub(crate) struct Lexer<'a> {
     /// The complete original query string
+    #[allow(dead_code)]
     pub whole: &'a str,
 
     /// The remaining portion to tokenize
@@ -89,9 +69,18 @@ impl<'a> Lexer<'a> {
         self.rest = &self.rest[non_whitespace_pos..];
     }
 
-    /// Consumes a word (identifier or keyword) from the input.
+    /// Consumes a symbol, assumes we have peeked ahead.
     ///
-    /// Stops at whitespace, comma, or semicolon.
+    /// Only consume one symbol
+    fn consume_symbol(&mut self, token: Token<'a>) -> Result<Token<'a>> {
+        let char_len = self.rest.chars().next().unwrap().len_utf8();
+        self.rest = &self.rest[char_len..];
+        self.position += char_len;
+
+        Ok(token)
+    }
+
+    /// Consumes a word (identifier or keyword) from the input.
     fn consume_word(&mut self) -> Option<&'a str> {
         if self.rest.is_empty() {
             return None;
@@ -99,7 +88,10 @@ impl<'a> Lexer<'a> {
 
         let word_index = self
             .rest
-            .find(|c: char| c.is_whitespace() || c == ',' || c == ';')
+            .find(|c: char| {
+                c.is_whitespace()
+                    || matches!(c, ',' | ';' | '=' | '*' | '(' | ')' | '<' | '>' | '!')
+            })
             .unwrap_or(self.rest.len());
 
         let word = &self.rest[..word_index];
@@ -175,36 +167,18 @@ impl<'a> Iterator for Lexer<'a> {
         let char = self.rest.chars().next()?;
 
         let token = match char {
-            ',' => {
-                self.rest = &self.rest[1..];
-                self.position += char.len_utf8();
-                Ok(Token::Comma)
-            }
-            '*' => {
-                self.rest = &self.rest[1..];
-                self.position += char.len_utf8();
-                Ok(Token::Asterisk)
-            }
-            ';' => {
-                self.rest = &self.rest[1..];
-                self.position += char.len_utf8();
-                Ok(Token::SemiColon)
-            }
-            '=' => {
-                self.rest = &self.rest[1..];
-                self.position += char.len_utf8();
-                Ok(Token::Equal)
-            }
-            '<' => {
-                self.rest = &self.rest[1..];
-                self.position += char.len_utf8();
-                Ok(Token::LessThan)
-            }
-            '>' => {
-                self.rest = &self.rest[1..];
-                self.position += char.len_utf8();
-                Ok(Token::GreaterThan)
-            }
+            '(' => self.consume_symbol(Token::LeftParen),
+            ')' => self.consume_symbol(Token::RightParen),
+            ',' => self.consume_symbol(Token::Comma),
+            '+' => self.consume_symbol(Token::Plus),
+            '-' => self.consume_symbol(Token::Minus),
+            '*' => self.consume_symbol(Token::Asterisk),
+            '/' => self.consume_symbol(Token::Slash),
+            ';' => self.consume_symbol(Token::SemiColon),
+            '=' => self.consume_symbol(Token::Equal),
+            '<' => self.consume_symbol(Token::LessThan),
+            '>' => self.consume_symbol(Token::GreaterThan),
+
             '!' => {
                 if self.rest.len() > 1 && self.rest.chars().nth(1) == Some('=') {
                     self.rest = &self.rest[2..];
@@ -233,10 +207,17 @@ impl<'a> Iterator for Lexer<'a> {
                 let word = self.consume_word()?;
 
                 if let Ok(kw) = Keyword::from_str(word) {
-                    Ok(Token::Keyword(kw))
-                } else {
-                    Ok(Token::Identifier(word))
+                    return Some(Ok(Token::Keyword(kw)));
                 }
+
+                let token = match word.to_ascii_uppercase().as_str() {
+                    "TRUE" => Token::Boolean(true),
+                    "FALSE" => Token::Boolean(true),
+                    "NULL" => Token::Null,
+                    _ => Token::Identifier(word),
+                };
+
+                Ok(token)
             }
             _ => Err(miette!(
                 "Unexpected character '{}' at position {}",
