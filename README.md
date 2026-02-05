@@ -1,74 +1,37 @@
 # Scuttle DB
 
-A learning project: building a relational database from scratch in Rust.
+> A learning project: building a relational database from scratch in Rust
 
-**Scuttle DB** is an educational database implementation modeled after PostgreSQL and SQLite, designed to understand database internals including SQL parsing, query planning, page-based storage, and buffer management.
+**Scuttle DB** is my side-project database implementation modeled after PostgreSQL and SQLite because I want to be better at Rust and also understand lower level programming.
 
 ## Purpose
 
-This is a learning project to explore:
+Areas I've explored:
+
 - **SQL Parsing** - Lexical analysis and recursive descent parsing
 - **Query Planning** - Logical and physical query optimization
 - **Storage Management** - Page-based storage with buffer pools
+- **Data Encoding** - Type-safe serialization and row encoding
 - **B-tree Indexing** - Tree-based data structures for fast lookups (in progress)
 - **Transactions** - MVCC and concurrency control (planned)
 
+The project follows PostgreSQL/SQLite/MySql conventions and architectural patterns where applicable (shamelessly copied from their repos).
+
 ## Quick Start
 
-### Installation
-
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-scuttle-db = { path = "path/to/scuttle_db" }
-```
-
-### Basic Usage
-
-```rust
-use scuttle_db::*;
-
-fn main() -> miette::Result<()> {
-    // Create a database
-    let mut db = Database::new("./my_data");
-    db.initialize()?;
-
-    // Define a schema
-    let schema = Schema::new(vec![
-        ColumnDefinition::new("id", DataType::Integer, false),
-        ColumnDefinition::new("name", DataType::VarChar(100), false),
-        ColumnDefinition::new("age", DataType::Integer, false),
-    ]);
-
-    // Create a table
-    db.create_table("users", schema)?;
-
-    // Insert data
-    let row = Row::new(vec![
-        Value::Integer(1),
-        Value::Text("Alice".to_string()),
-        Value::Integer(30),
-    ]);
-    db.insert_row("users", row)?;
-
-    // Query data
-    let result = db.execute_query("SELECT * FROM users WHERE age > 25")?;
-    for row in result.rows {
-        println!("{:?}", row);
-    }
-
-    Ok(())
-}
-```
-
-### Running the Interactive Shell
-
 ```bash
+git clone <repository-url>
+cd scuttle_db
 cargo run
 ```
 
-This starts an interactive REPL where you can execute SQL queries.
+This starts an interactive REPL where you can execute SQL queries:
+
+```
+scuttle_db> SELECT * FROM users WHERE age > 25
+scuttle_db> SELECT id, name FROM users
+scuttle_db> SELECT id, name, age FROM users WHERE name = 'Alice' AND (10 + 10) < age;
+```
 
 ## Architecture
 
@@ -81,8 +44,8 @@ SQL String → Lexer → Parser → Logical Plan → Physical Plan → Execution
 1. **Lexer**: Tokenizes SQL string into keywords, identifiers, operators
 2. **Parser**: Builds Abstract Syntax Tree (AST) using recursive descent
 3. **Logical Planner**: Converts AST to logical query plan (table scans, filters, projections)
-4. **Physical Planner**: Converts to executable physical plan with cost-based decisions
-5. **Execution Engine**: Executes plan nodes and returns result rows
+4. **Physical Planner**: Converts to executable physical plan with cost-based decisions (I lied, no costs yet)
+5. **Execution Engine**: Executes plan nodes using iterators and returns result rows
 
 ### Storage Layer
 
@@ -95,125 +58,47 @@ Database
   └── B-Trees (Indexes - in progress)
 ```
 
-- **Pages**: Fixed 8KB blocks containing multiple rows
-- **Buffer Pool**: Manages page cache and disk I/O
-- **Encoding**: Type-specific serialization (integers as little-endian, strings with length prefix)
+**Key Storage Concepts:**
 
-## Current Features
-
-- ✅ SQL lexer and parser (SELECT statements)
-- ✅ WHERE clause filtering (`=`, `!=`, `>`, `<`)
-- ✅ Multiple data types (Integer, Text, VarChar, Float, Boolean)
-- ✅ Page-based storage with buffer pool
-- ✅ Query planning (logical and physical)
-- ✅ Multi-table support
-- ✅ Column projection (SELECT specific columns)
-
-## SQL Support
-
-### Supported Syntax
-
-```sql
--- Select all columns
-SELECT * FROM users
-
--- Select specific columns
-SELECT id, name FROM users
-
--- Filter with WHERE
-SELECT * FROM users WHERE age > 25
-SELECT * FROM users WHERE name = 'Alice'
-```
-
-### Supported Operators
-
-- `=` - Equality
-- `!=` - Inequality  
-- `>` - Greater than
-- `<` - Less than
-
-### Limitations
-
-- ❌ No JOINs yet
-- ❌ No INSERT/UPDATE/DELETE via SQL (use API instead)
-- ❌ No GROUP BY, ORDER BY, LIMIT
-- ❌ No aggregate functions (COUNT, SUM, etc.)
-- ❌ Table names must be unquoted in SQL
-- ❌ String literals use single quotes only (`'text'`, not `"text"`)
-- ❌ No AND/OR in WHERE clauses yet
-
-## Documentation
-
-- **API Docs**: Run `cargo doc --open` to view comprehensive API documentation
-- **Code**: Inline documentation throughout the codebase explains design decisions
-- **Agent Guidelines**: See `AGENTS.md` for coding conventions and development workflow
+- **Pages**: Fixed 8KB blocks containing headers and multiple rows
+- **Buffer Pool**: Manages page cache and disk I/O (currently in-memory only)
+- **Encoding**: Type-specific serialization
+  - Integers: little-endian 4-byte encoding
+  - Strings: length-prefixed variable-length encoding
+  - Booleans: single byte (0 or 1)
+- **Page Layout**: PostgreSQL-inspired with headers, item pointers, and tuple data
 
 ## Development Roadmap
 
-### Near-term
 - [ ] INSERT/UPDATE/DELETE via SQL
 - [ ] AND/OR logical operators in WHERE
 - [ ] ORDER BY and LIMIT clauses
 - [ ] Aggregate functions (COUNT, SUM, AVG, etc.)
 - [ ] File persistence (save/load database)
 
-### Mid-term
 - [ ] B-tree indexes for fast lookups
 - [ ] JOIN operations (INNER, LEFT, RIGHT)
 - [ ] Query optimization (index selection, join order)
 - [ ] Statistics collection (TableStats)
 
 ### Long-term
-- [ ] Transactions with MVCC
+
+- [ ] Transactions with MVCC (Multi-Version Concurrency Control)
 - [ ] Write-Ahead Log (WAL) for durability
 - [ ] Concurrent query execution
 - [ ] Asynchronous I/O
-- [ ] Network protocol (PostgreSQL wire format?)
-
-## Project Structure
-
-```
-scuttle-db/
-├── src/
-│   ├── lib.rs              # Public API and module overview
-│   ├── bin/
-│   │   └── scuttle.rs      # Interactive REPL
-│   ├── common/
-│   │   ├── mod.rs          # Common utilities module
-│   │   └── error.rs        # DatabaseError types
-│   ├── db/
-│   │   ├── mod.rs          # Database module declarations
-│   │   ├── database.rs     # Core Database type
-│   │   └── table.rs        # Schema, Row, Value types
-│   ├── sql/
-│   │   ├── mod.rs          # SQL module declarations
-│   │   ├── lexer.rs        # SQL tokenization
-│   │   ├── parser.rs       # AST construction
-│   │   ├── logical_planner.rs   # Logical query plans
-│   │   ├── physical_planner.rs  # Physical query plans
-│   │   ├── planner_context.rs   # Context for query planning
-│   │   └── predicate_evaluator.rs  # WHERE clause evaluation
-│   ├── storage/
-│   │   ├── mod.rs          # Storage module declarations
-│   │   ├── page.rs         # Page layout and encoding
-│   │   ├── buffer_pool.rs  # Page cache management
-│   │   └── btree.rs        # B-tree implementation (WIP)
-│   └── catalog/
-│       ├── mod.rs          # Catalog module declarations
-│       └── system_catalog.rs  # Metadata storage (WIP)
-├── AGENTS.md               # Coding guidelines for AI agents
-└── README.md               # This file
-```
+- [ ] Network protocol (PostgreSQL wire format)
 
 ## Learning Resources
 
-This project was built to learn database internals. Key concepts explored:
+This project was built to learn database internals. Key references:
 
-- **Database Internals** by Alex Petrov
-- **CMU 15-445 Database Systems** course materials
-- **PostgreSQL source code** for inspiration
-- **SQLite architecture** documentation
+- **Database Internals** by Alex Petrov - comprehensive guide to storage engines
+- **CMU 15-445 Database Systems** course - query processing and optimization
+- **PostgreSQL source code** - real-world implementation patterns
+- **SQLite architecture** - simple and elegant design principles
 
-## License
+Extra Resources/Inspirations:
 
-MIT OR Apache-2.0
+- [Ben Dicken's Video on Database Internals Book](https://www.youtube.com/watch?v=HibHalGlIes)
+- [Tony Saro: Writing My Own Database From Scratch](https://www.youtube.com/watch?v=5Pc18ge9ohI&t=1834s&pp=ygUcd3JpdGluZyBhdGFiYXNlIGZyb20gc2NyYXRjaA%3D%3D)
