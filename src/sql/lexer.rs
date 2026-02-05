@@ -24,6 +24,8 @@ pub enum Token<'a> {
     NotEqual,
     GreaterThan,
     LessThan,
+    GreaterThanEqual,
+    LessThanEqual,
     LeftParen,
     RightParen,
     Asterisk,
@@ -176,9 +178,24 @@ impl<'a> Iterator for Lexer<'a> {
             '/' => self.consume_symbol(Token::Slash),
             ';' => self.consume_symbol(Token::SemiColon),
             '=' => self.consume_symbol(Token::Equal),
-            '<' => self.consume_symbol(Token::LessThan),
-            '>' => self.consume_symbol(Token::GreaterThan),
-
+            '<' => {
+                if self.rest.len() > 1 && self.rest.chars().nth(1) == Some('=') {
+                    self.rest = &self.rest[2..];
+                    self.position += 2;
+                    Ok(Token::LessThanEqual)
+                } else {
+                    self.consume_symbol(Token::LessThan)
+                }
+            }
+            '>' => {
+                if self.rest.len() > 1 && self.rest.chars().nth(1) == Some('=') {
+                    self.rest = &self.rest[2..];
+                    self.position += 2;
+                    Ok(Token::GreaterThanEqual)
+                } else {
+                    self.consume_symbol(Token::GreaterThan)
+                }
+            }
             '!' => {
                 if self.rest.len() > 1 && self.rest.chars().nth(1) == Some('=') {
                     self.rest = &self.rest[2..];

@@ -56,6 +56,22 @@ impl Evaluator<Value> for ExpressionEvaluator {
                     }
                     Operator::GreaterThan => values_greater_than(&left_val, &right_val),
                     Operator::LessThan => values_less_than(&left_val, &right_val),
+                    Operator::GreaterThanEqual => {
+                        let less = values_less_than(&left_val, &right_val)?;
+                        match less {
+                            Value::Boolean(b) => Ok(Value::Boolean(!b)),
+                            Value::Null => Ok(Value::Null),
+                            _ => unreachable!("Comparison should return Bool or Null"),
+                        }
+                    }
+                    Operator::LessThanEqual => {
+                        let less = values_greater_than(&left_val, &right_val)?;
+                        match less {
+                            Value::Boolean(b) => Ok(Value::Boolean(!b)),
+                            Value::Null => Ok(Value::Null),
+                            _ => unreachable!("Comparison should return Bool or Null"),
+                        }
+                    }
 
                     _ => Err(miette!(
                         "Operator {:?} not implemented in ExpressionEvaluator",

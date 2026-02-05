@@ -20,21 +20,21 @@ pub enum LiteralValue {
 pub enum Operator {
     /// Equality (=)
     Equal,
-
-    /// Inequality (!=)
     NotEqual,
 
     /// Logical AND
     And,
-
     /// Logical OR
     Or,
 
     /// Greater than (>)
     GreaterThan,
+    GreaterThanEqual,
 
     /// Less than (<)
     LessThan,
+    LessThanEqual,
+
     Add,
     Multiply,
     Divide,
@@ -50,8 +50,12 @@ impl Operator {
         match self {
             Operator::Or => 2,
             Operator::And => 3,
-
-            Operator::NotEqual | Operator::Equal | Operator::LessThan | Operator::GreaterThan => 5,
+            Operator::NotEqual
+            | Operator::Equal
+            | Operator::LessThan
+            | Operator::LessThanEqual
+            | Operator::GreaterThan
+            | Operator::GreaterThanEqual => 5,
             Operator::Add | Operator::Subtract => 7,
             Operator::Multiply | Operator::Divide => 10,
         }
@@ -306,6 +310,8 @@ impl<'a> SqlParser<'a> {
             Token::NotEqual => Ok(Operator::NotEqual),
             Token::GreaterThan => Ok(Operator::GreaterThan),
             Token::LessThan => Ok(Operator::LessThan),
+            Token::GreaterThanEqual => Ok(Operator::GreaterThanEqual),
+            Token::LessThanEqual => Ok(Operator::LessThanEqual),
 
             Token::Plus => Ok(Operator::Add),
             Token::Minus => Ok(Operator::Subtract),
