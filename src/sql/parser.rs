@@ -16,6 +16,10 @@ pub enum LiteralValue {
 
     /// String literal
     String(String),
+
+    Boolean(bool),
+
+    Null,
 }
 
 /// Binary comparison operators for WHERE clauses.
@@ -91,6 +95,8 @@ impl fmt::Display for Expression {
                 LiteralValue::Float(num) => write!(f, "{num}"),
                 LiteralValue::Integer(num) => write!(f, "{num}"),
                 LiteralValue::String(s) => write!(f, "\"{s}\""),
+                LiteralValue::Boolean(bool) => write!(f, "{}", bool.to_string().to_uppercase()),
+                LiteralValue::Null => write!(f, "NULL"),
             },
         }
     }
@@ -266,39 +272,49 @@ impl<'a> SqlParser<'a> {
     }
 
     fn parse_primary(&mut self) -> Result<Expression> {
-        match self.lexer.next() {
-            Some(Ok(Token::Identifier(identifier))) => {
-                Ok(Expression::Column(identifier.to_string()))
-            }
-            Some(Ok(Token::Float(num))) => Ok(Expression::Literal(LiteralValue::Float(num))),
-            Some(Ok(Token::Integer(num))) => Ok(Expression::Literal(LiteralValue::Integer(num))),
-            Some(Ok(Token::String(s))) => {
-                Ok(Expression::Literal(LiteralValue::String(s.to_string())))
-            }
-            Some(Ok(Token::Asterisk)) => Ok(Expression::Column("*".to_string())),
-            token => Err(miette!("Expected primary expression, found: {:?}", token)),
+        let token = self
+            .lexer
+            .next()
+            .ok_or(miette!("Unexpected end of input"))??;
+
+        match token {
+            Token::Identifier(i) => Ok(Expression::Column(i.to_string())),
+            Token::Integer(i) => Ok(Expression::Literal(LiteralValue::Integer(i))),
+            Token::Float(f) => Ok(Expression::Literal(LiteralValue::Float(f))),
+            Token::String(s) => Ok(Expression::Literal(LiteralValue::String(s.to_string()))),
+            Token::Asterisk => Ok(Expression::Column("*".to_string())),
+
+            t => Err(miette!("Expected a column or value, but found {:?}", t)),
         }
     }
 
     fn peek_binary_op(&mut self) -> Result<Operator> {
-        match self.lexer.peek() {
-            Some(Ok(Token::Equal)) => Ok(Operator::Equal),
-            Some(Ok(Token::NotEqual)) => Ok(Operator::NotEqual),
-            Some(Ok(Token::GreaterThan)) => Ok(Operator::GreaterThan),
-            Some(Ok(Token::LessThan)) => Ok(Operator::LessThan),
-            Some(Ok(Token::Identifier(identifier))) => {
-                Err(miette!("Unexpected identifier: {:?}", identifier))
-            }
-            _ => Err(miette!("Expected binary operator, found none")),
+        let Some(Ok(token)) = self.lexer.peek() else {
+            return Err(miette!("Unexpected end of input"));
+        };
+
+        match token {
+            Token::Equal => Ok(Operator::Equal),
+            Token::NotEqual => Ok(Operator::NotEqual),
+            Token::GreaterThan => Ok(Operator::GreaterThan),
+            Token::LessThan => Ok(Operator::LessThan),
+            t => Err(miette!("Expected a binary operator, but found {:?}", t)),
         }
     }
 
     fn expect_keyword(&mut self, expected: Keyword) -> Result<()> {
-        match self.lexer.next() {
-            Some(Ok(Token::Keyword(keyword))) if keyword == expected => Ok(()),
-            Some(Ok(token)) => Err(miette!("Expected '{:?}', found: {:?}", expected, token)),
-            Some(Err(e)) => Err(miette!("Lexer error: {:?}", e)),
-            None => Err(miette!("Expected '{:?}', found end of input", expected)),
+        let token = self
+            .lexer
+            .next()
+            .ok_or(miette!("Unexpected end of input"))??;
+
+        match token {
+            Token::Keyword(keyword) if keyword == expected => Ok(()),
+            found => Err(miette!(
+                "Expected keyword {:?}, but found {:?}",
+                expected,
+                found
+            )),
         }
     }
 }

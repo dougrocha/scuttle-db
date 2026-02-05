@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use miette::{Result, miette};
 
-use crate::DatabaseError;
+use crate::{DatabaseError, sql::parser::LiteralValue};
 
 /// Trait for table-like structures.
 ///
@@ -87,6 +87,18 @@ impl Display for Value {
             Value::Boolean(b) => write!(f, "{}", b),
             Value::Float(fl) => write!(f, "{}", fl),
             Value::Null => write!(f, "NULL"),
+        }
+    }
+}
+
+impl From<LiteralValue> for Value {
+    fn from(literal: LiteralValue) -> Self {
+        match literal {
+            LiteralValue::Integer(i) => Value::Integer(i),
+            LiteralValue::Float(f) => Value::Float(f),
+            LiteralValue::String(s) => Value::Text(s),
+            LiteralValue::Boolean(b) => Value::Boolean(b),
+            LiteralValue::Null => Value::Null,
         }
     }
 }
