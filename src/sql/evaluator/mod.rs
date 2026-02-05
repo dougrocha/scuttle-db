@@ -1,5 +1,5 @@
-use crate::{Row, Schema, Value, sql::parser::Expression};
-use miette::{Result, miette};
+use crate::{sql::parser::Expression, Row, Schema, Value};
+use miette::{miette, Result};
 
 pub mod expression;
 pub mod predicate;
@@ -127,4 +127,210 @@ pub fn values_less_than(left: &Value, right: &Value) -> Result<Value> {
         }
     };
     Ok(Value::Boolean(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_values_add_integers() {
+        let result = values_add(&Value::Integer(5), &Value::Integer(3));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Integer(8));
+    }
+
+    #[test]
+    fn test_values_add_floats() {
+        let result = values_add(&Value::Float(5.5), &Value::Float(3.2));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Float(8.7));
+    }
+
+    #[test]
+    fn test_values_add_mixed_types() {
+        let result = values_add(&Value::Integer(5), &Value::Float(3.5));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Float(8.5));
+    }
+
+    #[test]
+    fn test_values_add_with_null() {
+        let result = values_add(&Value::Integer(5), &Value::Null);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn test_values_add_invalid_types() {
+        let result = values_add(&Value::Text("hello".to_string()), &Value::Integer(5));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_values_subtract_integers() {
+        let result = values_subtract(&Value::Integer(10), &Value::Integer(3));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Integer(7));
+    }
+
+    #[test]
+    fn test_values_subtract_with_null() {
+        let result = values_subtract(&Value::Float(5.5), &Value::Null);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn test_values_multiply_integers() {
+        let result = values_multiply(&Value::Integer(4), &Value::Integer(3));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Integer(12));
+    }
+
+    #[test]
+    fn test_values_multiply_mixed_types() {
+        let result = values_multiply(&Value::Integer(4), &Value::Float(2.5));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Float(10.0));
+    }
+
+    #[test]
+    fn test_values_divide_integers() {
+        let result = values_divide(&Value::Integer(10), &Value::Integer(2));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Integer(5));
+    }
+
+    #[test]
+    fn test_values_divide_by_zero_integer() {
+        let result = values_divide(&Value::Integer(10), &Value::Integer(0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_values_divide_by_zero_float() {
+        let result = values_divide(&Value::Float(10.0), &Value::Float(0.0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_values_divide_with_null() {
+        let result = values_divide(&Value::Integer(10), &Value::Null);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn test_values_equal_integers() {
+        let result = values_equal(&Value::Integer(5), &Value::Integer(5));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(true));
+
+        let result = values_equal(&Value::Integer(5), &Value::Integer(3));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_values_equal_floats_with_epsilon() {
+        let result = values_equal(&Value::Float(5.0), &Value::Float(5.0));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_values_equal_mixed_types() {
+        let result = values_equal(&Value::Integer(5), &Value::Float(5.0));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_values_equal_booleans() {
+        let result = values_equal(&Value::Boolean(true), &Value::Boolean(true));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(true));
+
+        let result = values_equal(&Value::Boolean(true), &Value::Boolean(false));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_values_equal_with_null() {
+        let result = values_equal(&Value::Integer(5), &Value::Null);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Null);
+
+        let result = values_equal(&Value::Null, &Value::Null);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn test_values_equal_text() {
+        let result = values_equal(
+            &Value::Text("hello".to_string()),
+            &Value::Text("hello".to_string()),
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_values_greater_than_integers() {
+        let result = values_greater_than(&Value::Integer(10), &Value::Integer(5));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(true));
+
+        let result = values_greater_than(&Value::Integer(3), &Value::Integer(5));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_values_greater_than_floats() {
+        let result = values_greater_than(&Value::Float(10.5), &Value::Float(5.2));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_values_greater_than_mixed_types() {
+        let result = values_greater_than(&Value::Integer(10), &Value::Float(5.5));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_values_greater_than_with_null() {
+        let result = values_greater_than(&Value::Integer(10), &Value::Null);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_values_greater_than_invalid_types() {
+        let result = values_greater_than(&Value::Text("hello".to_string()), &Value::Integer(5));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_values_less_than_integers() {
+        let result = values_less_than(&Value::Integer(3), &Value::Integer(10));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(true));
+
+        let result = values_less_than(&Value::Integer(10), &Value::Integer(5));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_values_less_than_with_null() {
+        let result = values_less_than(&Value::Null, &Value::Integer(10));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Boolean(false));
+    }
 }

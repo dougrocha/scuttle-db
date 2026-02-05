@@ -1,4 +1,4 @@
-use miette::{Result, miette};
+use miette::{miette, Result};
 
 use std::{fmt, iter::Peekable};
 
@@ -346,90 +346,227 @@ impl<'a> SqlParser<'a> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_parse_select() {
-        let mut parser = SqlParser::new("SELECT * FROM users");
-        let stmt = parser.parse().unwrap();
+    /// Helper to parse a query and extract components
+    fn parse(query: &str) -> Statement {
+        let mut parser = SqlParser::new(query);
+        parser.parse().expect("Failed to parse query")
+    }
 
-        match stmt {
-            Statement::Select { columns, table, .. } => {
+    /// Helper to parse and extract WHERE expression
+    fn parse_where(query: &str) -> Expression {
+        match parse(query) {
+            Statement::Select {
+                r#where: Some(expr),
+                ..
+            } => expr,
+            _ => panic!("Expected SELECT with WHERE clause"),
+        }
+    }
+
+    #[test]
+    fn test_parse_select_all() {
+        match parse("SELECT * FROM users") {
+            Statement::Select {
+                columns,
+                table,
+                r#where,
+            } => {
                 assert!(matches!(columns, ColumnList::All));
-                assert_eq!(table, "users".to_string());
+                assert_eq!(table, "users");
+                assert!(r#where.is_none());
             }
             _ => panic!("Expected Select statement"),
         }
     }
 
     #[test]
-    fn test_parse_select_with_columns() {
-        let mut parser = SqlParser::new("SELECT id, name FROM users");
-        let stmt = parser.parse().unwrap();
-
-        match stmt {
+    fn test_parse_select_columns() {
+        match parse("SELECT id, name, email FROM users") {
             Statement::Select { columns, table, .. } => {
                 match columns {
                     ColumnList::Columns(cols) => {
-                        assert_eq!(cols, vec!["id".to_string(), "name".to_string()]);
+                        assert_eq!(cols, vec!["id", "name", "email"]);
                     }
-                    ColumnList::All => panic!("Expected specific columns, got All"),
+                    ColumnList::All => panic!("Expected specific columns"),
                 }
-                assert_eq!(table, "users".to_string());
+                assert_eq!(table, "users");
             }
             _ => panic!("Expected Select statement"),
         }
     }
 
     #[test]
-    fn test_parser_select_with_where_clause() {
-        let mut parser = SqlParser::new("SELECT * FROM users WHERE id = 1");
-        let stmt = parser.parse().unwrap();
-
-        match stmt {
-            Statement::Select {
-                columns,
-                table,
-                r#where,
-            } => {
-                assert!(matches!(columns, ColumnList::All));
-                assert_eq!(table, "users".to_string());
-                assert!(r#where.is_some());
-                assert_eq!(
-                    r#where,
-                    Some(Expression::BinaryOp {
-                        left: Box::new(Expression::Column("id".to_string())),
-                        op: Operator::Equal,
-                        right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
-                    })
-                );
+    fn test_parse_where_simple_comparison() {
+        let expr = parse_where("SELECT * FROM users WHERE id = 1");
+        assert_eq!(
+            expr,
+            Expression::BinaryOp {
+                left: Box::new(Expression::Column("id".to_string())),
+                op: Operator::Equal,
+                right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
             }
-            _ => panic!("Expected Select statement"),
+        );
+    }
+
+    #[test]
+    fn test_parse_where_operators() {
+        // Greater than
+        let expr = parse_where("SELECT * FROM users WHERE age > 18");
+        assert!(matches!(
+            expr,
+            Expression::BinaryOp {
+                op: Operator::GreaterThan,
+                ..
+            }
+        ));
+
+        // Less than
+        let expr = parse_where("SELECT * FROM users WHERE age < 65");
+        assert!(matches!(
+            expr,
+            Expression::BinaryOp {
+                op: Operator::LessThan,
+                ..
+            }
+        ));
+
+        // Not equal
+        let expr = parse_where("SELECT * FROM users WHERE status != 'active'");
+        assert!(matches!(
+            expr,
+            Expression::BinaryOp {
+                op: Operator::NotEqual,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_where_logical_operators() {
+        // AND
+        let expr = parse_where("SELECT * FROM users WHERE age > 18 AND status = 'active'");
+        assert!(matches!(
+            expr,
+            Expression::BinaryOp {
+                op: Operator::And,
+                ..
+            }
+        ));
+
+        // OR
+        let expr = parse_where("SELECT * FROM users WHERE age < 18 OR age > 65");
+        assert!(matches!(
+            expr,
+            Expression::BinaryOp {
+                op: Operator::Or,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_where_arithmetic() {
+        // Addition
+        let expr = parse_where("SELECT * FROM users WHERE age + 5 > 30");
+        if let Expression::BinaryOp {
+            left,
+            op: Operator::GreaterThan,
+            ..
+        } = expr
+        {
+            assert!(matches!(
+                *left,
+                Expression::BinaryOp {
+                    op: Operator::Add,
+                    ..
+                }
+            ));
+        } else {
+            panic!("Expected comparison with arithmetic");
+        }
+
+        // Multiplication (higher precedence)
+        let expr = parse_where("SELECT * FROM users WHERE price * 2 > 100");
+        if let Expression::BinaryOp {
+            left,
+            op: Operator::GreaterThan,
+            ..
+        } = expr
+        {
+            assert!(matches!(
+                *left,
+                Expression::BinaryOp {
+                    op: Operator::Multiply,
+                    ..
+                }
+            ));
+        } else {
+            panic!("Expected comparison with arithmetic");
         }
     }
 
     #[test]
-    fn test_parser_select_with_where_clause_gt() {
-        let mut parser = SqlParser::new("SELECT * FROM users WHERE id > 1");
-        let stmt = parser.parse().unwrap();
-
-        match stmt {
-            Statement::Select {
-                columns,
-                table,
-                r#where,
-            } => {
-                assert!(matches!(columns, ColumnList::All));
-                assert_eq!(table, "users".to_string());
-                assert!(r#where.is_some());
-                assert_eq!(
-                    r#where,
-                    Some(Expression::BinaryOp {
-                        left: Box::new(Expression::Column("id".to_string())),
-                        op: Operator::GreaterThan,
-                        right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
-                    })
-                );
+    fn test_parse_where_parentheses() {
+        let expr =
+            parse_where("SELECT * FROM users WHERE (age > 18 AND age < 65) OR status = 'admin'");
+        // Should parse with correct precedence
+        assert!(matches!(
+            expr,
+            Expression::BinaryOp {
+                op: Operator::Or,
+                ..
             }
-            _ => panic!("Expected Select statement"),
+        ));
+    }
+
+    #[test]
+    fn test_parse_operator_precedence() {
+        // Multiplication before addition: a + b * c should parse as a + (b * c)
+        let expr = parse_where("SELECT * FROM t WHERE a + b * c > 10");
+        if let Expression::BinaryOp {
+            left,
+            op: Operator::GreaterThan,
+            ..
+        } = expr
+        {
+            if let Expression::BinaryOp {
+                left: a,
+                op: Operator::Add,
+                right: bc,
+            } = *left
+            {
+                assert!(matches!(*a, Expression::Column(_)));
+                assert!(matches!(
+                    *bc,
+                    Expression::BinaryOp {
+                        op: Operator::Multiply,
+                        ..
+                    }
+                ));
+            } else {
+                panic!("Expected a + (b * c) structure");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_literal_types() {
+        // Integer
+        let expr = parse_where("SELECT * FROM t WHERE x = 42");
+        if let Expression::BinaryOp { right, .. } = expr {
+            assert_eq!(*right, Expression::Literal(LiteralValue::Integer(42)));
+        }
+
+        // Float
+        let expr = parse_where("SELECT * FROM t WHERE x = 3.14");
+        if let Expression::BinaryOp { right, .. } = expr {
+            assert_eq!(*right, Expression::Literal(LiteralValue::Float(3.14)));
+        }
+
+        // Boolean
+        let expr = parse_where("SELECT * FROM t WHERE active = TRUE");
+        if let Expression::BinaryOp { right, .. } = expr {
+            assert_eq!(*right, Expression::Literal(LiteralValue::Boolean(true)));
         }
     }
 }
