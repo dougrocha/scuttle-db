@@ -6,8 +6,7 @@ pub(crate) mod sql;
 pub(crate) mod storage;
 
 pub use common::error::DatabaseError;
-pub use db::database::Database;
-pub use db::table::*;
+pub use db::{database::Database, table::*};
 
 /// Internal trait for serializing fixed-size data structures to bytes.
 ///

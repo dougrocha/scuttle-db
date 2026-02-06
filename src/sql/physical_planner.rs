@@ -1,11 +1,10 @@
 use miette::{Result, miette};
 
+use super::{logical_planner::LogicalPlan, parser::Expression, planner_context::PlannerContext};
 use crate::{
     ColumnDefinition, DataType, Relation, Schema, Table,
     sql::{infer_type::infer_expression_type, parser::LiteralValue},
 };
-
-use super::{logical_planner::LogicalPlan, parser::Expression, planner_context::PlannerContext};
 
 #[derive(Debug)]
 pub enum PhysicalPlan {

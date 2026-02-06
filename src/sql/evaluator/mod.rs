@@ -1,5 +1,6 @@
-use crate::{Row, Schema, Value, sql::parser::Expression};
 use miette::{Result, miette};
+
+use crate::{Row, Schema, Value, sql::parser::Expression};
 
 pub mod expression;
 pub mod predicate;

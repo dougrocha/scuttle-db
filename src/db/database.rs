@@ -1,8 +1,9 @@
-use miette::{IntoDiagnostic, Result};
 use std::{
     fs::File,
     path::{Path, PathBuf},
 };
+
+use miette::{IntoDiagnostic, Result};
 
 use crate::{
     DatabaseError,

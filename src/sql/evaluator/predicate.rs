@@ -1,3 +1,5 @@
+use miette::{Result, miette};
+
 use crate::{
     db::table::{Row, Schema, Value},
     sql::{
@@ -5,7 +7,6 @@ use crate::{
         parser::Expression,
     },
 };
-use miette::{Result, miette};
 
 pub struct PredicateEvaluator;
 
@@ -28,8 +29,10 @@ impl Evaluator<bool> for PredicateEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::parser::{LiteralValue, Operator, SqlParser};
-    use crate::{ColumnDefinition, DataType};
+    use crate::{
+        ColumnDefinition, DataType,
+        sql::parser::{LiteralValue, Operator, SqlParser},
+    };
 
     /// Helper to parse an expression from a WHERE clause for testing
     fn parse_expr(expr_str: &str) -> Expression {

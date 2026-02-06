@@ -1,3 +1,5 @@
+use miette::{Result, miette};
+
 use crate::{
     Schema, Table,
     sql::{
@@ -6,7 +8,6 @@ use crate::{
         planner_context::PlannerContext,
     },
 };
-use miette::{Result, miette};
 
 pub struct Analyzer<'a> {
     context: &'a PlannerContext<'a>,
@@ -99,8 +100,10 @@ pub(crate) fn expand_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::parser::{LiteralValue, operators::Operator};
-    use crate::{ColumnDefinition, DataType};
+    use crate::{
+        ColumnDefinition, DataType,
+        sql::parser::{LiteralValue, operators::Operator},
+    };
 
     /// Creates a test schema with common columns
     fn create_test_schema() -> Schema {

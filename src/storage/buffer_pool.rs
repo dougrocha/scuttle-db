@@ -1,4 +1,3 @@
-use miette::{IntoDiagnostic, Result, miette};
 use std::{
     collections::HashMap,
     fs::File,
@@ -6,9 +5,10 @@ use std::{
     path::PathBuf,
 };
 
-use crate::Serializable;
+use miette::{IntoDiagnostic, Result, miette};
 
 use super::page::{Page, PageId, PageType};
+use crate::Serializable;
 
 #[derive(Debug)]
 pub struct TableFile {

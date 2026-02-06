@@ -1,8 +1,9 @@
+use miette::{Result, miette};
+
 use crate::{
     DataType, Schema,
     sql::parser::{Expression, LiteralValue, operators::Operator},
 };
-use miette::{Result, miette};
 
 pub(crate) struct InferredType {
     pub data_type: DataType,

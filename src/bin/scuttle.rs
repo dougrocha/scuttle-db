@@ -1,7 +1,6 @@
 use std::io::{BufRead, Write, stdin, stdout};
 
 use miette::{IntoDiagnostic, Result, miette};
-
 use scuttle_db::{ColumnDefinition, DataType, Database, Row, Schema, Value};
 
 fn main() -> Result<()> {
