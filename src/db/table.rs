@@ -45,14 +45,21 @@ pub enum DataType {
     VarChar(usize),
 
     /// Boolean true/false value.
-    ///
-    /// Storage encoding not yet implemented.
     Boolean,
 
     /// 64-bit floating point number.
-    ///
-    /// Storage encoding not yet implemented.
     Float,
+}
+
+impl Display for DataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DataType::Integer => write!(f, "Integer"),
+            DataType::Text | DataType::VarChar(_) => write!(f, "String"),
+            DataType::Boolean => write!(f, "Boolean"),
+            DataType::Float => write!(f, "Float"),
+        }
+    }
 }
 
 /// A value that can be stored in a database column.

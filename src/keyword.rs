@@ -11,8 +11,11 @@ pub enum Keyword {
     Insert,
     Create,
     Table,
+    As,
     And,
     Or,
+    Is,
+    Not,
 }
 
 impl FromStr for Keyword {
@@ -27,8 +30,12 @@ impl FromStr for Keyword {
             "CREATE" => Self::Create,
             "TABLE" => Self::Table,
 
+            "AS" => Self::As,
+
             "AND" => Self::And,
             "OR" => Self::Or,
+            "IS" => Self::Is,
+            "NOT" => Self::Not,
             _ => return Err(()),
         };
 

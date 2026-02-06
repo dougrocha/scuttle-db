@@ -213,6 +213,10 @@ impl<'a> Iterator for Lexer<'a> {
                 let string_value = self.consume_string('\'');
                 Ok(Token::String(string_value))
             }
+            '\"' => {
+                let string_value = self.consume_string('\"');
+                Ok(Token::Identifier(string_value))
+            }
             _ if char.is_ascii_digit() => {
                 let num_token = self.consume_number();
                 match num_token {
@@ -229,7 +233,7 @@ impl<'a> Iterator for Lexer<'a> {
 
                 let token = match word.to_ascii_uppercase().as_str() {
                     "TRUE" => Token::Boolean(true),
-                    "FALSE" => Token::Boolean(true),
+                    "FALSE" => Token::Boolean(false),
                     "NULL" => Token::Null,
                     _ => Token::Identifier(word),
                 };
@@ -307,6 +311,42 @@ mod tests {
         assert_token_eq(lexer.next(), Token::Identifier("name"));
         assert_token_eq(lexer.next(), Token::Equal);
         assert_token_eq(lexer.next(), Token::String("Alice"));
+        assert!(lexer.next().is_none());
+    }
+
+    #[test]
+    fn test_lexer_with_as() {
+        let mut lexer = Lexer::new(
+            "SELECT id as \"userID\", name AS firstName FROM users WHERE name = 'Alice'",
+        );
+
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
+        assert_token_eq(lexer.next(), Token::Identifier("id"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::As));
+        assert_token_eq(lexer.next(), Token::Identifier("userID"));
+        assert_token_eq(lexer.next(), Token::Comma);
+        assert_token_eq(lexer.next(), Token::Identifier("name"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::As));
+        assert_token_eq(lexer.next(), Token::Identifier("firstName"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
+        assert_token_eq(lexer.next(), Token::Identifier("users"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::Where));
+        assert_token_eq(lexer.next(), Token::Identifier("name"));
+        assert_token_eq(lexer.next(), Token::Equal);
+        assert_token_eq(lexer.next(), Token::String("Alice"));
+        assert!(lexer.next().is_none());
+    }
+
+    #[test]
+    fn test_lexer_with_is() {
+        let mut lexer = Lexer::new("SELECT email IS NULL FROM users");
+
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
+        assert_token_eq(lexer.next(), Token::Identifier("email"));
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::Is));
+        assert_token_eq(lexer.next(), Token::Null);
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
+        assert_token_eq(lexer.next(), Token::Identifier("users"));
         assert!(lexer.next().is_none());
     }
 

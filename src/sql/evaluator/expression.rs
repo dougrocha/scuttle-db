@@ -1,14 +1,14 @@
 use crate::{
+    Row, Schema, Value,
     sql::{
         evaluator::{
-            values_add, values_divide, values_equal, values_greater_than, values_less_than,
-            values_multiply, values_subtract, Evaluator,
+            Evaluator, values_add, values_divide, values_equal, values_greater_than,
+            values_less_than, values_multiply, values_subtract,
         },
-        parser::{Expression, Operator},
+        parser::{Expression, IsPredicate, Operator},
     },
-    Row, Schema, Value,
 };
-use miette::{miette, Result};
+use miette::{Result, miette};
 
 pub struct ExpressionEvaluator;
 
@@ -78,6 +78,27 @@ impl Evaluator<Value> for ExpressionEvaluator {
                         op
                     )),
                 }
+            }
+            Expression::Is {
+                expr,
+                predicate,
+                is_negated,
+            } => {
+                let value = self.evaluate(expr, row, schema)?;
+
+                let match_against = match predicate {
+                    IsPredicate::True => Value::Boolean(true),
+                    IsPredicate::False => Value::Boolean(false),
+                    IsPredicate::Null => Value::Null,
+                };
+
+                let bool = if !is_negated {
+                    value == match_against
+                } else {
+                    value != match_against
+                };
+
+                Ok(Value::Boolean(bool))
             }
         }
     }
@@ -179,10 +200,10 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Value::Integer(42));
 
-        let expr = Expression::Literal(LiteralValue::Float(3.14));
+        let expr = Expression::Literal(LiteralValue::Float(std::f64::consts::PI));
         let result = evaluator.evaluate(&expr, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Float(3.14));
+        assert_eq!(result.unwrap(), Value::Float(std::f64::consts::PI));
 
         let expr = Expression::Literal(LiteralValue::Boolean(true));
         let result = evaluator.evaluate(&expr, &row, &schema);

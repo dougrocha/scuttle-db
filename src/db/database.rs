@@ -8,8 +8,8 @@ use crate::{
     DatabaseError,
     db::table::{Relation, Row, Schema, Table, Value},
     sql::{
-        evaluator::{Evaluator, predicate::PredicateEvaluator},
-        logical_planner::LogicalPlan,
+        analyze::Analyzer,
+        evaluator::{Evaluator, expression::ExpressionEvaluator, predicate::PredicateEvaluator},
         parser::SqlParser,
         physical_planner::PhysicalPlan,
         planner_context::PlannerContext,
@@ -24,9 +24,8 @@ use crate::{
 ///
 /// Contains the table metadata and the result rows.
 #[derive(Debug)]
-pub struct QueryResponse<'a> {
-    /// Reference to the table (relation) that was queried.
-    pub relation: &'a Relation,
+pub struct QueryResponse {
+    pub schema: Schema,
 
     /// The rows returned by the query.
     pub rows: Vec<Row>,
@@ -255,26 +254,26 @@ impl Database {
     /// 3. **Logical Planning** - Convert AST to logical query plan
     /// 4. **Physical Planning** - Convert to executable physical plan
     /// 5. **Execution** - Execute the plan and return rows
-    pub fn execute_query(&mut self, query: &str) -> Result<QueryResponse<'_>> {
+    pub fn execute_query(&mut self, query: &str) -> Result<QueryResponse> {
         let mut parser = SqlParser::new(query);
         let statement = parser
             .parse()
             .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))?;
 
-        let logical_plan = LogicalPlan::from_statement(statement.clone())
-            .map_err(|e| DatabaseError::InvalidQuery(format!("Logical Plan error: {e}")))?;
-
-        dbg!(&logical_plan);
-
         let context = PlannerContext::new(self);
-        let physical_plan = PhysicalPlan::from_logical_plan(logical_plan, &context)
-            .map_err(|e| DatabaseError::InvalidQuery(format!("Physical Plan error: {e}")))?;
+        let logical_plan = Analyzer::new(&context).analyze_plan(statement)?;
+
+        let (physical_plan, output_schema) = {
+            let plan = PhysicalPlan::from_logical_plan(logical_plan, &context)
+                .map_err(|e| DatabaseError::InvalidQuery(format!("Physical Plan error: {e}")))?;
+            let schema = plan.schema();
+            (plan, schema)
+        };
 
         let rows = self.execute_physical_plan(physical_plan)?;
-        let table = self.get_table(statement.table_name()).unwrap();
 
         Ok(QueryResponse {
-            relation: table,
+            schema: output_schema,
             rows,
         })
     }
@@ -289,8 +288,8 @@ impl Database {
     /// Future operators may include IndexScan, HashJoin, Sort, etc.
     fn execute_physical_plan(&mut self, plan: PhysicalPlan) -> Result<Vec<Row>> {
         match plan {
-            PhysicalPlan::SeqScan { table_name } => {
-                let all_rows = self.get_rows(&table_name).into_diagnostic()?;
+            PhysicalPlan::SeqScan { table } => {
+                let all_rows = self.get_rows(&table.name).into_diagnostic()?;
 
                 Ok(all_rows)
             }
@@ -308,21 +307,27 @@ impl Database {
                     .collect())
             }
             PhysicalPlan::Projection {
-                columns_indices,
+                expressions,
                 input,
+                schema: _,
             } => {
+                let table_name = PhysicalPlan::extract_table_name(&input)?.to_string();
                 let input = self.execute_physical_plan(*input)?;
+
+                let schema = self.get_table(&table_name).into_diagnostic()?.schema();
+
+                let evaluator = ExpressionEvaluator;
 
                 let projected_rows: Vec<Row> = input
                     .into_iter()
                     .map(|row| {
-                        let projected_values: Vec<Value> = columns_indices
+                        let projected_values: Vec<Value> = expressions
                             .iter()
-                            .map(|&idx| row.values[idx].clone())
-                            .collect();
-                        Row::new(projected_values)
+                            .map(|expr| evaluator.evaluate(expr, &row, schema))
+                            .collect::<Result<Vec<_>>>()?;
+                        Ok(Row::new(projected_values))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>>>()?;
 
                 Ok(projected_rows)
             }

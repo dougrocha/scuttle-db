@@ -114,10 +114,11 @@ fn main() -> Result<()> {
         };
 
         stdout
-            .write_all(format!("{: <8}", query_result.relation.name).as_bytes())
+            .write_all(format!("{: <8}", "Results").as_bytes())
             .into_diagnostic()?;
 
-        query_result.relation.schema.columns.iter().for_each(|col| {
+        // Print only the projected column names
+        query_result.schema.columns.iter().for_each(|col| {
             let _ = stdout
                 .write_all(format!(" | {: <8}", col.name).as_bytes())
                 .into_diagnostic();

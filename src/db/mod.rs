@@ -1,3 +1,3 @@
-mod bitmap;
+pub(crate) mod bitmap;
 pub(crate) mod database;
 pub(crate) mod table;

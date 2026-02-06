@@ -1,11 +1,11 @@
 use crate::{
     db::table::{Row, Schema, Value},
     sql::{
-        evaluator::{expression::ExpressionEvaluator, Evaluator},
+        evaluator::{Evaluator, expression::ExpressionEvaluator},
         parser::Expression,
     },
 };
-use miette::{miette, Result};
+use miette::{Result, miette};
 
 pub struct PredicateEvaluator;
 
@@ -14,7 +14,6 @@ impl Evaluator<bool> for PredicateEvaluator {
         let expr_evaluator = ExpressionEvaluator;
         let value = expr_evaluator.evaluate(expression, row, schema)?;
 
-        // Convert the result to a strict Boolean
         match value {
             Value::Boolean(b) => Ok(b),
             Value::Null => Ok(false),

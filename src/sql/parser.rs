@@ -1,4 +1,4 @@
-use miette::{miette, Result};
+use miette::{Result, miette};
 
 use std::{fmt, iter::Peekable};
 
@@ -41,7 +41,30 @@ pub enum Operator {
     Subtract,
 }
 
+impl fmt::Display for Operator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_symbol())
+    }
+}
+
 impl Operator {
+    pub fn to_symbol(self) -> &'static str {
+        match self {
+            Operator::Equal => "=",
+            Operator::NotEqual => "!=",
+            Operator::And => "AND",
+            Operator::Or => "OR",
+            Operator::GreaterThan => ">",
+            Operator::GreaterThanEqual => ">=",
+            Operator::LessThan => "<",
+            Operator::LessThanEqual => "<=",
+            Operator::Add => "+",
+            Operator::Subtract => "-",
+            Operator::Multiply => "*",
+            Operator::Divide => "/",
+        }
+    }
+
     /// Returns the binding power (precedence) of this operator.
     ///
     /// This defines the "Order of Operations". Operators with a higher number
@@ -58,6 +81,24 @@ impl Operator {
             | Operator::GreaterThanEqual => 5,
             Operator::Add | Operator::Subtract => 7,
             Operator::Multiply | Operator::Divide => 10,
+        }
+    }
+}
+
+/// Predicates to the 'IS' keyword.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IsPredicate {
+    True,
+    False,
+    Null,
+}
+
+impl fmt::Display for IsPredicate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IsPredicate::True => write!(f, "TRUE"),
+            IsPredicate::False => write!(f, "FALSE"),
+            IsPredicate::Null => write!(f, "NULL"),
         }
     }
 }
@@ -83,6 +124,12 @@ pub enum Expression {
 
     /// Literal value (e.g., `25`, `'Alice'`)
     Literal(LiteralValue),
+
+    Is {
+        expr: Box<Expression>,
+        predicate: IsPredicate,
+        is_negated: bool,
+    },
 }
 
 impl fmt::Display for Expression {
@@ -99,19 +146,42 @@ impl fmt::Display for Expression {
                 LiteralValue::Boolean(bool) => write!(f, "{}", bool.to_string().to_uppercase()),
                 LiteralValue::Null => write!(f, "NULL"),
             },
+            Expression::Is {
+                expr,
+                predicate,
+                is_negated,
+            } => write!(
+                f,
+                "{expr} {} {predicate}",
+                if *is_negated { "IS NOT" } else { "IS" }
+            ),
         }
     }
 }
 
-/// Column list in a SELECT statement.
-#[derive(Debug, Clone)]
-pub enum ColumnList {
+impl Expression {
+    pub fn to_column_name(&self) -> String {
+        match self {
+            Expression::Column(name) => name.clone(),
+            _ => "?column?".to_string(),
+        }
+    }
+}
+
+/// Target list in a SELECT statement.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TargetEntry {
     /// SELECT * (all columns)
-    All,
+    Star,
 
     /// SELECT col1, col2, ... (specific columns)
-    Columns(Vec<String>),
+    Expression {
+        expr: Expression,
+        alias: Option<String>,
+    },
 }
+
+pub type TargetList = Vec<TargetEntry>;
 
 /// A SQL statement (top-level AST node).
 ///
@@ -124,7 +194,7 @@ pub enum Statement {
     /// SELECT statement
     Select {
         /// Columns to select (* or specific list)
-        columns: ColumnList,
+        targets: TargetList,
 
         /// Table to select from
         table: String,
@@ -199,7 +269,7 @@ impl<'a> SqlParser<'a> {
     fn parse_select_statement(&mut self) -> Result<Statement> {
         self.expect_keyword(Keyword::Select)?;
 
-        let columns = self.parse_column_list()?;
+        let columns = self.parse_targets()?;
 
         self.expect_keyword(Keyword::From)?;
         let table = match self.lexer.next() {
@@ -213,35 +283,52 @@ impl<'a> SqlParser<'a> {
         };
 
         Ok(Statement::Select {
-            columns,
+            targets: columns,
             table,
             r#where,
         })
     }
 
-    fn parse_column_list(&mut self) -> Result<ColumnList> {
-        if let Some(Ok(Token::Asterisk)) = self.lexer.peek() {
-            self.lexer.next();
-            return Ok(ColumnList::All);
-        }
-
+    fn parse_targets(&mut self) -> Result<TargetList> {
         let mut columns = Vec::new();
 
-        loop {
-            if let Some(Ok(Token::Identifier(column))) = self.lexer.next() {
-                columns.push(column.to_string());
+        while let Some(Ok(token)) = self.lexer.peek() {
+            if matches!(token, Token::Keyword(Keyword::From)) {
+                break;
+            }
+
+            let expr = self.parse_expression(0)?;
+
+            if let Expression::Column(col) = &expr
+                && col == "*"
+            {
+                columns.push(TargetEntry::Star);
             } else {
-                return Err(miette!("Expected column name"));
+                let alias = match self.lexer.peek() {
+                    Some(Ok(Token::Keyword(Keyword::As))) => {
+                        // consume AS
+                        self.lexer.next();
+                        match self.lexer.next() {
+                            Some(Ok(Token::Identifier(name))) => Some(name.to_string()),
+                            Some(Ok(_)) => return Err(miette!("Expected identifier after AS")),
+                            _ => return Err(miette!("Unexpected EOF")),
+                        }
+                    }
+                    _ => None,
+                };
+
+                columns.push(TargetEntry::Expression {
+                    expr: expr.clone(),
+                    alias,
+                });
             }
 
             if let Some(Ok(Token::Comma)) = self.lexer.peek() {
                 self.lexer.next();
-            } else {
-                break;
             }
         }
 
-        Ok(ColumnList::Columns(columns))
+        Ok(columns)
     }
 
     fn parse_expression(&mut self, min_prec: u8) -> Result<Expression> {
@@ -252,6 +339,7 @@ impl<'a> SqlParser<'a> {
                 break;
             }
             // consume op
+            // will consume NOT if op is 'ISNOT'
             self.lexer.next();
 
             let rhs = self.parse_expression(op.precedence() + 1)?;
@@ -271,7 +359,7 @@ impl<'a> SqlParser<'a> {
             .next()
             .ok_or(miette!("Unexpected end of input"))??;
 
-        let token = match token {
+        let expr = match token {
             Token::Boolean(b) => Expression::Literal(LiteralValue::Boolean(b)),
             Token::Integer(i) => Expression::Literal(LiteralValue::Integer(i)),
             Token::Float(f) => Expression::Literal(LiteralValue::Float(f)),
@@ -297,7 +385,7 @@ impl<'a> SqlParser<'a> {
             }
         };
 
-        Ok(token)
+        self.parse_is_postfix(expr)
     }
 
     fn peek_binary_op(&mut self) -> Result<Operator> {
@@ -322,6 +410,45 @@ impl<'a> SqlParser<'a> {
             Token::Keyword(Keyword::Or) => Ok(Operator::Or),
 
             t => Err(miette!("Expected a binary operator, but found {:?}", t)),
+        }
+    }
+
+    // Potentially parse "IS" postfix
+    fn parse_is_postfix(&mut self, expr: Expression) -> Result<Expression> {
+        // Check if next token is IS keyword
+        if !matches!(self.lexer.peek(), Some(Ok(Token::Keyword(Keyword::Is)))) {
+            return Ok(expr); // No IS, return expression as-is
+        }
+
+        self.lexer.next(); // Consume IS
+
+        // Check for optional NOT
+        let is_negated = if matches!(self.lexer.peek(), Some(Ok(Token::Keyword(Keyword::Not)))) {
+            self.lexer.next(); // Consume NOT
+            true
+        } else {
+            false
+        };
+
+        // Expect TRUE/FALSE/NULL
+        match self.lexer.next() {
+            Some(Ok(Token::Null)) => Ok(Expression::Is {
+                expr: Box::new(expr),
+                predicate: IsPredicate::Null,
+                is_negated,
+            }),
+            Some(Ok(Token::Boolean(bool))) => Ok(Expression::Is {
+                expr: Box::new(expr),
+                predicate: if bool {
+                    IsPredicate::True
+                } else {
+                    IsPredicate::False
+                },
+                is_negated,
+            }),
+            Some(Ok(t)) => Err(miette!("Expected TRUE/FALSE/NULL after IS, found {:?}", t)),
+            Some(Err(e)) => Err(e),
+            None => Err(miette!("Expected TRUE/FALSE/NULL after IS, found EOF")),
         }
     }
 
@@ -367,11 +494,11 @@ mod tests {
     fn test_parse_select_all() {
         match parse("SELECT * FROM users") {
             Statement::Select {
-                columns,
+                targets: columns,
                 table,
                 r#where,
             } => {
-                assert!(matches!(columns, ColumnList::All));
+                assert_eq!(columns, vec![TargetEntry::Star]);
                 assert_eq!(table, "users");
                 assert!(r#where.is_none());
             }
@@ -381,14 +508,25 @@ mod tests {
 
     #[test]
     fn test_parse_select_columns() {
-        match parse("SELECT id, name, email FROM users") {
-            Statement::Select { columns, table, .. } => {
-                match columns {
-                    ColumnList::Columns(cols) => {
-                        assert_eq!(cols, vec!["id", "name", "email"]);
-                    }
-                    ColumnList::All => panic!("Expected specific columns"),
-                }
+        match parse("SELECT id as \"Identity\", name AS firstName FROM users") {
+            Statement::Select {
+                targets: columns,
+                table,
+                ..
+            } => {
+                assert_eq!(
+                    columns,
+                    vec![
+                        TargetEntry::Expression {
+                            expr: Expression::Column("id".to_string()),
+                            alias: Some("Identity".to_string()),
+                        },
+                        TargetEntry::Expression {
+                            expr: Expression::Column("name".to_string()),
+                            alias: Some("firstName".to_string()),
+                        },
+                    ]
+                );
                 assert_eq!(table, "users");
             }
             _ => panic!("Expected Select statement"),
@@ -558,9 +696,9 @@ mod tests {
         }
 
         // Float
-        let expr = parse_where("SELECT * FROM t WHERE x = 3.14");
+        let expr = parse_where("SELECT * FROM t WHERE x = 3.15");
         if let Expression::BinaryOp { right, .. } = expr {
-            assert_eq!(*right, Expression::Literal(LiteralValue::Float(3.14)));
+            assert_eq!(*right, Expression::Literal(LiteralValue::Float(3.15)));
         }
 
         // Boolean
