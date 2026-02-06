@@ -8,7 +8,7 @@ use crate::{
     DatabaseError,
     db::table::{Relation, Row, Schema, Table, Value},
     sql::{
-        analyze::Analyzer,
+        analyzer::Analyzer,
         evaluator::{Evaluator, expression::ExpressionEvaluator, predicate::PredicateEvaluator},
         parser::SqlParser,
         physical_planner::PhysicalPlan,

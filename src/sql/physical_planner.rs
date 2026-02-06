@@ -101,16 +101,14 @@ impl PhysicalPlan {
                                 Ok(ColumnDefinition {
                                     name: output_name.clone(),
                                     data_type: expr_type,
-                                    nullable: false, // false for now
+                                    nullable: false,
                                 })
                             }
-                            Expression::Is { .. } => {
-                                Ok(ColumnDefinition {
-                                    name: output_name.clone(),
-                                    data_type: DataType::Boolean,
-                                    nullable: false, // false for now
-                                })
-                            }
+                            Expression::Is { .. } => Ok(ColumnDefinition {
+                                name: output_name.clone(),
+                                data_type: DataType::Boolean,
+                                nullable: false,
+                            }),
                         }
                     })
                     .collect::<Result<Vec<_>>>()?;

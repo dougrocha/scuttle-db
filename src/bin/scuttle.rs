@@ -39,7 +39,7 @@ fn main() -> Result<()> {
         ColumnDefinition {
             name: "age".to_string(),
             data_type: DataType::Integer,
-            nullable: false,
+            nullable: true,
         },
         ColumnDefinition {
             name: "is_active".to_string(),
@@ -65,8 +65,8 @@ fn main() -> Result<()> {
         Row::new(vec![
             Value::Integer(2),
             Value::Text("Bob".to_string()),
-            Value::Integer(25),
             Value::Null,
+            Value::Boolean(false),
         ]),
     );
     let _ = db.insert_row(
