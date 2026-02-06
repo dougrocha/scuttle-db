@@ -104,12 +104,10 @@ impl PhysicalPlan {
                                     nullable: false, // false for now
                                 })
                             }
-                            Expression::Is { expr, .. } => {
-                                let expr_type = infer_expression_type(expr, &input_plan.schema())?;
-
+                            Expression::Is { .. } => {
                                 Ok(ColumnDefinition {
                                     name: output_name.clone(),
-                                    data_type: expr_type,
+                                    data_type: DataType::Boolean,
                                     nullable: false, // false for now
                                 })
                             }
