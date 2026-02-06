@@ -1,237 +1,17 @@
+use crate::{
+    keyword::Keyword,
+    sql::lexer::{Lexer, Token},
+};
 use miette::{Result, miette};
+use std::iter::Peekable;
 
-use std::{fmt, iter::Peekable};
+pub(crate) use ast::*;
+pub(crate) use literal_value::LiteralValue;
+pub(crate) use operators::Operator;
 
-use super::lexer::{Lexer, Token};
-use crate::keyword::Keyword;
-
-/// A literal value in SQL
-#[derive(Debug, Clone, PartialEq)]
-pub enum LiteralValue {
-    Integer(i64),
-    Float(f64),
-    String(String),
-    Boolean(bool),
-    Null,
-}
-
-/// Binary comparison operators for WHERE clauses.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Operator {
-    /// Equality (=)
-    Equal,
-    NotEqual,
-
-    /// Logical AND
-    And,
-    /// Logical OR
-    Or,
-
-    /// Greater than (>)
-    GreaterThan,
-    GreaterThanEqual,
-
-    /// Less than (<)
-    LessThan,
-    LessThanEqual,
-
-    Add,
-    Multiply,
-    Divide,
-    Subtract,
-}
-
-impl fmt::Display for Operator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_symbol())
-    }
-}
-
-impl Operator {
-    pub fn to_symbol(self) -> &'static str {
-        match self {
-            Operator::Equal => "=",
-            Operator::NotEqual => "!=",
-            Operator::And => "AND",
-            Operator::Or => "OR",
-            Operator::GreaterThan => ">",
-            Operator::GreaterThanEqual => ">=",
-            Operator::LessThan => "<",
-            Operator::LessThanEqual => "<=",
-            Operator::Add => "+",
-            Operator::Subtract => "-",
-            Operator::Multiply => "*",
-            Operator::Divide => "/",
-        }
-    }
-
-    /// Returns the binding power (precedence) of this operator.
-    ///
-    /// This defines the "Order of Operations". Operators with a higher number
-    /// bind tighter and are evaluated first.
-    fn precedence(&self) -> u8 {
-        match self {
-            Operator::Or => 2,
-            Operator::And => 3,
-            Operator::NotEqual
-            | Operator::Equal
-            | Operator::LessThan
-            | Operator::LessThanEqual
-            | Operator::GreaterThan
-            | Operator::GreaterThanEqual => 5,
-            Operator::Add | Operator::Subtract => 7,
-            Operator::Multiply | Operator::Divide => 10,
-        }
-    }
-}
-
-/// Predicates to the 'IS' keyword.
-#[derive(Debug, Clone, PartialEq)]
-pub enum IsPredicate {
-    True,
-    False,
-    Null,
-}
-
-impl fmt::Display for IsPredicate {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            IsPredicate::True => write!(f, "TRUE"),
-            IsPredicate::False => write!(f, "FALSE"),
-            IsPredicate::Null => write!(f, "NULL"),
-        }
-    }
-}
-
-/// An expression in a WHERE clause.
-///
-/// Expressions form a tree structure representing the filtering logic.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Expression {
-    BinaryOp {
-        /// Left operand
-        left: Box<Expression>,
-
-        /// Operator
-        op: Operator,
-
-        /// Right operand
-        right: Box<Expression>,
-    },
-
-    /// Column reference (e.g., `age`, `name`)
-    Column(String),
-
-    /// Literal value (e.g., `25`, `'Alice'`)
-    Literal(LiteralValue),
-
-    Is {
-        expr: Box<Expression>,
-        predicate: IsPredicate,
-        is_negated: bool,
-    },
-}
-
-impl fmt::Display for Expression {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Expression::BinaryOp { left, op, right } => {
-                write!(f, "({left} {op:?} {right})")
-            }
-            Expression::Column(name) => write!(f, "{name}"),
-            Expression::Literal(value) => match value {
-                LiteralValue::Float(num) => write!(f, "{num}"),
-                LiteralValue::Integer(num) => write!(f, "{num}"),
-                LiteralValue::String(s) => write!(f, "\"{s}\""),
-                LiteralValue::Boolean(bool) => write!(f, "{}", bool.to_string().to_uppercase()),
-                LiteralValue::Null => write!(f, "NULL"),
-            },
-            Expression::Is {
-                expr,
-                predicate,
-                is_negated,
-            } => write!(
-                f,
-                "{expr} {} {predicate}",
-                if *is_negated { "IS NOT" } else { "IS" }
-            ),
-        }
-    }
-}
-
-impl Expression {
-    pub fn to_column_name(&self) -> String {
-        match self {
-            Expression::Column(name) => name.clone(),
-            _ => "?column?".to_string(),
-        }
-    }
-}
-
-/// Target list in a SELECT statement.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TargetEntry {
-    /// SELECT * (all columns)
-    Star,
-
-    /// SELECT col1, col2, ... (specific columns)
-    Expression {
-        expr: Expression,
-        alias: Option<String>,
-    },
-}
-
-pub type TargetList = Vec<TargetEntry>;
-
-/// A SQL statement (top-level AST node).
-///
-/// Currently only SELECT is fully implemented.
-#[derive(Debug, Clone)]
-pub enum Statement {
-    /// CREATE statement (not yet implemented)
-    Create,
-
-    /// SELECT statement
-    Select {
-        /// Columns to select (* or specific list)
-        targets: TargetList,
-
-        /// Table to select from
-        table: String,
-
-        /// Optional WHERE clause
-        r#where: Option<Expression>,
-    },
-
-    /// UPDATE statement (not yet implemented)
-    Update {
-        /// Table to update
-        table: String,
-
-        /// Columns to update
-        columns: Vec<String>,
-
-        /// New values
-        values: Vec<String>,
-    },
-
-    /// INSERT statement (not yet implemented)
-    Insert,
-
-    /// DELETE statement (not yet implemented)
-    Delete,
-}
-
-impl Statement {
-    /// Extracts the table name from this statement.
-    pub fn table_name(&self) -> &str {
-        match self {
-            Statement::Select { table, .. } => table,
-            Statement::Update { table, .. } => table,
-            _ => panic!("NOT SUPPORTED YET"),
-        }
-    }
-}
+pub(crate) mod ast;
+pub(crate) mod literal_value;
+pub(crate) mod operators;
 
 /// SQL parser that converts tokens into an AST.
 ///
@@ -302,7 +82,7 @@ impl<'a> SqlParser<'a> {
             if let Expression::Column(col) = &expr
                 && col == "*"
             {
-                columns.push(TargetEntry::Star);
+                columns.push(SelectTarget::Star);
             } else {
                 let alias = match self.lexer.peek() {
                     Some(Ok(Token::Keyword(Keyword::As))) => {
@@ -317,7 +97,7 @@ impl<'a> SqlParser<'a> {
                     _ => None,
                 };
 
-                columns.push(TargetEntry::Expression {
+                columns.push(SelectTarget::Expression {
                     expr: expr.clone(),
                     alias,
                 });
@@ -498,7 +278,7 @@ mod tests {
                 table,
                 r#where,
             } => {
-                assert_eq!(columns, vec![TargetEntry::Star]);
+                assert_eq!(columns, vec![SelectTarget::Star]);
                 assert_eq!(table, "users");
                 assert!(r#where.is_none());
             }
@@ -517,11 +297,11 @@ mod tests {
                 assert_eq!(
                     columns,
                     vec![
-                        TargetEntry::Expression {
+                        SelectTarget::Expression {
                             expr: Expression::Column("id".to_string()),
                             alias: Some("Identity".to_string()),
                         },
-                        TargetEntry::Expression {
+                        SelectTarget::Expression {
                             expr: Expression::Column("name".to_string()),
                             alias: Some("firstName".to_string()),
                         },

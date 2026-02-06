@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use miette::{Result, miette};
 
-use crate::{DatabaseError, db::bitmap::NullBitmap, sql::parser::LiteralValue};
+use crate::{DatabaseError, db::bitmap::NullBitmap, sql::parser::literal_value::LiteralValue};
 
 /// Trait for table-like structures.
 ///

@@ -7,7 +7,7 @@ use crate::keyword::Keyword;
 /// A token in the SQL language.
 #[derive(Debug, PartialEq)]
 pub enum Token<'a> {
-    /// SQL keyword (SELECT, FROM, WHERE, etc.) - always uppercase
+    /// SQL keyword (SELECT, FROM, WHERE, etc.)
     Keyword(Keyword),
 
     /// Literals
@@ -36,16 +36,16 @@ pub enum Token<'a> {
 
 /// SQL lexer that tokenizes a query string.
 #[derive(Clone, Copy)]
-pub(crate) struct Lexer<'a> {
+pub struct Lexer<'a> {
     /// The complete original query string
     #[allow(dead_code)]
-    pub whole: &'a str,
+    whole: &'a str,
 
     /// The remaining portion to tokenize
-    pub rest: &'a str,
+    rest: &'a str,
 
     /// Current byte position
-    pub position: usize,
+    position: usize,
 }
 
 impl<'a> Lexer<'a> {

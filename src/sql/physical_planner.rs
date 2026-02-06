@@ -2,7 +2,7 @@ use miette::{Result, miette};
 
 use crate::{
     ColumnDefinition, DataType, Relation, Schema, Table,
-    sql::parser::{LiteralValue, Operator},
+    sql::{infer_type::infer_expression_type, parser::LiteralValue},
 };
 
 use super::{logical_planner::LogicalPlan, parser::Expression, planner_context::PlannerContext};
@@ -127,7 +127,10 @@ impl PhysicalPlan {
                 join_type: _,
             } => todo!(),
             LogicalPlan::Limit { input: _, count: _ } => todo!(),
-            LogicalPlan::Sort { input: _, order_by: _ } => todo!(),
+            LogicalPlan::Sort {
+                input: _,
+                order_by: _,
+            } => todo!(),
         };
 
         Ok(plan)
@@ -139,109 +142,5 @@ impl PhysicalPlan {
             PhysicalPlan::Filter { input, .. } => Self::extract_table_name(input),
             PhysicalPlan::Projection { input, .. } => Self::extract_table_name(input),
         }
-    }
-}
-
-struct InferredType {
-    data_type: DataType,
-    nullable: bool,
-}
-
-impl InferredType {
-    fn new(data_type: DataType, nullable: bool) -> Self {
-        Self {
-            data_type,
-            nullable,
-        }
-    }
-
-    fn not_null(data_type: DataType) -> Self {
-        Self::new(data_type, false)
-    }
-}
-
-fn infer_expression_type(expr: &Expression, schema: &Schema) -> Result<InferredType> {
-    match expr {
-        Expression::Column(col_name) => {
-            let col = schema
-                .columns
-                .iter()
-                .find(|col| col.name == *col_name)
-                .ok_or_else(|| miette!("Column '{}' not found", col_name))?;
-
-            Ok(InferredType::new(col.data_type, col.nullable))
-        }
-        Expression::Literal(literal_value) => match literal_value {
-            LiteralValue::Integer(_) => Ok(InferredType::not_null(DataType::Integer)),
-            LiteralValue::String(_) => Ok(InferredType::not_null(DataType::Text)),
-            LiteralValue::Boolean(_) => Ok(InferredType::not_null(DataType::Boolean)),
-            LiteralValue::Float(_) => Ok(InferredType::not_null(DataType::Float)),
-            LiteralValue::Null => Err(miette!(
-                "Cannot infer type from NULL literal without context"
-            )),
-        },
-        Expression::BinaryOp { left, op, right } => {
-            let left = infer_expression_type(left, schema)?;
-            let right = infer_expression_type(right, schema)?;
-
-            match op {
-                Operator::Add | Operator::Subtract | Operator::Multiply | Operator::Divide => {
-                    let data_type = infer_math_result_type(*op, left.data_type, right.data_type)?;
-                    Ok(InferredType::new(
-                        data_type,
-                        left.nullable || right.nullable,
-                    ))
-                }
-                _ => Err(miette!(
-                    "Type inference for operator {:?} not yet implemented",
-                    op
-                )),
-            }
-        }
-        Expression::Is { .. } => Ok(InferredType::not_null(DataType::Boolean)),
-    }
-}
-
-fn infer_math_result_type(op: Operator, left: DataType, right: DataType) -> Result<DataType> {
-    match (left, right) {
-        (DataType::Integer, DataType::Integer) => Ok(DataType::Integer),
-        (DataType::Integer, DataType::Float) | (DataType::Float, DataType::Integer) => {
-            Ok(DataType::Float)
-        }
-        _ => Err(miette!(
-            "Type inference for {} is not implemented between types {} and {}",
-            op,
-            left,
-            right
-        )),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_infer_type_nullable_column() {
-        let schema = Schema::new(vec![ColumnDefinition::new("age", DataType::Integer, true)]);
-        let expr = Expression::Column("age".to_string());
-        let result = infer_expression_type(&expr, &schema).unwrap();
-
-        assert_eq!(result.data_type, DataType::Integer);
-        assert!(result.nullable);
-    }
-
-    #[test]
-    fn test_infer_type_binary_op_propagates_nullability() {
-        let schema = Schema::new(vec![ColumnDefinition::new("age", DataType::Integer, true)]);
-        let expr = Expression::BinaryOp {
-            left: Box::new(Expression::Column("age".to_string())),
-            op: Operator::Multiply,
-            right: Box::new(Expression::Literal(LiteralValue::Integer(2))),
-        };
-        let result = infer_expression_type(&expr, &schema).unwrap();
-
-        assert_eq!(result.data_type, DataType::Integer);
-        assert!(result.nullable); // Should be nullable because 'age' is nullable
     }
 }

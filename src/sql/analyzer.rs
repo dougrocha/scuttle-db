@@ -2,7 +2,7 @@ use crate::{
     Schema, Table,
     sql::{
         logical_planner::LogicalPlan,
-        parser::{Expression, Statement, TargetEntry, TargetList},
+        parser::{Expression, SelectTarget, Statement, TargetList},
         planner_context::PlannerContext,
     },
 };
@@ -79,14 +79,14 @@ pub(crate) fn expand_targets(
 
     for target in targets {
         match target {
-            TargetEntry::Star => {
+            SelectTarget::Star => {
                 // This is the "Star Expansion" logic
                 for col in &schema.columns {
                     expanded.push(Expression::Column(col.name.clone()));
                     names.push(col.name.to_string());
                 }
             }
-            TargetEntry::Expression { expr, alias } => {
+            SelectTarget::Expression { expr, alias } => {
                 expanded.push(expr.clone());
                 names.push(alias.clone().unwrap_or_else(|| expr.to_column_name()));
             }
@@ -99,7 +99,7 @@ pub(crate) fn expand_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::parser::{LiteralValue, Operator};
+    use crate::sql::parser::{LiteralValue, operators::Operator};
     use crate::{ColumnDefinition, DataType};
 
     /// Creates a test schema with common columns
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn test_expand_star() {
         let schema = create_test_schema();
-        let targets = vec![TargetEntry::Star];
+        let targets = vec![SelectTarget::Star];
 
         let (expressions, names) = expand_targets(targets, &schema).expect("Failed to expand star");
 
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn test_expand_single_column_no_alias() {
         let schema = create_test_schema();
-        let targets = vec![TargetEntry::Expression {
+        let targets = vec![SelectTarget::Expression {
             expr: Expression::Column("name".to_string()),
             alias: None,
         }];
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn test_expand_column_with_alias() {
         let schema = create_test_schema();
-        let targets = vec![TargetEntry::Expression {
+        let targets = vec![SelectTarget::Expression {
             expr: Expression::Column("id".to_string()),
             alias: Some("user_id".to_string()),
         }];
@@ -189,15 +189,15 @@ mod tests {
     fn test_expand_multiple_columns_mixed_aliases() {
         let schema = create_test_schema();
         let targets = vec![
-            TargetEntry::Expression {
+            SelectTarget::Expression {
                 expr: Expression::Column("id".to_string()),
                 alias: Some("user_id".to_string()),
             },
-            TargetEntry::Expression {
+            SelectTarget::Expression {
                 expr: Expression::Column("name".to_string()),
                 alias: None,
             },
-            TargetEntry::Expression {
+            SelectTarget::Expression {
                 expr: Expression::Column("email".to_string()),
                 alias: Some("contact_email".to_string()),
             },
@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn test_expand_literal_expression_no_alias() {
         let schema = create_test_schema();
-        let targets = vec![TargetEntry::Expression {
+        let targets = vec![SelectTarget::Expression {
             expr: Expression::Literal(LiteralValue::Integer(42)),
             alias: None,
         }];
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn test_expand_literal_with_alias() {
         let schema = create_test_schema();
-        let targets = vec![TargetEntry::Expression {
+        let targets = vec![SelectTarget::Expression {
             expr: Expression::Literal(LiteralValue::String("Hello".to_string())),
             alias: Some("greeting".to_string()),
         }];
@@ -256,7 +256,7 @@ mod tests {
             right: Box::new(Expression::Literal(LiteralValue::Integer(10))),
         };
 
-        let targets = vec![TargetEntry::Expression {
+        let targets = vec![SelectTarget::Expression {
             expr,
             alias: Some("next_decade_age".to_string()),
         }];
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn test_expand_star_with_empty_schema() {
         let schema = Schema::new(vec![]); // Empty schema
-        let targets = vec![TargetEntry::Star];
+        let targets = vec![SelectTarget::Star];
 
         let (expressions, names) = expand_targets(targets, &schema).expect("Failed to expand star");
 
@@ -290,8 +290,8 @@ mod tests {
 
         // SELECT *, 'extra' AS bonus
         let targets = vec![
-            TargetEntry::Star,
-            TargetEntry::Expression {
+            SelectTarget::Star,
+            SelectTarget::Expression {
                 expr: Expression::Literal(LiteralValue::String("extra".to_string())),
                 alias: Some("bonus".to_string()),
             },
