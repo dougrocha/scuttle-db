@@ -1,7 +1,7 @@
 use miette::{Result, miette};
 
 use crate::{
-    ColumnDefinition, DataType, Relation, Schema,
+    ColumnDefinition, DataType, Relation, Schema, Table,
     sql::parser::{LiteralValue, Operator},
 };
 
@@ -26,7 +26,7 @@ pub enum PhysicalPlan {
 impl PhysicalPlan {
     pub fn schema(&self) -> Schema {
         match self {
-            PhysicalPlan::SeqScan { table, .. } => table.schema.clone(),
+            PhysicalPlan::SeqScan { table, .. } => table.schema().clone(),
             PhysicalPlan::Projection { schema, .. } => schema.clone(),
             PhysicalPlan::Filter { input, .. } => input.schema(),
         }
@@ -96,12 +96,12 @@ impl PhysicalPlan {
                                 })
                             }
                             Expression::BinaryOp { .. } => {
-                                let expr_type = infer_expression_type(expr, &input_plan.schema())?;
+                                let infer_type = infer_expression_type(expr, &input_plan.schema())?;
 
                                 Ok(ColumnDefinition {
                                     name: output_name.clone(),
-                                    data_type: expr_type,
-                                    nullable: false,
+                                    data_type: infer_type.data_type,
+                                    nullable: infer_type.nullable,
                                 })
                             }
                             Expression::Is { .. } => Ok(ColumnDefinition {
@@ -127,14 +127,32 @@ impl PhysicalPlan {
 
     pub fn extract_table_name(plan: &PhysicalPlan) -> Result<&str> {
         match plan {
-            PhysicalPlan::SeqScan { table } => Ok(&table.name),
+            PhysicalPlan::SeqScan { table } => Ok(table.name()),
             PhysicalPlan::Filter { input, .. } => Self::extract_table_name(input),
             PhysicalPlan::Projection { input, .. } => Self::extract_table_name(input),
         }
     }
 }
 
-fn infer_expression_type(expr: &Expression, schema: &Schema) -> Result<DataType> {
+struct InferredType {
+    data_type: DataType,
+    nullable: bool,
+}
+
+impl InferredType {
+    fn new(data_type: DataType, nullable: bool) -> Self {
+        Self {
+            data_type,
+            nullable,
+        }
+    }
+
+    fn not_null(data_type: DataType) -> Self {
+        Self::new(data_type, false)
+    }
+}
+
+fn infer_expression_type(expr: &Expression, schema: &Schema) -> Result<InferredType> {
     match expr {
         Expression::Column(col_name) => {
             let col = schema
@@ -143,13 +161,13 @@ fn infer_expression_type(expr: &Expression, schema: &Schema) -> Result<DataType>
                 .find(|col| col.name == *col_name)
                 .ok_or_else(|| miette!("Column '{}' not found", col_name))?;
 
-            Ok(col.data_type)
+            Ok(InferredType::new(col.data_type, col.nullable))
         }
         Expression::Literal(literal_value) => match literal_value {
-            LiteralValue::Integer(_) => Ok(DataType::Integer),
-            LiteralValue::String(_) => Ok(DataType::Text),
-            LiteralValue::Boolean(_) => Ok(DataType::Boolean),
-            LiteralValue::Float(_) => Ok(DataType::Float),
+            LiteralValue::Integer(_) => Ok(InferredType::not_null(DataType::Integer)),
+            LiteralValue::String(_) => Ok(InferredType::not_null(DataType::Text)),
+            LiteralValue::Boolean(_) => Ok(InferredType::not_null(DataType::Boolean)),
+            LiteralValue::Float(_) => Ok(InferredType::not_null(DataType::Float)),
             LiteralValue::Null => Err(miette!(
                 "Cannot infer type from NULL literal without context"
             )),
@@ -160,7 +178,11 @@ fn infer_expression_type(expr: &Expression, schema: &Schema) -> Result<DataType>
 
             match op {
                 Operator::Add | Operator::Subtract | Operator::Multiply | Operator::Divide => {
-                    infer_math_result_type(*op, left, right)
+                    let data_type = infer_math_result_type(*op, left.data_type, right.data_type)?;
+                    Ok(InferredType::new(
+                        data_type,
+                        left.nullable || right.nullable,
+                    ))
                 }
                 _ => Err(miette!(
                     "Type inference for operator {:?} not yet implemented",
@@ -168,7 +190,7 @@ fn infer_expression_type(expr: &Expression, schema: &Schema) -> Result<DataType>
                 )),
             }
         }
-        Expression::Is { .. } => Ok(DataType::Boolean),
+        Expression::Is { .. } => Ok(InferredType::not_null(DataType::Boolean)),
     }
 }
 

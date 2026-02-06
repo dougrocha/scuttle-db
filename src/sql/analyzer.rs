@@ -1,5 +1,5 @@
 use crate::{
-    Schema,
+    Schema, Table,
     sql::{
         logical_planner::LogicalPlan,
         parser::{Expression, Statement, TargetEntry, TargetList},
@@ -26,10 +26,10 @@ impl<'a> Analyzer<'a> {
             } => {
                 let resolved_table = self.context.get_table(&table)?;
 
-                let (expanded_targets, names) = expand_targets(targets, &resolved_table.schema)?;
+                let (expanded_targets, names) = expand_targets(targets, resolved_table.schema())?;
 
                 let mut plan = LogicalPlan::TableScan {
-                    table: resolved_table.name.clone(),
+                    table: resolved_table.name().to_owned(),
                 };
 
                 if let Some(predicate) = r#where {

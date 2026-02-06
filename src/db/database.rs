@@ -289,7 +289,7 @@ impl Database {
     fn execute_physical_plan(&mut self, plan: PhysicalPlan) -> Result<Vec<Row>> {
         match plan {
             PhysicalPlan::SeqScan { table } => {
-                let all_rows = self.get_rows(&table.name).into_diagnostic()?;
+                let all_rows = self.get_rows(table.name()).into_diagnostic()?;
 
                 Ok(all_rows)
             }

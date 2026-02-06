@@ -368,10 +368,10 @@ impl Row {
 #[derive(Debug, Clone)]
 pub struct Relation {
     /// The table name.
-    pub name: String,
+    name: String,
 
     /// The table's schema defining its columns.
-    pub schema: Schema,
+    schema: Schema,
 }
 
 impl Relation {
