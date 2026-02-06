@@ -208,3 +208,32 @@ fn infer_math_result_type(op: Operator, left: DataType, right: DataType) -> Resu
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_infer_type_nullable_column() {
+        let schema = Schema::new(vec![ColumnDefinition::new("age", DataType::Integer, true)]);
+        let expr = Expression::Column("age".to_string());
+        let result = infer_expression_type(&expr, &schema).unwrap();
+
+        assert_eq!(result.data_type, DataType::Integer);
+        assert!(result.nullable);
+    }
+
+    #[test]
+    fn test_infer_type_binary_op_propagates_nullability() {
+        let schema = Schema::new(vec![ColumnDefinition::new("age", DataType::Integer, true)]);
+        let expr = Expression::BinaryOp {
+            left: Box::new(Expression::Column("age".to_string())),
+            op: Operator::Multiply,
+            right: Box::new(Expression::Literal(LiteralValue::Integer(2))),
+        };
+        let result = infer_expression_type(&expr, &schema).unwrap();
+
+        assert_eq!(result.data_type, DataType::Integer);
+        assert!(result.nullable); // Should be nullable because 'age' is nullable
+    }
+}
