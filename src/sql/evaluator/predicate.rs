@@ -31,7 +31,7 @@ mod tests {
     use super::*;
     use crate::{
         ColumnDefinition, DataType,
-        sql::parser::{LiteralValue, Operator, SqlParser},
+        sql::parser::{LiteralValue, Operator, Select, Select, SqlParser},
     };
 
     /// Helper to parse an expression from a WHERE clause for testing
@@ -39,10 +39,10 @@ mod tests {
         let query = format!("SELECT * FROM dummy WHERE {}", expr_str);
         let mut parser = SqlParser::new(&query);
         match parser.parse() {
-            Ok(crate::sql::parser::Statement::Select {
-                r#where: Some(expr),
+            Ok(crate::sql::parser::Statement::Select(Select(Select {
+                where_clause: Some(expr),
                 ..
-            }) => expr,
+            }))) => expr,
             Ok(_) => panic!("Query parsed but no WHERE clause found"),
             Err(e) => panic!("Failed to parse expression '{}': {:?}", expr_str, e),
         }
@@ -84,7 +84,7 @@ mod tests {
         };
         let result = evaluator.evaluate(&expr_eq_null, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
 
         // 2. NULL Comparison in Greater Than -> False
         let expr_gt_null = Expression::BinaryOp {
@@ -94,7 +94,7 @@ mod tests {
         };
         let result = evaluator.evaluate(&expr_gt_null, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[test]
@@ -110,7 +110,7 @@ mod tests {
         };
         let result = evaluator.evaluate(&expr1, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
 
         // 2. Float Column vs Integer Literal: score > 15 (15.5 > 15) -> True
         let expr2 = Expression::BinaryOp {
@@ -120,7 +120,7 @@ mod tests {
         };
         let result = evaluator.evaluate(&expr2, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[test]
@@ -142,7 +142,7 @@ mod tests {
         };
         let result = evaluator.evaluate(&expr_and, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[test]
@@ -158,7 +158,7 @@ mod tests {
         };
         let result = evaluator.evaluate(&expr_deleted_true, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
 
         // 2. is_deleted = false (row has is_deleted = true) -> False
         let expr_deleted_false = Expression::BinaryOp {
@@ -168,7 +168,7 @@ mod tests {
         };
         let result = evaluator.evaluate(&expr_deleted_false, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
 
         // 3. is_deleted != false (row has is_deleted = true) -> True
         let expr_not_false = Expression::BinaryOp {
@@ -178,7 +178,7 @@ mod tests {
         };
         let result = evaluator.evaluate(&expr_not_false, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
 
         // 4. is_active = true (row has is_active = NULL) -> Null -> False
         let expr_active_true = Expression::BinaryOp {
@@ -188,7 +188,7 @@ mod tests {
         };
         let result = evaluator.evaluate(&expr_active_true, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[test]
@@ -322,7 +322,7 @@ mod tests {
         let expr = parse_expr("id > 5");
         let result = evaluator.evaluate(&expr, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[test]
@@ -333,7 +333,7 @@ mod tests {
         let expr = parse_expr("is_deleted = TRUE");
         let result = evaluator.evaluate(&expr, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[test]
@@ -345,7 +345,7 @@ mod tests {
         let expr = parse_expr("(id > 5 AND age > 20) OR score < 10");
         let result = evaluator.evaluate(&expr, &row, &schema);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[test]

@@ -1,29 +1,38 @@
 use super::parser::Expression;
 
+/// Logical Plan
+///
+/// This is made from the incoming AST. The result is a 'relational algebra tree'.
+///
+/// The output of this plan is to know what operations we need to do to get the data.
 #[derive(Debug)]
 pub enum LogicalPlan {
-    TableScan {
-        table: String,
-    },
+    /// Read a table
+    TableScan { table: String },
+    /// Discard rows that don't match a predicate
     Filter {
         predicate: Expression,
         input: Box<LogicalPlan>,
     },
+    /// Select/compute specific columns
     Projection {
         expressions: Vec<Expression>,
         column_names: Vec<String>,
         input: Box<LogicalPlan>,
     },
+    /// Combine rows from different inputs (usually different tables)
     Join {
         left: Box<LogicalPlan>,
         right: Box<LogicalPlan>,
         condition: Expression,
         join_type: JoinType,
     },
+    /// Cap the amount of rows
     Limit {
         input: Box<LogicalPlan>,
         count: usize,
     },
+    /// Order By
     Sort {
         input: Box<LogicalPlan>,
         order_by: Vec<OrderByExpr>,

@@ -4,7 +4,7 @@ use crate::{
     Schema, Table,
     sql::{
         logical_planner::LogicalPlan,
-        parser::{Expression, SelectTarget, Statement, TargetList},
+        parser::{Expression, SelectList, SelectTarget, Statement},
         planner_context::PlannerContext,
     },
 };
@@ -21,9 +21,9 @@ impl<'a> Analyzer<'a> {
     pub fn analyze_plan(&mut self, statement: Statement) -> Result<LogicalPlan> {
         match statement {
             Statement::Select {
-                table,
-                targets,
-                r#where,
+                from_clause: table,
+                select_list: targets,
+                where_clause: r#where,
             } => {
                 let resolved_table = self.context.get_table(&table)?;
 
@@ -72,7 +72,7 @@ impl<'a> Analyzer<'a> {
 /// - `expressions` are the actual expressions to evaluate
 /// - `column_names` are the output column names (for schema generation)
 pub(crate) fn expand_targets(
-    targets: TargetList,
+    targets: SelectList,
     schema: &Schema,
 ) -> Result<(Vec<Expression>, Vec<String>)> {
     let mut expanded = Vec::new();

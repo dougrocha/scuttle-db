@@ -164,7 +164,7 @@ mod tests {
         let mut parser = SqlParser::new(&query);
         match parser.parse() {
             Ok(crate::sql::parser::Statement::Select {
-                r#where: Some(expr),
+                where_clause: Some(expr),
                 ..
             }) => expr,
             Ok(_) => panic!("Query parsed but no WHERE clause found"),

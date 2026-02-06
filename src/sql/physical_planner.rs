@@ -6,6 +6,16 @@ use crate::{
     sql::{infer_type::infer_expression_type, parser::LiteralValue},
 };
 
+/// A physical plan is built from the [LogicalPlan]
+///
+/// This is a map from the logical (what we need to do) to a
+/// physical representation of how we will grab the data.
+///
+/// Currently it is bare bones but the logical planner will say TableScan.
+/// In the physical plan, we decide if a SeqScan or IndexScan will be better.
+///
+/// Here we will only devise a cost model (Row count, IO costs, CPU time) later on to help us determine the best
+/// physical path.
 #[derive(Debug)]
 pub enum PhysicalPlan {
     SeqScan {
@@ -56,6 +66,8 @@ impl PhysicalPlan {
                 let input_plan = Self::from_logical_plan(*input, context)?;
                 let input_schema = input_plan.schema();
 
+                // TODO: Remove this from physical planner,
+                // Type checking should go in [Analyzer] struct
                 let output_columns: Vec<ColumnDefinition> = expressions
                     .iter()
                     .zip(column_names.iter())
@@ -133,13 +145,5 @@ impl PhysicalPlan {
         };
 
         Ok(plan)
-    }
-
-    pub fn extract_table_name(plan: &PhysicalPlan) -> Result<&str> {
-        match plan {
-            PhysicalPlan::SeqScan { table } => Ok(table.name()),
-            PhysicalPlan::Filter { input, .. } => Self::extract_table_name(input),
-            PhysicalPlan::Projection { input, .. } => Self::extract_table_name(input),
-        }
     }
 }

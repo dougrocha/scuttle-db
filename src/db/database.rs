@@ -264,6 +264,13 @@ impl Database {
         let context = PlannerContext::new(self);
         let logical_plan = Analyzer::new(&context).analyze_plan(statement)?;
 
+        // TODO: Eventually add a optimizer here for logical_plan.
+        // Will do a series of "pushdowns".
+        //
+        //  - Predicate Push Down: move filters as close together to the read source
+        //  - Projection pushdown: only read columns we actually need (I think this is already implemeted)
+        //  - Constant Folding: turn 'age > 10 + 5' to 'age > 25'
+
         let (physical_plan, output_schema) = {
             let plan = PhysicalPlan::from_logical_plan(logical_plan, &context)
                 .map_err(|e| DatabaseError::InvalidQuery(format!("Physical Plan error: {e}")))?;
@@ -295,16 +302,18 @@ impl Database {
                 Ok(all_rows)
             }
             PhysicalPlan::Filter { predicate, input } => {
-                let table_name = PhysicalPlan::extract_table_name(&input)?.to_string();
+                let schema = input.schema().clone();
                 let input_rows = self.execute_physical_plan(*input)?;
-
-                let schema = self.get_table(&table_name).into_diagnostic()?.schema();
 
                 let evaluator = PredicateEvaluator;
 
                 Ok(input_rows
                     .into_iter()
-                    .filter(|row| evaluator.evaluate(&predicate, row, schema).unwrap_or(false))
+                    .filter(|row| {
+                        evaluator
+                            .evaluate(&predicate, row, &schema)
+                            .unwrap_or(false)
+                    })
                     .collect())
             }
             PhysicalPlan::Projection {
@@ -312,10 +321,8 @@ impl Database {
                 input,
                 schema: _,
             } => {
-                let table_name = PhysicalPlan::extract_table_name(&input)?.to_string();
+                let schema = input.schema().clone();
                 let input = self.execute_physical_plan(*input)?;
-
-                let schema = self.get_table(&table_name).into_diagnostic()?.schema();
 
                 let evaluator = ExpressionEvaluator;
 
@@ -324,7 +331,7 @@ impl Database {
                     .map(|row| {
                         let projected_values: Vec<Value> = expressions
                             .iter()
-                            .map(|expr| evaluator.evaluate(expr, &row, schema))
+                            .map(|expr| evaluator.evaluate(expr, &row, &schema))
                             .collect::<Result<Vec<_>>>()?;
                         Ok(Row::new(projected_values))
                     })

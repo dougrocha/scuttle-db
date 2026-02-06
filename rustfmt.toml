@@ -1,7 +1,2 @@
 edition = "2024"
-reorder_modules = true
-reorder_imports = true
 use_field_init_shorthand = true
-
-imports_granularity = "Crate"
-group_imports = "StdExternalCrate"

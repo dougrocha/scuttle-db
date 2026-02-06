@@ -13,4 +13,5 @@ pub enum SelectTarget {
     },
 }
 
-pub type TargetList = Vec<SelectTarget>;
+/// Select List
+pub type SelectList = Vec<SelectTarget>;

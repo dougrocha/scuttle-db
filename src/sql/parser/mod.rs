@@ -64,13 +64,13 @@ impl<'a> SqlParser<'a> {
         };
 
         Ok(Statement::Select {
-            targets: columns,
-            table,
-            r#where,
+            select_list: columns,
+            from_clause: table,
+            where_clause: r#where,
         })
     }
 
-    fn parse_targets(&mut self) -> Result<TargetList> {
+    fn parse_targets(&mut self) -> Result<SelectList> {
         let mut columns = Vec::new();
 
         while let Some(Ok(token)) = self.lexer.peek() {
@@ -264,7 +264,7 @@ mod tests {
     fn parse_where(query: &str) -> Expression {
         match parse(query) {
             Statement::Select {
-                r#where: Some(expr),
+                where_clause: Some(expr),
                 ..
             } => expr,
             _ => panic!("Expected SELECT with WHERE clause"),
@@ -275,9 +275,9 @@ mod tests {
     fn test_parse_select_all() {
         match parse("SELECT * FROM users") {
             Statement::Select {
-                targets: columns,
-                table,
-                r#where,
+                select_list: columns,
+                from_clause: table,
+                where_clause: r#where,
             } => {
                 assert_eq!(columns, vec![SelectTarget::Star]);
                 assert_eq!(table, "users");
@@ -291,12 +291,12 @@ mod tests {
     fn test_parse_select_columns() {
         match parse("SELECT id as \"Identity\", name AS firstName FROM users") {
             Statement::Select {
-                targets: columns,
-                table,
+                select_list,
+                from_clause,
                 ..
             } => {
                 assert_eq!(
-                    columns,
+                    select_list,
                     vec![
                         SelectTarget::Expression {
                             expr: Expression::Column("id".to_string()),
@@ -308,7 +308,7 @@ mod tests {
                         },
                     ]
                 );
-                assert_eq!(table, "users");
+                assert_eq!(from_clause, "users");
             }
             _ => panic!("Expected Select statement"),
         }

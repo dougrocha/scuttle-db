@@ -99,7 +99,7 @@ fn main() -> Result<()> {
         };
 
         let input = buf.trim();
-        if input == "exit" {
+        if input == "exit" || input == ":q" {
             break;
         }
 

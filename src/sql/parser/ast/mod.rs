@@ -4,4 +4,4 @@ pub(crate) mod target;
 
 pub use expression::{Expression, IsPredicate};
 pub use statement::Statement;
-pub use target::{SelectTarget, TargetList};
+pub use target::{SelectList, SelectTarget};
