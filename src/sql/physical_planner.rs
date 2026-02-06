@@ -120,6 +120,14 @@ impl PhysicalPlan {
                     schema: output_schema,
                 }
             }
+            LogicalPlan::Join {
+                left: _,
+                right: _,
+                condition: _,
+                join_type: _,
+            } => todo!(),
+            LogicalPlan::Limit { input: _, count: _ } => todo!(),
+            LogicalPlan::Sort { input: _, order_by: _ } => todo!(),
         };
 
         Ok(plan)
