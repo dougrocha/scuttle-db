@@ -107,7 +107,7 @@ impl ItemPointer {
         }
     }
 
-    pub fn is_deleted(&self) -> bool {
+    pub fn is_deleted(self) -> bool {
         self.flags & Self::DELETED_FLAG != 0
     }
 

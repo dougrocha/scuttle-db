@@ -64,8 +64,7 @@ impl<'a> Lexer<'a> {
             .rest
             .char_indices()
             .find(|(_, ch)| !ch.is_whitespace())
-            .map(|(pos, _)| pos)
-            .unwrap_or(self.rest.len());
+            .map_or(self.rest.len(), |(pos, _)| pos);
 
         self.position += non_whitespace_pos;
         self.rest = &self.rest[non_whitespace_pos..];
@@ -74,12 +73,12 @@ impl<'a> Lexer<'a> {
     /// Consumes a symbol, assumes we have peeked ahead.
     ///
     /// Only consume one symbol
-    fn consume_symbol(&mut self, token: Token<'a>) -> Result<Token<'a>> {
+    fn consume_symbol(&mut self, token: Token<'a>) -> Token<'a> {
         let char_len = self.rest.chars().next().unwrap().len_utf8();
         self.rest = &self.rest[char_len..];
         self.position += char_len;
 
-        Ok(token)
+        token
     }
 
     /// Consumes a word (identifier or keyword) from the input.
@@ -169,22 +168,22 @@ impl<'a> Iterator for Lexer<'a> {
         let char = self.rest.chars().next()?;
 
         let token = match char {
-            '(' => self.consume_symbol(Token::LeftParen),
-            ')' => self.consume_symbol(Token::RightParen),
-            ',' => self.consume_symbol(Token::Comma),
-            '+' => self.consume_symbol(Token::Plus),
-            '-' => self.consume_symbol(Token::Minus),
-            '*' => self.consume_symbol(Token::Asterisk),
-            '/' => self.consume_symbol(Token::Slash),
-            ';' => self.consume_symbol(Token::SemiColon),
-            '=' => self.consume_symbol(Token::Equal),
+            '(' => Ok(self.consume_symbol(Token::LeftParen)),
+            ')' => Ok(self.consume_symbol(Token::RightParen)),
+            ',' => Ok(self.consume_symbol(Token::Comma)),
+            '+' => Ok(self.consume_symbol(Token::Plus)),
+            '-' => Ok(self.consume_symbol(Token::Minus)),
+            '*' => Ok(self.consume_symbol(Token::Asterisk)),
+            '/' => Ok(self.consume_symbol(Token::Slash)),
+            ';' => Ok(self.consume_symbol(Token::SemiColon)),
+            '=' => Ok(self.consume_symbol(Token::Equal)),
             '<' => {
                 if self.rest.len() > 1 && self.rest.chars().nth(1) == Some('=') {
                     self.rest = &self.rest[2..];
                     self.position += 2;
                     Ok(Token::LessThanEqual)
                 } else {
-                    self.consume_symbol(Token::LessThan)
+                    Ok(self.consume_symbol(Token::LessThan))
                 }
             }
             '>' => {
@@ -193,7 +192,7 @@ impl<'a> Iterator for Lexer<'a> {
                     self.position += 2;
                     Ok(Token::GreaterThanEqual)
                 } else {
-                    self.consume_symbol(Token::GreaterThan)
+                    Ok(self.consume_symbol(Token::GreaterThan))
                 }
             }
             '!' => {

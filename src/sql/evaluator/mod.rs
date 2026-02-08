@@ -1,16 +1,16 @@
 use miette::{Result, miette};
 
-use crate::{Row, Schema, Value, sql::parser::Expression};
+use crate::{Row, Value, sql::analyzer::AnalyzedExpression};
 
 pub mod expression;
 pub mod predicate;
 
 /// The core trait that both evaluators must implement.
 ///
-/// - `T = Value` for ExpressionEvaluator (math, strings)
-/// - `T = bool` for PredicateEvaluator (WHERE clauses)
+/// - `T = Value` for `ExpressionEvaluator` (math, strings)
+/// - `T = bool` for `PredicateEvaluator` (WHERE clauses)
 pub trait Evaluator<T> {
-    fn evaluate(&self, expression: &Expression, row: &Row, schema: &Schema) -> Result<T>;
+    fn evaluate(&self, analyzed_expr: &AnalyzedExpression, row: &Row) -> Result<T>;
 }
 
 pub fn values_add(left: &Value, right: &Value) -> Result<Value> {
@@ -77,9 +77,9 @@ pub fn values_divide(left: &Value, right: &Value) -> Result<Value> {
     }
 }
 
-pub fn values_equal(left: &Value, right: &Value) -> Result<Value> {
+pub fn values_equal(left: &Value, right: &Value) -> Value {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
-        return Ok(Value::Null);
+        return Value::Null;
     }
 
     let result = match (left, right) {
@@ -91,7 +91,7 @@ pub fn values_equal(left: &Value, right: &Value) -> Result<Value> {
         (Value::Boolean(a), Value::Boolean(b)) => a == b,
         _ => false,
     };
-    Ok(Value::Boolean(result))
+    Value::Boolean(result)
 }
 
 pub fn values_greater_than(left: &Value, right: &Value) -> Result<Value> {
@@ -225,48 +225,40 @@ mod tests {
     #[test]
     fn test_values_equal_integers() {
         let result = values_equal(&Value::Integer(5), &Value::Integer(5));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Boolean(true));
+        assert_eq!(result, Value::Boolean(true));
 
         let result = values_equal(&Value::Integer(5), &Value::Integer(3));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Boolean(false));
+        assert_eq!(result, Value::Boolean(false));
     }
 
     #[test]
     fn test_values_equal_floats_with_epsilon() {
         let result = values_equal(&Value::Float(5.0), &Value::Float(5.0));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Boolean(true));
+        assert_eq!(result, Value::Boolean(true));
     }
 
     #[test]
     fn test_values_equal_mixed_types() {
         let result = values_equal(&Value::Integer(5), &Value::Float(5.0));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Boolean(true));
+        assert_eq!(result, Value::Boolean(true));
     }
 
     #[test]
     fn test_values_equal_booleans() {
         let result = values_equal(&Value::Boolean(true), &Value::Boolean(true));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Boolean(true));
+        assert_eq!(result, Value::Boolean(true));
 
         let result = values_equal(&Value::Boolean(true), &Value::Boolean(false));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Boolean(false));
+        assert_eq!(result, Value::Boolean(false));
     }
 
     #[test]
     fn test_values_equal_with_null() {
         let result = values_equal(&Value::Integer(5), &Value::Null);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Null);
+        assert_eq!(result, Value::Null);
 
         let result = values_equal(&Value::Null, &Value::Null);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Null);
+        assert_eq!(result, Value::Null);
     }
 
     #[test]
@@ -275,8 +267,7 @@ mod tests {
             &Value::Text("hello".to_string()),
             &Value::Text("hello".to_string()),
         );
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Boolean(true));
+        assert_eq!(result, Value::Boolean(true));
     }
 
     #[test]

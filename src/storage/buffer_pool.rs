@@ -35,8 +35,7 @@ impl BufferPool {
         let page_exists = self
             .pool
             .get(table_name)
-            .map(|pages| pages.contains_key(&page_id))
-            .unwrap_or(false);
+            .is_some_and(|pages| pages.contains_key(&page_id));
 
         if !page_exists {
             let page = self.load_page_from_file(table_name, page_id)?;
@@ -79,8 +78,7 @@ impl BufferPool {
             let page_exists = self
                 .pool
                 .get(table_name)
-                .map(|pages| pages.contains_key(&page_id))
-                .unwrap_or(false);
+                .is_some_and(|pages| pages.contains_key(&page_id));
 
             if page_exists {
                 // Check if existing page has space
@@ -109,25 +107,21 @@ impl BufferPool {
         let page_exists = self
             .pool
             .get(table_name)
-            .map(|pages| pages.contains_key(&page_id))
-            .unwrap_or(false);
+            .is_some_and(|pages| pages.contains_key(&page_id));
 
         if !page_exists {
-            match self.load_page_from_file(table_name, page_id) {
-                Ok(loaded_page) => {
-                    self.pool
-                        .entry(table_name.to_string())
-                        .or_default()
-                        .insert(page_id, loaded_page);
-                }
-                Err(_) => {
-                    // Create new page
-                    let new_page = Page::new(page_id, PageType::Table);
-                    self.pool
-                        .entry(table_name.to_string())
-                        .or_default()
-                        .insert(page_id, new_page);
-                }
+            if let Ok(loaded_page) = self.load_page_from_file(table_name, page_id) {
+                self.pool
+                    .entry(table_name.to_string())
+                    .or_default()
+                    .insert(page_id, loaded_page);
+            } else {
+                // Create new page
+                let new_page = Page::new(page_id, PageType::Table);
+                self.pool
+                    .entry(table_name.to_string())
+                    .or_default()
+                    .insert(page_id, new_page);
             }
         }
 

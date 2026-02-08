@@ -3,7 +3,7 @@ use strum::EnumString;
 /// SQL keywords recognized by the parser.
 ///
 /// These keywords are case-insensitive and reserved for SQL syntax.
-#[derive(Debug, PartialEq, Eq, EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString)]
 #[strum(ascii_case_insensitive)]
 pub enum Keyword {
     Select,

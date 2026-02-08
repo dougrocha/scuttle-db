@@ -1,7 +1,7 @@
 use std::io::{BufRead, Write, stdin, stdout};
 
 use miette::{IntoDiagnostic, Result, miette};
-use scuttle_db::{ColumnDefinition, DataType, Database, Row, Schema, Value};
+use scuttle_db::{ColumnDefinition, Database, PhysicalType, Row, Schema, Value};
 
 fn main() -> Result<()> {
     // Delete to start from fresh right now
@@ -27,22 +27,22 @@ fn main() -> Result<()> {
     let schema = Schema::new(vec![
         ColumnDefinition {
             name: "id".to_string(),
-            data_type: DataType::Integer,
+            data_type: PhysicalType::Int64,
             nullable: false,
         },
         ColumnDefinition {
             name: "name".to_string(),
-            data_type: DataType::VarChar(255),
+            data_type: PhysicalType::VarChar(255),
             nullable: false,
         },
         ColumnDefinition {
             name: "age".to_string(),
-            data_type: DataType::Integer,
+            data_type: PhysicalType::Int64,
             nullable: true,
         },
         ColumnDefinition {
             name: "is_active".to_string(),
-            data_type: DataType::Boolean,
+            data_type: PhysicalType::Bool,
             nullable: true,
         },
     ]);
@@ -88,7 +88,7 @@ fn main() -> Result<()> {
 
     loop {
         if buf.is_empty() {
-            stdout.write_all("DB: ".as_bytes()).into_diagnostic()?
+            stdout.write_all("DB: ".as_bytes()).into_diagnostic()?;
         } else {
             stdout.write_all("*  ".as_bytes()).into_diagnostic()?;
         }
@@ -103,7 +103,7 @@ fn main() -> Result<()> {
             break;
         }
 
-        let query_result = match db.execute_query(input) {
+        let query_response = match db.execute_query(input) {
             Ok(res) => res,
             Err(err) => {
                 println!("{:?}", err.with_source_code(input.to_string()));
@@ -111,33 +111,44 @@ fn main() -> Result<()> {
                 continue;
             }
         };
+        let schema = query_response.schema;
+        let rows = query_response.rows;
+
+        if rows.is_empty() {
+            println!("Empty set (0 rows)");
+            buf.clear();
+            continue;
+        }
 
         stdout
-            .write_all(format!("{: <8}", "Results").as_bytes())
+            .write_all(format!("{: <8}", "Row #").as_bytes())
             .into_diagnostic()?;
+        for col in &schema.fields {
+            stdout
+                .write_all(
+                    format!(" | {: <12}", col.alias.clone().unwrap_or(col.name.clone()),)
+                        .as_bytes(),
+                )
+                .into_diagnostic()?;
+        }
+        stdout.write_all(b"\n").into_diagnostic()?;
+        let separator_len = 8 + (schema.fields.len() * 15);
+        stdout
+            .write_all(&"-".repeat(separator_len).into_bytes())
+            .into_diagnostic()?;
+        stdout.write_all(b"\n").into_diagnostic()?;
 
-        // Print only the projected column names
-        query_result.schema.columns.iter().for_each(|col| {
-            let _ = stdout
-                .write_all(format!(" | {: <8}", col.name).as_bytes())
-                .into_diagnostic();
-        });
-
-        let _ = stdout.write_all(b"\n").into_diagnostic();
-
-        query_result.rows.iter().enumerate().for_each(|(idx, row)| {
-            let _ = stdout
+        for (idx, row) in rows.iter().enumerate() {
+            stdout
                 .write_all(format!("{: <8}", idx).as_bytes())
-                .into_diagnostic();
-
-            row.values.iter().for_each(|value| {
-                let _ = stdout
-                    .write_all(format!(" | {: <8}", value.to_string()).as_bytes())
-                    .into_diagnostic();
-            });
-
-            let _ = stdout.write_all(b"\n").into_diagnostic();
-        });
+                .into_diagnostic()?;
+            for value in &row.values {
+                stdout
+                    .write_all(format!(" | {: <12}", value.to_string()).as_bytes())
+                    .into_diagnostic()?;
+            }
+            stdout.write_all(b"\n").into_diagnostic()?;
+        }
 
         stdout.flush().into_diagnostic()?;
         buf.clear();

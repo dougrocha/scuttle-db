@@ -1,309 +1,424 @@
 use miette::{Result, miette};
 
 use crate::{
-    Schema, Table,
+    PhysicalType, Table,
     sql::{
-        logical_planner::LogicalPlan,
-        parser::{Expression, SelectList, SelectTarget, Statement},
+        parser::{
+            Expression, IsPredicate, Operator, ScalarValue, SelectList, SelectTarget, Statement,
+            statement::{FromClause, SelectStatement},
+        },
         planner_context::PlannerContext,
     },
 };
 
-pub struct Analyzer<'a> {
-    context: &'a PlannerContext<'a>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnType {
+    Int64,
+    Float64,
+    Text,
+    Bool,
+    Null,
 }
 
-impl<'a> Analyzer<'a> {
-    pub fn new(context: &'a PlannerContext) -> Self {
+impl From<PhysicalType> for ColumnType {
+    fn from(value: PhysicalType) -> Self {
+        match value {
+            PhysicalType::Int64 => Self::Int64,
+            PhysicalType::Text | PhysicalType::VarChar(_) => Self::Text,
+            PhysicalType::Bool => Self::Bool,
+            PhysicalType::Float64 => Self::Float64,
+        }
+    }
+}
+
+impl From<&ScalarValue> for ColumnType {
+    fn from(value: &ScalarValue) -> Self {
+        match value {
+            ScalarValue::Int64(_) => Self::Int64,
+            ScalarValue::Text(_) => Self::Text,
+            ScalarValue::Bool(_) => Self::Bool,
+            ScalarValue::Float64(_) => Self::Float64,
+            ScalarValue::Null => Self::Null,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ColumnReference {
+    pub index: usize,
+    pub relation: Option<String>, // 'u' in 'u.name'
+}
+
+#[derive(Debug, Clone)]
+pub struct Field {
+    pub name: String,
+    pub alias: Option<String>,
+    pub data_type: ColumnType,
+    pub is_nullable: bool,
+}
+
+#[derive(Debug)]
+pub enum AnalyzedExpression {
+    Literal(ScalarValue),
+    Column(ColumnReference, ColumnType),
+    BinaryExpr {
+        left: Box<AnalyzedExpression>,
+        op: Operator,
+        right: Box<AnalyzedExpression>,
+        return_type: ColumnType,
+    },
+    IsPredicate {
+        expr: Box<AnalyzedExpression>,
+        predicate: IsPredicateTarget,
+        negated: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum IsPredicateTarget {
+    True,
+    False,
+    Null,
+}
+
+impl From<&IsPredicate> for IsPredicateTarget {
+    fn from(value: &IsPredicate) -> Self {
+        match value {
+            IsPredicate::True => IsPredicateTarget::True,
+            IsPredicate::False => IsPredicateTarget::False,
+            IsPredicate::Null => IsPredicateTarget::Null,
+        }
+    }
+}
+
+impl AnalyzedExpression {
+    pub fn get_type(&self) -> ColumnType {
+        match self {
+            AnalyzedExpression::Literal(scalar_value) => scalar_value.into(),
+            AnalyzedExpression::Column(_, column_type) => *column_type,
+            AnalyzedExpression::BinaryExpr { return_type, .. } => *return_type,
+            AnalyzedExpression::IsPredicate { .. } => ColumnType::Bool,
+        }
+    }
+
+    /// Determines whether this expression can produce NULL given the input schema.
+    pub fn is_nullable(&self, input_schema: &ResolvedSchema) -> bool {
+        match self {
+            // Literals are never null (null literals are rejected during analysis)
+            AnalyzedExpression::Literal(_) => false,
+            // Column nullability comes from the source field
+            AnalyzedExpression::Column(col_ref, _) => input_schema
+                .fields
+                .get(col_ref.index)
+                .map(|f| f.is_nullable)
+                .unwrap_or(true),
+            // A binary expression is nullable if either operand is nullable
+            AnalyzedExpression::BinaryExpr { left, right, .. } => {
+                left.is_nullable(input_schema) || right.is_nullable(input_schema)
+            }
+            // IS TRUE / IS NULL / etc. always returns a definite bool, never null
+            AnalyzedExpression::IsPredicate { .. } => false,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum AnalyzedPlan {
+    Scan {
+        table_name: String,
+        schema: ResolvedSchema,
+    },
+    Filter {
+        input: Box<AnalyzedPlan>,
+        condition: AnalyzedExpression,
+    },
+    Projection {
+        input: Box<AnalyzedPlan>,
+        expressions: Vec<AnalyzedExpression>,
+        schema: ResolvedSchema,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedSchema {
+    pub fields: Vec<Field>,
+}
+
+impl ResolvedSchema {
+    pub fn find_column(&self, name: &str) -> Option<usize> {
+        self.fields.iter().position(|field| field.name == name)
+    }
+}
+
+impl AnalyzedPlan {
+    fn schema(&self) -> &ResolvedSchema {
+        match self {
+            AnalyzedPlan::Scan { schema, .. } | AnalyzedPlan::Projection { schema, .. } => schema,
+            AnalyzedPlan::Filter { input, .. } => input.schema(),
+        }
+    }
+}
+
+pub struct Analyzer<'a, 'db> {
+    context: &'a PlannerContext<'db>,
+}
+
+impl<'a, 'db> Analyzer<'a, 'db> {
+    pub fn new(context: &'a PlannerContext<'db>) -> Self {
         Self { context }
     }
 
-    pub fn analyze_plan(&mut self, statement: Statement) -> Result<LogicalPlan> {
+    pub fn analyze(&self, statement: Statement) -> Result<AnalyzedPlan> {
         match statement {
-            Statement::Select {
-                from_clause: table,
-                select_list: targets,
-                where_clause: r#where,
-            } => {
-                let resolved_table = self.context.get_table(&table)?;
+            Statement::Select(SelectStatement {
+                select_list,
+                from_clause,
+                where_clause,
+            }) => {
+                let mut plan = self.analyze_from(from_clause)?;
 
-                let (expanded_targets, names) = expand_targets(targets, resolved_table.schema())?;
-
-                let mut plan = LogicalPlan::TableScan {
-                    table: resolved_table.name().to_owned(),
-                };
-
-                if let Some(predicate) = r#where {
-                    plan = LogicalPlan::Filter {
-                        predicate,
-                        input: Box::new(plan),
-                    };
+                if let Some(expr) = where_clause {
+                    plan = self.analyze_where(plan, &expr)?;
                 }
 
-                Ok(LogicalPlan::Projection {
-                    expressions: expanded_targets,
-                    column_names: names,
-                    input: Box::new(plan),
+                plan = self.analyze_projection(plan, select_list)?;
+
+                Ok(plan)
+            }
+            _ => Err(miette!("Analysis not implemented for this statement.")),
+        }
+    }
+
+    fn analyze_from(&self, from_clause: FromClause) -> Result<AnalyzedPlan> {
+        let physical_schema = self.context.get_table(&from_clause.table_name)?.schema();
+
+        let virtual_fields = physical_schema
+            .columns
+            .iter()
+            .map(|col| Field {
+                name: col.name.clone(),
+                alias: None, // We don't handle alias yet here
+                data_type: col.data_type.into(),
+                is_nullable: col.nullable,
+            })
+            .collect();
+
+        let resolved_schema = ResolvedSchema {
+            fields: virtual_fields,
+        };
+
+        Ok(AnalyzedPlan::Scan {
+            table_name: from_clause.table_name,
+            schema: resolved_schema,
+        })
+    }
+
+    fn analyze_projection(
+        &self,
+        input_plan: AnalyzedPlan,
+        select_list: SelectList,
+    ) -> Result<AnalyzedPlan> {
+        let input_schema = input_plan.schema();
+
+        let mut analyzed_exprs = Vec::new();
+        let mut output_fields = Vec::new();
+
+        for item in select_list.iter() {
+            match item {
+                SelectTarget::Star => {
+                    for (i, field) in input_schema.fields.iter().enumerate() {
+                        let expr = AnalyzedExpression::Column(
+                            ColumnReference {
+                                index: i,
+                                relation: None,
+                            },
+                            field.data_type,
+                        );
+                        analyzed_exprs.push(expr);
+                        output_fields.push(field.clone());
+                    }
+                }
+                SelectTarget::Expression { expr, alias } => {
+                    let analyzed_expr = self.bind_expression(expr, input_schema)?;
+
+                    let field = Field {
+                        name: expr.to_column_name(),
+                        alias: alias.clone(),
+                        data_type: analyzed_expr.get_type(),
+                        is_nullable: analyzed_expr.is_nullable(input_schema),
+                    };
+
+                    analyzed_exprs.push(analyzed_expr);
+                    output_fields.push(field);
+                }
+            }
+        }
+
+        Ok(AnalyzedPlan::Projection {
+            input: Box::new(input_plan),
+            expressions: analyzed_exprs,
+            schema: ResolvedSchema {
+                fields: output_fields,
+            },
+        })
+    }
+
+    fn analyze_where(
+        &self,
+        input_plan: AnalyzedPlan,
+        where_expr: &Expression,
+    ) -> Result<AnalyzedPlan> {
+        let schema = input_plan.schema();
+
+        let analyzed_expr = self.bind_expression(where_expr, schema)?;
+
+        Ok(AnalyzedPlan::Filter {
+            input: Box::new(input_plan),
+            condition: analyzed_expr,
+        })
+    }
+
+    pub fn bind_expression(
+        &self,
+        expr: &Expression,
+        input_schema: &ResolvedSchema,
+    ) -> Result<AnalyzedExpression> {
+        match expr {
+            Expression::BinaryOp { left, op, right } => {
+                let left = self.bind_expression(left, input_schema)?;
+                let right = self.bind_expression(right, input_schema)?;
+
+                let return_type = self.resolve_binary_op(left.get_type(), *op, right.get_type())?;
+
+                Ok(AnalyzedExpression::BinaryExpr {
+                    left: Box::new(left),
+                    op: *op,
+                    right: Box::new(right),
+                    return_type,
                 })
             }
-            Statement::Create => Err(miette!("CREATE not implemented yet")),
-            Statement::Update { .. } => Err(miette!("INSERT not implemented yet")),
-            Statement::Insert => Err(miette!("INSERT not implemented yet")),
-            Statement::Delete => Err(miette!("DELETE not implemented yet")),
-        }
-    }
-}
+            Expression::Identifier(name) => {
+                let index = input_schema
+                    .find_column(name)
+                    .ok_or(miette!("Column {name} could not be found"))?;
+                let field = &input_schema.fields[index];
 
-/// Expands target list into expressions and column names.
-///
-/// This function handles:
-/// - Star expansion: `SELECT *` → all columns from schema
-/// - Aliased expressions: `SELECT id AS user_id` → Expression + alias
-/// - Unaliased expressions: `SELECT id` → Expression + column name
-///
-/// # Arguments
-///
-/// * `targets` - The target list from the SELECT statement
-/// * `schema` - The schema of the table being queried
-///
-/// # Returns
-///
-/// A tuple of (expressions, column_names) where:
-/// - `expressions` are the actual expressions to evaluate
-/// - `column_names` are the output column names (for schema generation)
-pub(crate) fn expand_targets(
-    targets: SelectList,
-    schema: &Schema,
-) -> Result<(Vec<Expression>, Vec<String>)> {
-    let mut expanded = Vec::new();
-    let mut names = Vec::new();
+                Ok(AnalyzedExpression::Column(
+                    ColumnReference {
+                        index,
+                        relation: None,
+                    },
+                    field.data_type,
+                ))
+            }
+            Expression::Literal(scalar_value) => match scalar_value {
+                ScalarValue::Int64(_)
+                | ScalarValue::Float64(_)
+                | ScalarValue::Text(_)
+                | ScalarValue::Bool(_) => Ok(AnalyzedExpression::Literal(scalar_value.clone())),
+                ScalarValue::Null => Err(miette!(
+                    "NULL literal cannot be used in this context. Use 'IS NULL' or 'IS NOT NULL' instead"
+                )),
+            },
+            Expression::Is {
+                expr,
+                predicate,
+                is_negated,
+            } => {
+                let inner_analyzed = self.bind_expression(expr, input_schema)?;
 
-    for target in targets {
-        match target {
-            SelectTarget::Star => {
-                // This is the "Star Expansion" logic
-                for col in &schema.columns {
-                    expanded.push(Expression::Column(col.name.clone()));
-                    names.push(col.name.to_string());
+                let inner_type = inner_analyzed.get_type();
+                match predicate {
+                    IsPredicate::True | IsPredicate::False => {
+                        if inner_type != ColumnType::Bool {
+                            return Err(miette!("IS TRUE/FALSE requires boolean input"));
+                        }
+                    }
+                    IsPredicate::Null => {
+                        // Just works
+                    }
                 }
-            }
-            SelectTarget::Expression { expr, alias } => {
-                expanded.push(expr.clone());
-                names.push(alias.clone().unwrap_or_else(|| expr.to_column_name()));
+
+                let predicate: IsPredicateTarget = predicate.into();
+
+                Ok(AnalyzedExpression::IsPredicate {
+                    expr: Box::new(inner_analyzed),
+                    predicate,
+                    negated: *is_negated,
+                })
             }
         }
     }
 
-    Ok((expanded, names))
+    fn resolve_binary_op(
+        &self,
+        left: ColumnType,
+        op: Operator,
+        right: ColumnType,
+    ) -> Result<ColumnType> {
+        match op {
+            Operator::Equal
+            | Operator::GreaterThan
+            | Operator::LessThan
+            | Operator::GreaterThanEqual
+            | Operator::LessThanEqual
+            | Operator::NotEqual
+                if Self::can_coerce(left, right) =>
+            {
+                Ok(ColumnType::Bool)
+            }
+            Operator::Add | Operator::Subtract | Operator::Multiply | Operator::Divide => {
+                Self::get_common_numeric_type(left, right)
+            }
+            Operator::And | Operator::Or
+                if left == ColumnType::Bool && right == ColumnType::Bool =>
+            {
+                Ok(ColumnType::Bool)
+            }
+            _ => Err(miette!("Type mismatch between {left:?} {op} {right:?}")),
+        }
+    }
+
+    fn get_common_numeric_type(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
+        if left == right {
+            return Ok(left);
+        }
+
+        match (left, right) {
+            (_, ColumnType::Float64) | (ColumnType::Float64, _) => Ok(ColumnType::Float64),
+            (_, ColumnType::Int64) | (ColumnType::Int64, _) => Ok(ColumnType::Int64),
+            _ => Err(miette!(
+                "Cannot perform arithmetic between {left:?} and {right:?}"
+            )),
+        }
+    }
+
+    fn can_coerce(from: ColumnType, to: ColumnType) -> bool {
+        if from == to {
+            return true;
+        }
+
+        matches!(
+            (from, to),
+            (ColumnType::Int64, ColumnType::Float64)
+                | (ColumnType::Text, _)
+                | (_, ColumnType::Text)
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ColumnDefinition, DataType,
-        sql::parser::{LiteralValue, operators::Operator},
-    };
+    use crate::{ColumnDefinition, PhysicalType, Schema};
 
     /// Creates a test schema with common columns
     fn create_test_schema() -> Schema {
         Schema::new(vec![
-            ColumnDefinition::new("id", DataType::Integer, false),
-            ColumnDefinition::new("name", DataType::Text, false),
-            ColumnDefinition::new("email", DataType::Text, true),
-            ColumnDefinition::new("age", DataType::Integer, true),
+            ColumnDefinition::new("id", PhysicalType::Int64, false),
+            ColumnDefinition::new("name", PhysicalType::Text, false),
+            ColumnDefinition::new("email", PhysicalType::Text, true),
+            ColumnDefinition::new("age", PhysicalType::Int64, true),
         ])
-    }
-
-    #[test]
-    fn test_expand_star() {
-        let schema = create_test_schema();
-        let targets = vec![SelectTarget::Star];
-
-        let (expressions, names) = expand_targets(targets, &schema).expect("Failed to expand star");
-
-        // Should expand to all 4 columns
-        assert_eq!(expressions.len(), 4);
-        assert_eq!(names.len(), 4);
-
-        // Check that all columns are present
-        assert_eq!(names, vec!["id", "name", "email", "age"]);
-
-        // Check expressions are correct
-        assert!(matches!(
-            expressions[0],
-            Expression::Column(ref name) if name == "id"
-        ));
-        assert!(matches!(
-            expressions[1],
-            Expression::Column(ref name) if name == "name"
-        ));
-        assert!(matches!(
-            expressions[2],
-            Expression::Column(ref name) if name == "email"
-        ));
-        assert!(matches!(
-            expressions[3],
-            Expression::Column(ref name) if name == "age"
-        ));
-    }
-
-    #[test]
-    fn test_expand_single_column_no_alias() {
-        let schema = create_test_schema();
-        let targets = vec![SelectTarget::Expression {
-            expr: Expression::Column("name".to_string()),
-            alias: None,
-        }];
-
-        let (expressions, names) =
-            expand_targets(targets, &schema).expect("Failed to expand target");
-
-        assert_eq!(expressions.len(), 1);
-        assert_eq!(names.len(), 1);
-        assert_eq!(names[0], "name");
-        assert!(matches!(
-            expressions[0],
-            Expression::Column(ref n) if n == "name"
-        ));
-    }
-
-    #[test]
-    fn test_expand_column_with_alias() {
-        let schema = create_test_schema();
-        let targets = vec![SelectTarget::Expression {
-            expr: Expression::Column("id".to_string()),
-            alias: Some("user_id".to_string()),
-        }];
-
-        let (expressions, names) =
-            expand_targets(targets, &schema).expect("Failed to expand target");
-
-        assert_eq!(expressions.len(), 1);
-        assert_eq!(names.len(), 1);
-        assert_eq!(names[0], "user_id"); // Should use alias
-        assert!(matches!(
-            expressions[0],
-            Expression::Column(ref n) if n == "id"
-        ));
-    }
-
-    #[test]
-    fn test_expand_multiple_columns_mixed_aliases() {
-        let schema = create_test_schema();
-        let targets = vec![
-            SelectTarget::Expression {
-                expr: Expression::Column("id".to_string()),
-                alias: Some("user_id".to_string()),
-            },
-            SelectTarget::Expression {
-                expr: Expression::Column("name".to_string()),
-                alias: None,
-            },
-            SelectTarget::Expression {
-                expr: Expression::Column("email".to_string()),
-                alias: Some("contact_email".to_string()),
-            },
-        ];
-
-        let (expressions, names) =
-            expand_targets(targets, &schema).expect("Failed to expand targets");
-
-        assert_eq!(expressions.len(), 3);
-        assert_eq!(names, vec!["user_id", "name", "contact_email"]);
-    }
-
-    #[test]
-    fn test_expand_literal_expression_no_alias() {
-        let schema = create_test_schema();
-        let targets = vec![SelectTarget::Expression {
-            expr: Expression::Literal(LiteralValue::Integer(42)),
-            alias: None,
-        }];
-
-        let (expressions, names) =
-            expand_targets(targets, &schema).expect("Failed to expand target");
-
-        assert_eq!(expressions.len(), 1);
-        assert_eq!(names.len(), 1);
-        assert_eq!(names[0], "?column?"); // Default for unnamed expression
-        assert!(matches!(
-            expressions[0],
-            Expression::Literal(LiteralValue::Integer(42))
-        ));
-    }
-
-    #[test]
-    fn test_expand_literal_with_alias() {
-        let schema = create_test_schema();
-        let targets = vec![SelectTarget::Expression {
-            expr: Expression::Literal(LiteralValue::String("Hello".to_string())),
-            alias: Some("greeting".to_string()),
-        }];
-
-        let (expressions, names) =
-            expand_targets(targets, &schema).expect("Failed to expand target");
-
-        assert_eq!(expressions.len(), 1);
-        assert_eq!(names[0], "greeting");
-    }
-
-    #[test]
-    fn test_expand_binary_expression() {
-        let schema = create_test_schema();
-
-        // age + 10 AS next_decade_age
-        let expr = Expression::BinaryOp {
-            left: Box::new(Expression::Column("age".to_string())),
-            op: Operator::Add,
-            right: Box::new(Expression::Literal(LiteralValue::Integer(10))),
-        };
-
-        let targets = vec![SelectTarget::Expression {
-            expr,
-            alias: Some("next_decade_age".to_string()),
-        }];
-
-        let (expressions, names) =
-            expand_targets(targets, &schema).expect("Failed to expand target");
-
-        assert_eq!(expressions.len(), 1);
-        assert_eq!(names[0], "next_decade_age");
-        assert!(matches!(expressions[0], Expression::BinaryOp { .. }));
-    }
-
-    #[test]
-    fn test_expand_star_with_empty_schema() {
-        let schema = Schema::new(vec![]); // Empty schema
-        let targets = vec![SelectTarget::Star];
-
-        let (expressions, names) = expand_targets(targets, &schema).expect("Failed to expand star");
-
-        // Should return empty for empty schema
-        assert_eq!(expressions.len(), 0);
-        assert_eq!(names.len(), 0);
-    }
-
-    #[test]
-    fn test_expand_mixed_star_and_expressions() {
-        let schema = Schema::new(vec![
-            ColumnDefinition::new("id", DataType::Integer, false),
-            ColumnDefinition::new("name", DataType::Text, false),
-        ]);
-
-        // SELECT *, 'extra' AS bonus
-        let targets = vec![
-            SelectTarget::Star,
-            SelectTarget::Expression {
-                expr: Expression::Literal(LiteralValue::String("extra".to_string())),
-                alias: Some("bonus".to_string()),
-            },
-        ];
-
-        let (expressions, names) =
-            expand_targets(targets, &schema).expect("Failed to expand targets");
-
-        assert_eq!(expressions.len(), 3); // id, name, literal
-        assert_eq!(names, vec!["id", "name", "bonus"]);
     }
 }

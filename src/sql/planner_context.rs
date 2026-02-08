@@ -2,12 +2,12 @@ use miette::{IntoDiagnostic, Result};
 
 use crate::{Relation, db::database::Database};
 
-pub struct PlannerContext<'a> {
-    database: &'a Database,
+pub struct PlannerContext<'db> {
+    pub database: &'db mut Database,
 }
 
-impl<'a> PlannerContext<'a> {
-    pub(crate) fn new(database: &'a Database) -> Self {
+impl<'db> PlannerContext<'db> {
+    pub(crate) fn new(database: &'db mut Database) -> Self {
         Self { database }
     }
 

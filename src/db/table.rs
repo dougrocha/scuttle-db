@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use miette::{Result, miette};
 
-use crate::{DatabaseError, db::bitmap::NullBitmap, sql::parser::literal_value::LiteralValue};
+use crate::{DatabaseError, db::null_bitmap::NullBitmap, sql::parser::literal_value::ScalarValue};
 
 /// Trait for table-like structures.
 ///
@@ -27,11 +27,11 @@ pub trait Table {
 /// These types define the kind of data a column can hold and how
 /// it's encoded/decoded in storage.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum DataType {
+pub enum PhysicalType {
     /// 64-bit signed integer.
     ///
     /// Stored as 8 bytes in little-endian format.
-    Integer,
+    Int64,
 
     /// Variable-length text with no size limit.
     ///
@@ -45,19 +45,19 @@ pub enum DataType {
     VarChar(usize),
 
     /// Boolean true/false value.
-    Boolean,
+    Bool,
 
     /// 64-bit floating point number.
-    Float,
+    Float64,
 }
 
-impl Display for DataType {
+impl Display for PhysicalType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DataType::Integer => write!(f, "Integer"),
-            DataType::Text | DataType::VarChar(_) => write!(f, "String"),
-            DataType::Boolean => write!(f, "Boolean"),
-            DataType::Float => write!(f, "Float"),
+            PhysicalType::Int64 => write!(f, "Integer"),
+            PhysicalType::Text | PhysicalType::VarChar(_) => write!(f, "String"),
+            PhysicalType::Bool => write!(f, "Boolean"),
+            PhysicalType::Float64 => write!(f, "Float"),
         }
     }
 }
@@ -98,26 +98,26 @@ impl Display for Value {
     }
 }
 
-impl From<LiteralValue> for Value {
-    fn from(literal: LiteralValue) -> Self {
+impl From<ScalarValue> for Value {
+    fn from(literal: ScalarValue) -> Self {
         match literal {
-            LiteralValue::Integer(i) => Value::Integer(i),
-            LiteralValue::Float(f) => Value::Float(f),
-            LiteralValue::String(s) => Value::Text(s),
-            LiteralValue::Boolean(b) => Value::Boolean(b),
-            LiteralValue::Null => Value::Null,
+            ScalarValue::Int64(i) => Value::Integer(i),
+            ScalarValue::Float64(f) => Value::Float(f),
+            ScalarValue::Text(s) => Value::Text(s),
+            ScalarValue::Bool(b) => Value::Boolean(b),
+            ScalarValue::Null => Value::Null,
         }
     }
 }
 
 impl Value {
     /// Returns the data type of this value.
-    pub fn data_type(&self) -> Option<DataType> {
+    pub fn data_type(&self) -> Option<PhysicalType> {
         match self {
-            Value::Integer(_) => Some(DataType::Integer),
-            Value::Text(_) => Some(DataType::Text),
-            Value::Boolean(_) => Some(DataType::Boolean),
-            Value::Float(_) => Some(DataType::Float),
+            Value::Integer(_) => Some(PhysicalType::Int64),
+            Value::Text(_) => Some(PhysicalType::Text),
+            Value::Boolean(_) => Some(PhysicalType::Bool),
+            Value::Float(_) => Some(PhysicalType::Float64),
             Value::Null => None,
         }
     }
@@ -125,15 +125,9 @@ impl Value {
     /// Checks if this value can be stored in a column of the given type.
     ///
     /// Performs type checking and, for VARCHAR, length validation.
-    pub fn is_compatible_with(&self, data_type: &DataType) -> Result<(), String> {
+    pub fn is_compatible_with(&self, data_type: &PhysicalType) -> Result<(), String> {
         match (self, data_type) {
-            (Value::Integer(_), DataType::Integer) => Ok(()),
-            (Value::Boolean(_), DataType::Boolean) => Ok(()),
-            (Value::Float(_), DataType::Float) => Ok(()),
-
-            // Handle both Text and VarChar for string values
-            (Value::Text(_), DataType::Text) => Ok(()),
-            (Value::Text(s), DataType::VarChar(max_len)) => {
+            (Value::Text(s), PhysicalType::VarChar(max_len)) => {
                 if s.len() <= *max_len {
                     Ok(())
                 } else {
@@ -144,8 +138,11 @@ impl Value {
                     ))
                 }
             }
-
-            (Value::Null, _) => Ok(()), // Null handled separately by nullable check
+            (Value::Integer(_), PhysicalType::Int64)
+            | (Value::Boolean(_), PhysicalType::Bool)
+            | (Value::Float(_), PhysicalType::Float64)
+            | (Value::Null, _)
+            | (Value::Text(_), PhysicalType::Text) => Ok(()),
 
             _ => Err(format!(
                 "Type mismatch: {self:?} cannot be stored as {data_type:?}"
@@ -163,7 +160,7 @@ pub struct ColumnDefinition {
     pub name: String,
 
     /// The data type for values in this column.
-    pub data_type: DataType,
+    pub data_type: PhysicalType,
 
     /// Whether this column can contain NULL values.
     pub nullable: bool,
@@ -171,7 +168,7 @@ pub struct ColumnDefinition {
 
 impl ColumnDefinition {
     /// Creates a new column definition.
-    pub fn new(name: &str, data_type: DataType, nullable: bool) -> Self {
+    pub fn new(name: &str, data_type: PhysicalType, nullable: bool) -> Self {
         Self {
             name: name.to_owned(),
             data_type,
@@ -208,7 +205,7 @@ impl Schema {
     /// - Integer/Float: 8 bytes (little-endian i64)
     /// - Text/VarChar: 4-byte length + UTF-8 bytes
     /// - Boolean: 1 Bit
-    pub(crate) fn encode_row(&self, row: Row) -> Result<Vec<u8>> {
+    pub(crate) fn encode_row(&self, row: &Row) -> Vec<u8> {
         let mut bytes = vec![];
 
         let mut bitmap = NullBitmap::new(self.columns.len());
@@ -226,19 +223,19 @@ impl Schema {
             }
 
             match (column.data_type, value) {
-                (DataType::Integer, Value::Integer(number)) => {
+                (PhysicalType::Int64, Value::Integer(number)) => {
                     bytes.extend_from_slice(&number.to_le_bytes());
                 }
-                (DataType::Float, Value::Float(number)) => {
+                (PhysicalType::Float64, Value::Float(number)) => {
                     bytes.extend_from_slice(&number.to_le_bytes());
                 }
-                (DataType::Text, Value::Text(text)) => {
+                (PhysicalType::Text, Value::Text(text)) => {
                     let text_bytes = text.as_bytes();
                     let length = text_bytes.len() as u32;
                     bytes.extend_from_slice(&length.to_le_bytes());
                     bytes.extend_from_slice(text_bytes);
                 }
-                (DataType::VarChar(max_length), Value::Text(text)) => {
+                (PhysicalType::VarChar(max_length), Value::Text(text)) => {
                     let text_bytes = text.as_bytes();
                     let length = text_bytes.len() as u32;
                     assert!(
@@ -248,7 +245,7 @@ impl Schema {
                     bytes.extend_from_slice(&length.to_le_bytes());
                     bytes.extend_from_slice(text_bytes);
                 }
-                (DataType::Boolean, Value::Boolean(b)) => {
+                (PhysicalType::Bool, Value::Boolean(b)) => {
                     bytes.push(if *b { 1 } else { 0 });
                 }
                 _ => panic!(
@@ -258,7 +255,7 @@ impl Schema {
             }
         }
 
-        Ok(bytes)
+        bytes
     }
 
     /// Decodes a row from bytes read from storage.
@@ -279,7 +276,7 @@ impl Schema {
             }
 
             match column.data_type {
-                DataType::Integer => {
+                PhysicalType::Int64 => {
                     if offset + 8 > bytes.len() {
                         return Err(miette!("Not enough bytes for integer value"));
                     }
@@ -289,7 +286,7 @@ impl Schema {
                     values.push(Value::Integer(value));
                     offset += 8;
                 }
-                DataType::Float => {
+                PhysicalType::Float64 => {
                     if offset + 8 > bytes.len() {
                         return Err(miette!("Not enough bytes for float value"));
                     }
@@ -299,7 +296,7 @@ impl Schema {
                     values.push(Value::Float(value));
                     offset += 8;
                 }
-                DataType::Boolean => {
+                PhysicalType::Bool => {
                     if offset + 1 > bytes.len() {
                         return Err(miette!("Not enough bytes for boolean value"));
                     }
@@ -308,7 +305,7 @@ impl Schema {
                     values.push(Value::Boolean(bool_val));
                     offset += 1;
                 }
-                DataType::Text | DataType::VarChar(_) => {
+                PhysicalType::Text | PhysicalType::VarChar(_) => {
                     if offset + 4 > bytes.len() {
                         return Err(miette!("Not enough bytes for string length"));
                     }

@@ -1,9 +1,9 @@
 /// A literal value in SQL
 #[derive(Debug, Clone, PartialEq)]
-pub enum LiteralValue {
-    Integer(i64),
-    Float(f64),
-    String(String),
-    Boolean(bool),
+pub enum ScalarValue {
+    Int64(i64),
+    Float64(f64),
+    Text(String),
+    Bool(bool),
     Null,
 }

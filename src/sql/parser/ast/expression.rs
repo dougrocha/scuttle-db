@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::sql::parser::{LiteralValue, operators::Operator};
+use crate::sql::parser::{ScalarValue, operators::Operator};
 
 /// An expression in a WHERE clause.
 ///
@@ -19,10 +19,10 @@ pub enum Expression {
     },
 
     /// Column reference (e.g., `age`, `name`)
-    Column(String),
+    Identifier(String),
 
     /// Literal value (e.g., `25`, `'Alice'`)
-    Literal(LiteralValue),
+    Literal(ScalarValue),
 
     Is {
         expr: Box<Expression>,
@@ -37,15 +37,15 @@ impl fmt::Display for Expression {
             Expression::BinaryOp { left, op, right } => {
                 write!(f, "({left} {op:?} {right})")
             }
-            Expression::Column(name) => write!(f, "{name}"),
+            Expression::Identifier(name) => write!(f, "{name}"),
             Expression::Literal(value) => match value {
-                LiteralValue::Float(num) => write!(f, "{num}"),
-                LiteralValue::Integer(num) => write!(f, "{num}"),
-                LiteralValue::String(s) => write!(f, "\"{s}\""),
-                LiteralValue::Boolean(bool) => {
+                ScalarValue::Float64(num) => write!(f, "{num}"),
+                ScalarValue::Int64(num) => write!(f, "{num}"),
+                ScalarValue::Text(s) => write!(f, "\"{s}\""),
+                ScalarValue::Bool(bool) => {
                     write!(f, "{}", bool.to_string().to_uppercase())
                 }
-                LiteralValue::Null => write!(f, "NULL"),
+                ScalarValue::Null => write!(f, "NULL"),
             },
             Expression::Is {
                 expr,
@@ -63,7 +63,7 @@ impl fmt::Display for Expression {
 impl Expression {
     pub fn to_column_name(&self) -> String {
         match self {
-            Expression::Column(name) => name.clone(),
+            Expression::Identifier(name) => name.clone(),
             _ => "?column?".to_string(),
         }
     }

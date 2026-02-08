@@ -1,149 +1,162 @@
-use miette::{Result, miette};
+use miette::Result;
 
-use super::{logical_planner::LogicalPlan, parser::Expression, planner_context::PlannerContext};
+use super::planner_context::PlannerContext;
 use crate::{
-    ColumnDefinition, DataType, Relation, Schema, Table,
-    sql::{infer_type::infer_expression_type, parser::LiteralValue},
+    Row, Value,
+    sql::{
+        analyzer::{AnalyzedExpression, AnalyzedPlan, ResolvedSchema},
+        evaluator::{Evaluator, expression::ExpressionEvaluator, predicate::PredicateEvaluator},
+    },
 };
 
-/// A physical plan is built from the [LogicalPlan]
-///
-/// This is a map from the logical (what we need to do) to a
-/// physical representation of how we will grab the data.
-///
-/// Currently it is bare bones but the logical planner will say TableScan.
-/// In the physical plan, we decide if a SeqScan or IndexScan will be better.
-///
-/// Here we will only devise a cost model (Row count, IO costs, CPU time) later on to help us determine the best
-/// physical path.
-#[derive(Debug)]
-pub enum PhysicalPlan {
-    SeqScan {
-        table: Relation,
-    },
-    Filter {
-        predicate: Expression,
-        input: Box<PhysicalPlan>,
-    },
-    Projection {
-        expressions: Vec<Expression>,
-        input: Box<PhysicalPlan>,
-        schema: Schema,
-    },
+pub struct PhysicalPlanner<'a, 'db> {
+    context: &'a mut PlannerContext<'db>,
 }
 
-impl PhysicalPlan {
-    pub fn schema(&self) -> Schema {
-        match self {
-            PhysicalPlan::SeqScan { table, .. } => table.schema().clone(),
-            PhysicalPlan::Projection { schema, .. } => schema.clone(),
-            PhysicalPlan::Filter { input, .. } => input.schema(),
-        }
+impl<'a, 'db> PhysicalPlanner<'a, 'db> {
+    pub(crate) fn new(context: &'a mut PlannerContext<'db>) -> Self {
+        Self { context }
     }
 
-    pub fn from_logical_plan(logical_plan: LogicalPlan, context: &PlannerContext) -> Result<Self> {
-        let plan = match logical_plan {
-            LogicalPlan::TableScan { table } => {
-                let table = context.get_table(&table)?;
+    pub fn create_physical_plan(
+        &mut self,
+        analyzed_plan: AnalyzedPlan,
+    ) -> Result<Box<dyn ExecutionNode>> {
+        match analyzed_plan {
+            AnalyzedPlan::Scan { table_name, schema } => {
+                let data = self.context.database.get_rows(&table_name)?;
 
-                Self::SeqScan {
-                    table: table.clone(),
-                }
+                Ok(Box::new(ScanExec { schema, data }))
             }
-            LogicalPlan::Filter { predicate, input } => {
-                let input = Self::from_logical_plan(*input, context)?;
+            AnalyzedPlan::Filter { input, condition } => {
+                let child_node = self.create_physical_plan(*input)?;
 
-                Self::Filter {
-                    predicate,
-                    input: Box::new(input),
-                }
+                Ok(Box::new(FilterExec {
+                    child: child_node,
+                    expr: condition,
+                }))
             }
-            LogicalPlan::Projection {
-                expressions,
+            AnalyzedPlan::Projection {
                 input,
-                column_names,
+                expressions,
+                schema,
             } => {
-                let input_plan = Self::from_logical_plan(*input, context)?;
-                let input_schema = input_plan.schema();
+                let child_node = self.create_physical_plan(*input)?;
 
-                // TODO: Remove this from physical planner,
-                // Type checking should go in [Analyzer] struct
-                let output_columns: Vec<ColumnDefinition> = expressions
-                    .iter()
-                    .zip(column_names.iter())
-                    .map(|(expr, output_name)| {
-                        match expr {
-                            Expression::Column(col_name) => {
-                                let input_col = input_schema
-                                    .columns
-                                    .iter()
-                                    .find(|c| &c.name == col_name)
-                                    .ok_or_else(|| {
-                                        miette!("Column '{}' not found in input schema", col_name)
-                                    })?;
-
-                                Ok(ColumnDefinition {
-                                    name: output_name.clone(),
-                                    data_type: input_col.data_type,
-                                    nullable: input_col.nullable,
-                                })
-                            }
-                            Expression::Literal(lit_val) => {
-                                let data_type = match lit_val {
-                                    LiteralValue::Integer(_) => DataType::Integer,
-                                    LiteralValue::Float(_) => DataType::Float,
-                                    LiteralValue::String(_) => DataType::Text,
-                                    LiteralValue::Boolean(_) => DataType::Boolean,
-                                    LiteralValue::Null => {
-                                        // Can't infer type from NULL alone
-                                        // For now, default to Text or return error
-                                        return Err(miette!("Cannot infer type from NULL literal"));
-                                    }
-                                };
-                                Ok(ColumnDefinition {
-                                    name: output_name.clone(),
-                                    data_type,
-                                    nullable: matches!(lit_val, LiteralValue::Null),
-                                })
-                            }
-                            Expression::BinaryOp { .. } => {
-                                let infer_type = infer_expression_type(expr, &input_plan.schema())?;
-
-                                Ok(ColumnDefinition {
-                                    name: output_name.clone(),
-                                    data_type: infer_type.data_type,
-                                    nullable: infer_type.nullable,
-                                })
-                            }
-                            Expression::Is { .. } => Ok(ColumnDefinition {
-                                name: output_name.clone(),
-                                data_type: DataType::Boolean,
-                                nullable: false,
-                            }),
-                        }
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let output_schema = Schema::new(output_columns);
-
-                Self::Projection {
-                    expressions,
-                    input: Box::new(input_plan),
-                    schema: output_schema,
-                }
+                Ok(Box::new(ProjectionExec {
+                    child: child_node,
+                    exprs: expressions,
+                    schema,
+                }))
             }
-            LogicalPlan::Join {
-                left: _,
-                right: _,
-                condition: _,
-                join_type: _,
-            } => todo!(),
-            LogicalPlan::Limit { input: _, count: _ } => todo!(),
-            LogicalPlan::Sort {
-                input: _,
-                order_by: _,
-            } => todo!(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RecordBatch {
+    pub rows: Vec<Row>,
+}
+
+pub trait ExecutionNode: std::fmt::Debug {
+    fn schema(&self) -> &ResolvedSchema;
+
+    fn next(&mut self) -> Result<Option<RecordBatch>>;
+}
+
+#[derive(Debug)]
+pub struct ScanExec {
+    schema: ResolvedSchema,
+    data: Vec<Row>,
+}
+impl ExecutionNode for ScanExec {
+    fn schema(&self) -> &ResolvedSchema {
+        &self.schema
+    }
+
+    fn next(&mut self) -> Result<Option<RecordBatch>> {
+        let batch_size = 1024;
+
+        if self.data.is_empty() {
+            return Ok(None);
+        }
+
+        let end = batch_size.min(self.data.len());
+        let chunk: Vec<Row> = self.data.drain(..end).collect();
+
+        Ok(Some(RecordBatch { rows: chunk }))
+    }
+}
+#[derive(Debug)]
+pub struct ProjectionExec {
+    child: Box<dyn ExecutionNode>,
+    exprs: Vec<AnalyzedExpression>,
+    schema: ResolvedSchema,
+}
+impl ExecutionNode for ProjectionExec {
+    fn schema(&self) -> &ResolvedSchema {
+        &self.schema
+    }
+
+    fn next(&mut self) -> Result<Option<RecordBatch>> {
+        let Some(batch) = self.child.next()? else {
+            return Ok(None);
         };
 
-        Ok(plan)
+        let evaluator = ExpressionEvaluator;
+
+        let projected_rows: Result<Vec<Row>> = batch
+            .rows
+            .into_iter()
+            .map(|row| {
+                let new_values: Result<Vec<Value>> = self
+                    .exprs
+                    .iter()
+                    .map(|expr| evaluator.evaluate(expr, &row))
+                    .collect();
+
+                Ok(Row {
+                    values: new_values?,
+                })
+            })
+            .collect();
+
+        Ok(Some(RecordBatch {
+            rows: projected_rows?,
+        }))
+    }
+}
+#[derive(Debug)]
+pub struct FilterExec {
+    child: Box<dyn ExecutionNode>,
+    expr: AnalyzedExpression,
+}
+impl ExecutionNode for FilterExec {
+    fn schema(&self) -> &ResolvedSchema {
+        self.child.schema()
+    }
+
+    fn next(&mut self) -> Result<Option<RecordBatch>> {
+        let evaluator = PredicateEvaluator;
+
+        while let Some(batch) = self.child.next()? {
+            let mut filtered_rows = Vec::with_capacity(batch.rows.len());
+
+            for row in batch.rows {
+                if evaluator.evaluate(&self.expr, &row)? {
+                    filtered_rows.push(row);
+                }
+            }
+
+            // If this batch had 0 rows after filtering
+            // we loop again to grab the next batch
+            if !filtered_rows.is_empty() {
+                return Ok(Some(RecordBatch {
+                    rows: filtered_rows,
+                }));
+            }
+        }
+
+        Ok(None)
     }
 }

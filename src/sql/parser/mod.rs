@@ -1,13 +1,16 @@
 use std::iter::Peekable;
 
 pub(crate) use ast::*;
-pub(crate) use literal_value::LiteralValue;
+pub(crate) use literal_value::ScalarValue;
 use miette::{Result, miette};
 pub(crate) use operators::Operator;
 
 use crate::{
     keyword::Keyword,
-    sql::lexer::{Lexer, Token},
+    sql::{
+        lexer::{Lexer, Token},
+        parser::statement::{FromClause, SelectStatement},
+    },
 };
 
 pub(crate) mod ast;
@@ -50,24 +53,24 @@ impl<'a> SqlParser<'a> {
     fn parse_select_statement(&mut self) -> Result<Statement> {
         self.expect_keyword(Keyword::Select)?;
 
-        let columns = self.parse_targets()?;
+        let select_list = self.parse_targets()?;
 
         self.expect_keyword(Keyword::From)?;
-        let table = match self.lexer.next() {
+        let table_name = match self.lexer.next() {
             Some(Ok(Token::Identifier(table_name))) => table_name.to_string(),
             _ => return Err(miette!("Expected table name after FROM")),
         };
 
-        let r#where = match self.expect_keyword(Keyword::Where) {
+        let where_clause = match self.expect_keyword(Keyword::Where) {
             Ok(_) => Some(self.parse_expression(0)?),
             Err(_) => None,
         };
 
-        Ok(Statement::Select {
-            select_list: columns,
-            from_clause: table,
-            where_clause: r#where,
-        })
+        Ok(Statement::Select(SelectStatement {
+            select_list,
+            from_clause: FromClause { table_name },
+            where_clause,
+        }))
     }
 
     fn parse_targets(&mut self) -> Result<SelectList> {
@@ -80,22 +83,28 @@ impl<'a> SqlParser<'a> {
 
             let expr = self.parse_expression(0)?;
 
-            if let Expression::Column(col) = &expr
+            if let Expression::Identifier(col) = &expr
                 && col == "*"
             {
                 columns.push(SelectTarget::Star);
             } else {
-                let alias = match self.lexer.peek() {
-                    Some(Ok(Token::Keyword(Keyword::As))) => {
-                        // consume AS
-                        self.lexer.next();
-                        match self.lexer.next() {
-                            Some(Ok(Token::Identifier(name))) => Some(name.to_string()),
-                            Some(Ok(_)) => return Err(miette!("Expected identifier after AS")),
-                            _ => return Err(miette!("Unexpected EOF")),
-                        }
+                let alias = if matches!(self.lexer.peek(), Some(Ok(Token::Keyword(Keyword::As)))) {
+                    // consume AS
+                    self.lexer.next();
+                    match self.lexer.next() {
+                        Some(Ok(Token::Identifier(name))) => Some(name.to_string()),
+                        Some(Ok(_)) => return Err(miette!("Expected identifier after AS")),
+                        _ => return Err(miette!("Unexpected EOF")),
                     }
-                    _ => None,
+                } else if matches!(self.lexer.peek(), Some(Ok(Token::Identifier(_)))) {
+                    // implicit alias (no AS keyword)
+                    match self.lexer.next() {
+                        Some(Ok(Token::Identifier(name))) => Some(name.to_string()),
+                        _ => unreachable!(),
+                    }
+                } else {
+                    // no alias
+                    None
                 };
 
                 columns.push(SelectTarget::Expression {
@@ -109,7 +118,7 @@ impl<'a> SqlParser<'a> {
             }
         }
 
-        Ok(columns)
+        Ok(SelectList(columns))
     }
 
     fn parse_expression(&mut self, min_prec: u8) -> Result<Expression> {
@@ -141,14 +150,14 @@ impl<'a> SqlParser<'a> {
             .ok_or(miette!("Unexpected end of input"))??;
 
         let expr = match token {
-            Token::Boolean(b) => Expression::Literal(LiteralValue::Boolean(b)),
-            Token::Integer(i) => Expression::Literal(LiteralValue::Integer(i)),
-            Token::Float(f) => Expression::Literal(LiteralValue::Float(f)),
-            Token::String(s) => Expression::Literal(LiteralValue::String(s.to_string())),
+            Token::Boolean(b) => Expression::Literal(ScalarValue::Bool(b)),
+            Token::Integer(i) => Expression::Literal(ScalarValue::Int64(i)),
+            Token::Float(f) => Expression::Literal(ScalarValue::Float64(f)),
+            Token::String(s) => Expression::Literal(ScalarValue::Text(s.to_string())),
 
-            Token::Identifier(i) => Expression::Column(i.to_string()),
+            Token::Identifier(i) => Expression::Identifier(i.to_string()),
 
-            Token::Asterisk => Expression::Column("*".to_string()),
+            Token::Asterisk => Expression::Identifier("*".to_string()),
 
             Token::LeftParen => {
                 let expr = self.parse_expression(0)?;
@@ -252,6 +261,8 @@ impl<'a> SqlParser<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::sql::parser::SelectStatement;
+
     use super::*;
 
     /// Helper to parse a query and extract components
@@ -263,10 +274,10 @@ mod tests {
     /// Helper to parse and extract WHERE expression
     fn parse_where(query: &str) -> Expression {
         match parse(query) {
-            Statement::Select {
+            Statement::Select(SelectStatement {
                 where_clause: Some(expr),
                 ..
-            } => expr,
+            }) => expr,
             _ => panic!("Expected SELECT with WHERE clause"),
         }
     }
@@ -274,14 +285,57 @@ mod tests {
     #[test]
     fn test_parse_select_all() {
         match parse("SELECT * FROM users") {
-            Statement::Select {
-                select_list: columns,
-                from_clause: table,
-                where_clause: r#where,
-            } => {
-                assert_eq!(columns, vec![SelectTarget::Star]);
-                assert_eq!(table, "users");
-                assert!(r#where.is_none());
+            Statement::Select(SelectStatement {
+                select_list,
+                from_clause,
+                where_clause,
+            }) => {
+                assert_eq!(select_list.0, vec![SelectTarget::Star]);
+                assert_eq!(
+                    from_clause,
+                    FromClause {
+                        table_name: "users".to_owned(),
+                    }
+                );
+                assert!(where_clause.is_none());
+            }
+            _ => panic!("Expected Select statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_select_multiple() {
+        match parse("SELECT id, name FROM users") {
+            Statement::Select(SelectStatement { select_list, .. }) => {
+                assert_eq!(
+                    select_list.0,
+                    vec![
+                        SelectTarget::Expression {
+                            expr: Expression::Identifier("id".to_string()),
+                            alias: None,
+                        },
+                        SelectTarget::Expression {
+                            expr: Expression::Identifier("name".to_string()),
+                            alias: None,
+                        }
+                    ]
+                );
+            }
+            _ => panic!("Expected Select statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_select_with_implicit_alias() {
+        match parse("SELECT id user_id FROM users") {
+            Statement::Select(SelectStatement { select_list, .. }) => {
+                assert_eq!(
+                    select_list.0,
+                    vec![SelectTarget::Expression {
+                        expr: Expression::Identifier("id".to_string()),
+                        alias: Some("user_id".to_string()),
+                    }]
+                );
             }
             _ => panic!("Expected Select statement"),
         }
@@ -290,25 +344,20 @@ mod tests {
     #[test]
     fn test_parse_select_columns() {
         match parse("SELECT id as \"Identity\", name AS firstName FROM users") {
-            Statement::Select {
-                select_list,
-                from_clause,
-                ..
-            } => {
+            Statement::Select(SelectStatement { select_list, .. }) => {
                 assert_eq!(
-                    select_list,
+                    select_list.0,
                     vec![
                         SelectTarget::Expression {
-                            expr: Expression::Column("id".to_string()),
+                            expr: Expression::Identifier("id".to_string()),
                             alias: Some("Identity".to_string()),
                         },
                         SelectTarget::Expression {
-                            expr: Expression::Column("name".to_string()),
+                            expr: Expression::Identifier("name".to_string()),
                             alias: Some("firstName".to_string()),
                         },
                     ]
                 );
-                assert_eq!(from_clause, "users");
             }
             _ => panic!("Expected Select statement"),
         }
@@ -320,9 +369,9 @@ mod tests {
         assert_eq!(
             expr,
             Expression::BinaryOp {
-                left: Box::new(Expression::Column("id".to_string())),
+                left: Box::new(Expression::Identifier("id".to_string())),
                 op: Operator::Equal,
-                right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
+                right: Box::new(Expression::Literal(ScalarValue::Int64(1))),
             }
         );
     }
@@ -454,7 +503,7 @@ mod tests {
                 right: bc,
             } = *left
             {
-                assert!(matches!(*a, Expression::Column(_)));
+                assert!(matches!(*a, Expression::Identifier(_)));
                 assert!(matches!(
                     *bc,
                     Expression::BinaryOp {
@@ -473,19 +522,19 @@ mod tests {
         // Integer
         let expr = parse_where("SELECT * FROM t WHERE x = 42");
         if let Expression::BinaryOp { right, .. } = expr {
-            assert_eq!(*right, Expression::Literal(LiteralValue::Integer(42)));
+            assert_eq!(*right, Expression::Literal(ScalarValue::Int64(42)));
         }
 
         // Float
         let expr = parse_where("SELECT * FROM t WHERE x = 3.15");
         if let Expression::BinaryOp { right, .. } = expr {
-            assert_eq!(*right, Expression::Literal(LiteralValue::Float(3.15)));
+            assert_eq!(*right, Expression::Literal(ScalarValue::Float64(3.15)));
         }
 
         // Boolean
         let expr = parse_where("SELECT * FROM t WHERE active = TRUE");
         if let Expression::BinaryOp { right, .. } = expr {
-            assert_eq!(*right, Expression::Literal(LiteralValue::Boolean(true)));
+            assert_eq!(*right, Expression::Literal(ScalarValue::Bool(true)));
         }
     }
 }

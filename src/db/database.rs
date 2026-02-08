@@ -3,16 +3,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use miette::{IntoDiagnostic, Result};
+use miette::Result;
 
 use crate::{
     DatabaseError,
-    db::table::{Relation, Row, Schema, Table, Value},
+    db::table::{Relation, Row, Schema, Table},
     sql::{
-        analyzer::Analyzer,
-        evaluator::{Evaluator, expression::ExpressionEvaluator, predicate::PredicateEvaluator},
+        analyzer::{Analyzer, ResolvedSchema},
         parser::SqlParser,
-        physical_planner::PhysicalPlan,
+        physical_planner::PhysicalPlanner,
         planner_context::PlannerContext,
     },
     storage::{
@@ -26,7 +25,7 @@ use crate::{
 /// Contains the table metadata and the result rows.
 #[derive(Debug)]
 pub struct QueryResponse {
-    pub schema: Schema,
+    pub schema: ResolvedSchema,
 
     /// The rows returned by the query.
     pub rows: Vec<Row>,
@@ -133,6 +132,7 @@ impl Database {
     /// Gets a mutable reference to a table.
     pub fn get_table_mut(&mut self, name: &str) -> Result<&mut Relation, DatabaseError> {
         if self.table_exists(name) {
+            #[expect(clippy::missing_panics_doc, reason = "infallible")]
             return Ok(self.tables.get_mut(name).unwrap());
         }
 
@@ -187,8 +187,8 @@ impl Database {
 
         // Get schema first (separate borrow scope)
         let encoded_data = {
-            let table = self.get_table(table_name).unwrap();
-            table.schema().encode_row(row)?
+            let table = self.get_table(table_name)?;
+            table.schema().encode_row(&row)
         };
 
         // Now get the page and insert data
@@ -238,6 +238,7 @@ impl Database {
                     .unwrap()
                     .schema()
                     .decode_row(item_data)
+                    // TODO: Eventually return a SerializationError
                     .expect("Row should be decoded");
 
                 found_rows.push(decoded_row);
@@ -261,8 +262,9 @@ impl Database {
             .parse()
             .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))?;
 
-        let context = PlannerContext::new(self);
-        let logical_plan = Analyzer::new(&context).analyze_plan(statement)?;
+        let mut context = PlannerContext::new(self);
+        let analyzer = Analyzer::new(&context);
+        let anayzed_plan = analyzer.analyze(statement)?;
 
         // TODO: Eventually add a optimizer here for logical_plan.
         // Will do a series of "pushdowns".
@@ -271,74 +273,18 @@ impl Database {
         //  - Projection pushdown: only read columns we actually need (I think this is already implemeted)
         //  - Constant Folding: turn 'age > 10 + 5' to 'age > 25'
 
-        let (physical_plan, output_schema) = {
-            let plan = PhysicalPlan::from_logical_plan(logical_plan, &context)
-                .map_err(|e| DatabaseError::InvalidQuery(format!("Physical Plan error: {e}")))?;
-            let schema = plan.schema();
-            (plan, schema)
-        };
+        let mut physical_planner = PhysicalPlanner::new(&mut context);
+        let mut executor = physical_planner
+            .create_physical_plan(anayzed_plan)
+            .map_err(|e| DatabaseError::InvalidQuery(format!("Physical Plan error: {e}")))?;
 
-        let rows = self.execute_physical_plan(physical_plan)?;
-
-        Ok(QueryResponse {
-            schema: output_schema,
-            rows,
-        })
-    }
-
-    /// Executes a physical query plan.
-    ///
-    /// Internal method that recursively executes plan nodes:
-    /// - **SeqScan** - Full table scan
-    /// - **Filter** - Apply WHERE predicates
-    /// - **Projection** - Select specific columns
-    ///
-    /// Future operators may include IndexScan, HashJoin, Sort, etc.
-    fn execute_physical_plan(&mut self, plan: PhysicalPlan) -> Result<Vec<Row>> {
-        match plan {
-            PhysicalPlan::SeqScan { table } => {
-                let all_rows = self.get_rows(table.name()).into_diagnostic()?;
-
-                Ok(all_rows)
-            }
-            PhysicalPlan::Filter { predicate, input } => {
-                let schema = input.schema().clone();
-                let input_rows = self.execute_physical_plan(*input)?;
-
-                let evaluator = PredicateEvaluator;
-
-                Ok(input_rows
-                    .into_iter()
-                    .filter(|row| {
-                        evaluator
-                            .evaluate(&predicate, row, &schema)
-                            .unwrap_or(false)
-                    })
-                    .collect())
-            }
-            PhysicalPlan::Projection {
-                expressions,
-                input,
-                schema: _,
-            } => {
-                let schema = input.schema().clone();
-                let input = self.execute_physical_plan(*input)?;
-
-                let evaluator = ExpressionEvaluator;
-
-                let projected_rows: Vec<Row> = input
-                    .into_iter()
-                    .map(|row| {
-                        let projected_values: Vec<Value> = expressions
-                            .iter()
-                            .map(|expr| evaluator.evaluate(expr, &row, &schema))
-                            .collect::<Result<Vec<_>>>()?;
-                        Ok(Row::new(projected_values))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                Ok(projected_rows)
-            }
+        let mut batches = Vec::new();
+        while let Some(batch) = executor.next()? {
+            batches.push(batch);
         }
+
+        let schema = executor.schema().clone(); // ONE clone
+        let rows = batches.into_iter().flat_map(|b| b.rows).collect();
+        Ok(QueryResponse { schema, rows })
     }
 }
