@@ -1,7 +1,7 @@
 use miette::{Result, miette};
 
 use crate::{
-    PhysicalType, Table,
+    PhysicalType, Table, Value,
     sql::{
         parser::{
             Expression, IsPredicate, Operator, ScalarValue, SelectList, SelectTarget, Statement,
@@ -31,18 +31,6 @@ impl From<PhysicalType> for ColumnType {
     }
 }
 
-impl From<&ScalarValue> for ColumnType {
-    fn from(value: &ScalarValue) -> Self {
-        match value {
-            ScalarValue::Int64(_) => Self::Int64,
-            ScalarValue::Text(_) => Self::Text,
-            ScalarValue::Bool(_) => Self::Bool,
-            ScalarValue::Float64(_) => Self::Float64,
-            ScalarValue::Null => Self::Null,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct ColumnReference {
     pub index: usize,
@@ -59,7 +47,7 @@ pub struct Field {
 
 #[derive(Debug)]
 pub enum AnalyzedExpression {
-    Literal(ScalarValue),
+    Literal(Value),
     Column(ColumnReference, ColumnType),
     BinaryExpr {
         left: Box<AnalyzedExpression>,
@@ -94,7 +82,13 @@ impl From<&IsPredicate> for IsPredicateTarget {
 impl AnalyzedExpression {
     pub fn get_type(&self) -> ColumnType {
         match self {
-            AnalyzedExpression::Literal(scalar_value) => scalar_value.into(),
+            AnalyzedExpression::Literal(value) => match value {
+                Value::Integer(_) => ColumnType::Int64,
+                Value::Float(_) => ColumnType::Float64,
+                Value::Text(_) => ColumnType::Text,
+                Value::Boolean(_) => ColumnType::Bool,
+                Value::Null => ColumnType::Null,
+            },
             AnalyzedExpression::Column(_, column_type) => *column_type,
             AnalyzedExpression::BinaryExpr { return_type, .. } => *return_type,
             AnalyzedExpression::IsPredicate { .. } => ColumnType::Bool,
@@ -190,14 +184,14 @@ impl<'a, 'db> Analyzer<'a, 'db> {
     }
 
     fn analyze_from(&self, from_clause: FromClause) -> Result<AnalyzedPlan> {
-        let physical_schema = self.context.get_table(&from_clause.table_name)?.schema();
+        let physical_schema = self.context.get_table(from_clause.table_name)?.schema();
 
         let virtual_fields = physical_schema
             .columns
             .iter()
             .map(|col| Field {
                 name: col.name.clone(),
-                alias: None, // We don't handle alias yet here
+                alias: None,
                 data_type: col.data_type.into(),
                 is_nullable: col.nullable,
             })
@@ -208,7 +202,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         };
 
         Ok(AnalyzedPlan::Scan {
-            table_name: from_clause.table_name,
+            table_name: from_clause.table_name.to_string(),
             schema: resolved_schema,
         })
     }
@@ -242,8 +236,8 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     let analyzed_expr = self.bind_expression(expr, input_schema)?;
 
                     let field = Field {
-                        name: expr.to_column_name(),
-                        alias: alias.clone(),
+                        name: expr.to_column_name().to_string(),
+                        alias: alias.map(|a| a.to_string()),
                         data_type: analyzed_expr.get_type(),
                         is_nullable: analyzed_expr.is_nullable(input_schema),
                     };
@@ -312,13 +306,10 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 ))
             }
             Expression::Literal(scalar_value) => match scalar_value {
-                ScalarValue::Int64(_)
-                | ScalarValue::Float64(_)
-                | ScalarValue::Text(_)
-                | ScalarValue::Bool(_) => Ok(AnalyzedExpression::Literal(scalar_value.clone())),
                 ScalarValue::Null => Err(miette!(
                     "NULL literal cannot be used in this context. Use 'IS NULL' or 'IS NOT NULL' instead"
                 )),
+                scalar_value => Ok(AnalyzedExpression::Literal(Value::from(scalar_value))),
             },
             Expression::Is {
                 expr,

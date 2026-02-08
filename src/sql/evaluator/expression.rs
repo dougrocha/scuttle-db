@@ -17,7 +17,7 @@ pub struct ExpressionEvaluator;
 impl Evaluator<Value> for ExpressionEvaluator {
     fn evaluate(&self, analyzed_expr: &AnalyzedExpression, row: &Row) -> Result<Value> {
         match analyzed_expr {
-            AnalyzedExpression::Literal(scalar_value) => Ok(Value::from(scalar_value.clone())),
+            AnalyzedExpression::Literal(value) => Ok(value.clone()),
             AnalyzedExpression::Column(column_reference, _) => {
                 let row_val = row
                     .get_value(column_reference.index)

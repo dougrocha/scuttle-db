@@ -2,29 +2,29 @@ use super::expression::Expression;
 
 /// Target list in a SELECT statement.
 #[derive(Debug, Clone, PartialEq)]
-pub enum SelectTarget {
+pub enum SelectTarget<'src> {
     /// SELECT * (all columns)
     Star,
 
     /// SELECT col1, col2, ... (specific columns)
     Expression {
-        expr: Expression,
-        alias: Option<String>,
+        expr: Expression<'src>,
+        alias: Option<&'src str>,
     },
 }
 
 #[derive(Debug, Clone)]
-pub struct SelectList(pub Vec<SelectTarget>);
+pub struct SelectList<'src>(pub Vec<SelectTarget<'src>>);
 
-impl std::ops::Deref for SelectList {
-    type Target = Vec<SelectTarget>;
+impl<'src> std::ops::Deref for SelectList<'src> {
+    type Target = Vec<SelectTarget<'src>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl std::ops::DerefMut for SelectList {
+impl std::ops::DerefMut for SelectList<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }

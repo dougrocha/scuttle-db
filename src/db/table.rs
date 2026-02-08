@@ -98,13 +98,13 @@ impl Display for Value {
     }
 }
 
-impl From<ScalarValue> for Value {
-    fn from(literal: ScalarValue) -> Self {
+impl From<&ScalarValue<'_>> for Value {
+    fn from(literal: &ScalarValue) -> Self {
         match literal {
-            ScalarValue::Int64(i) => Value::Integer(i),
-            ScalarValue::Float64(f) => Value::Float(f),
-            ScalarValue::Text(s) => Value::Text(s),
-            ScalarValue::Bool(b) => Value::Boolean(b),
+            ScalarValue::Int64(i) => Value::Integer(*i),
+            ScalarValue::Float64(f) => Value::Float(*f),
+            ScalarValue::Text(s) => Value::Text(s.to_string()),
+            ScalarValue::Bool(b) => Value::Boolean(*b),
             ScalarValue::Null => Value::Null,
         }
     }

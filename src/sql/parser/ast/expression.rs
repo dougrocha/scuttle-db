@@ -6,32 +6,32 @@ use crate::sql::parser::{ScalarValue, operators::Operator};
 ///
 /// Expressions form a tree structure representing the filtering logic.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Expression {
+pub enum Expression<'src> {
     BinaryOp {
         /// Left operand
-        left: Box<Expression>,
+        left: Box<Expression<'src>>,
 
         /// Operator
         op: Operator,
 
         /// Right operand
-        right: Box<Expression>,
+        right: Box<Expression<'src>>,
     },
 
     /// Column reference (e.g., `age`, `name`)
-    Identifier(String),
+    Identifier(&'src str),
 
     /// Literal value (e.g., `25`, `'Alice'`)
-    Literal(ScalarValue),
+    Literal(ScalarValue<'src>),
 
     Is {
-        expr: Box<Expression>,
+        expr: Box<Expression<'src>>,
         predicate: IsPredicate,
         is_negated: bool,
     },
 }
 
-impl fmt::Display for Expression {
+impl fmt::Display for Expression<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expression::BinaryOp { left, op, right } => {
@@ -60,11 +60,11 @@ impl fmt::Display for Expression {
     }
 }
 
-impl Expression {
-    pub fn to_column_name(&self) -> String {
+impl Expression<'_> {
+    pub fn to_column_name(&self) -> &str {
         match self {
-            Expression::Identifier(name) => name.clone(),
-            _ => "?column?".to_string(),
+            Expression::Identifier(name) => name,
+            _ => "?column?",
         }
     }
 }

@@ -20,21 +20,21 @@ pub(crate) mod operators;
 /// SQL parser that converts tokens into an AST.
 ///
 /// Uses recursive descent parsing with a peekable token stream.
-pub struct SqlParser<'a> {
+pub struct SqlParser<'src> {
     /// Token stream from the lexer
-    lexer: Peekable<Lexer<'a>>,
+    lexer: Peekable<Lexer<'src>>,
 }
 
-impl<'a> SqlParser<'a> {
+impl<'src> SqlParser<'src> {
     /// Creates a new parser for the given SQL query string.
-    pub fn new(query: &'a str) -> Self {
+    pub fn new(query: &'src str) -> Self {
         Self {
             lexer: Lexer::new(query).peekable(),
         }
     }
 
     /// Parses the query and returns the top-level AST node (Statement).
-    pub fn parse(&mut self) -> Result<Statement> {
+    pub fn parse(&mut self) -> Result<Statement<'src>> {
         let Some(Ok(token)) = self.lexer.peek() else {
             return Err(miette!("Error occured while parsing"));
         };
@@ -50,14 +50,14 @@ impl<'a> SqlParser<'a> {
         Ok(statement)
     }
 
-    fn parse_select_statement(&mut self) -> Result<Statement> {
+    fn parse_select_statement(&mut self) -> Result<Statement<'src>> {
         self.expect_keyword(Keyword::Select)?;
 
         let select_list = self.parse_targets()?;
 
         self.expect_keyword(Keyword::From)?;
         let table_name = match self.lexer.next() {
-            Some(Ok(Token::Identifier(table_name))) => table_name.to_string(),
+            Some(Ok(Token::Identifier(table_name))) => table_name,
             _ => return Err(miette!("Expected table name after FROM")),
         };
 
@@ -73,7 +73,7 @@ impl<'a> SqlParser<'a> {
         }))
     }
 
-    fn parse_targets(&mut self) -> Result<SelectList> {
+    fn parse_targets(&mut self) -> Result<SelectList<'src>> {
         let mut columns = Vec::new();
 
         while let Some(Ok(token)) = self.lexer.peek() {
@@ -83,7 +83,7 @@ impl<'a> SqlParser<'a> {
 
             let expr = self.parse_expression(0)?;
 
-            if let Expression::Identifier(col) = &expr
+            if let Expression::Identifier(col) = expr
                 && col == "*"
             {
                 columns.push(SelectTarget::Star);
@@ -92,14 +92,14 @@ impl<'a> SqlParser<'a> {
                     // consume AS
                     self.lexer.next();
                     match self.lexer.next() {
-                        Some(Ok(Token::Identifier(name))) => Some(name.to_string()),
+                        Some(Ok(Token::Identifier(name))) => Some(name),
                         Some(Ok(_)) => return Err(miette!("Expected identifier after AS")),
                         _ => return Err(miette!("Unexpected EOF")),
                     }
                 } else if matches!(self.lexer.peek(), Some(Ok(Token::Identifier(_)))) {
                     // implicit alias (no AS keyword)
                     match self.lexer.next() {
-                        Some(Ok(Token::Identifier(name))) => Some(name.to_string()),
+                        Some(Ok(Token::Identifier(name))) => Some(name),
                         _ => unreachable!(),
                     }
                 } else {
@@ -107,10 +107,7 @@ impl<'a> SqlParser<'a> {
                     None
                 };
 
-                columns.push(SelectTarget::Expression {
-                    expr: expr.clone(),
-                    alias,
-                });
+                columns.push(SelectTarget::Expression { expr, alias });
             }
 
             if let Some(Ok(Token::Comma)) = self.lexer.peek() {
@@ -121,7 +118,7 @@ impl<'a> SqlParser<'a> {
         Ok(SelectList(columns))
     }
 
-    fn parse_expression(&mut self, min_prec: u8) -> Result<Expression> {
+    fn parse_expression(&mut self, min_prec: u8) -> Result<Expression<'src>> {
         let mut lhs = self.parse_primary()?;
 
         while let Ok(op) = self.peek_binary_op() {
@@ -143,7 +140,7 @@ impl<'a> SqlParser<'a> {
         Ok(lhs)
     }
 
-    fn parse_primary(&mut self) -> Result<Expression> {
+    fn parse_primary(&mut self) -> Result<Expression<'src>> {
         let token = self
             .lexer
             .next()
@@ -153,11 +150,11 @@ impl<'a> SqlParser<'a> {
             Token::Boolean(b) => Expression::Literal(ScalarValue::Bool(b)),
             Token::Integer(i) => Expression::Literal(ScalarValue::Int64(i)),
             Token::Float(f) => Expression::Literal(ScalarValue::Float64(f)),
-            Token::String(s) => Expression::Literal(ScalarValue::Text(s.to_string())),
+            Token::String(s) => Expression::Literal(ScalarValue::Text(s)),
 
-            Token::Identifier(i) => Expression::Identifier(i.to_string()),
+            Token::Identifier(i) => Expression::Identifier(i),
 
-            Token::Asterisk => Expression::Identifier("*".to_string()),
+            Token::Asterisk => Expression::Identifier("*"),
 
             Token::LeftParen => {
                 let expr = self.parse_expression(0)?;
@@ -204,7 +201,7 @@ impl<'a> SqlParser<'a> {
     }
 
     // Potentially parse "IS" postfix
-    fn parse_is_postfix(&mut self, expr: Expression) -> Result<Expression> {
+    fn parse_is_postfix(&mut self, expr: Expression<'src>) -> Result<Expression<'src>> {
         // Check if next token is IS keyword
         if !matches!(self.lexer.peek(), Some(Ok(Token::Keyword(Keyword::Is)))) {
             return Ok(expr); // No IS, return expression as-is
@@ -266,13 +263,13 @@ mod tests {
     use super::*;
 
     /// Helper to parse a query and extract components
-    fn parse(query: &str) -> Statement {
+    fn parse(query: &str) -> Statement<'_> {
         let mut parser = SqlParser::new(query);
         parser.parse().expect("Failed to parse query")
     }
 
     /// Helper to parse and extract WHERE expression
-    fn parse_where(query: &str) -> Expression {
+    fn parse_where(query: &str) -> Expression<'_> {
         match parse(query) {
             Statement::Select(SelectStatement {
                 where_clause: Some(expr),
@@ -291,12 +288,9 @@ mod tests {
                 where_clause,
             }) => {
                 assert_eq!(select_list.0, vec![SelectTarget::Star]);
-                assert_eq!(
-                    from_clause,
-                    FromClause {
-                        table_name: "users".to_owned(),
-                    }
-                );
+                assert_eq!(from_clause, FromClause {
+                    table_name: "users",
+                });
                 assert!(where_clause.is_none());
             }
             _ => panic!("Expected Select statement"),
@@ -311,11 +305,11 @@ mod tests {
                     select_list.0,
                     vec![
                         SelectTarget::Expression {
-                            expr: Expression::Identifier("id".to_string()),
+                            expr: Expression::Identifier("id"),
                             alias: None,
                         },
                         SelectTarget::Expression {
-                            expr: Expression::Identifier("name".to_string()),
+                            expr: Expression::Identifier("name"),
                             alias: None,
                         }
                     ]
@@ -332,8 +326,8 @@ mod tests {
                 assert_eq!(
                     select_list.0,
                     vec![SelectTarget::Expression {
-                        expr: Expression::Identifier("id".to_string()),
-                        alias: Some("user_id".to_string()),
+                        expr: Expression::Identifier("id"),
+                        alias: Some("user_id"),
                     }]
                 );
             }
@@ -349,12 +343,12 @@ mod tests {
                     select_list.0,
                     vec![
                         SelectTarget::Expression {
-                            expr: Expression::Identifier("id".to_string()),
-                            alias: Some("Identity".to_string()),
+                            expr: Expression::Identifier("id"),
+                            alias: Some("Identity"),
                         },
                         SelectTarget::Expression {
-                            expr: Expression::Identifier("name".to_string()),
-                            alias: Some("firstName".to_string()),
+                            expr: Expression::Identifier("name"),
+                            alias: Some("firstName"),
                         },
                     ]
                 );
@@ -369,7 +363,7 @@ mod tests {
         assert_eq!(
             expr,
             Expression::BinaryOp {
-                left: Box::new(Expression::Identifier("id".to_string())),
+                left: Box::new(Expression::Identifier("id")),
                 op: Operator::Equal,
                 right: Box::new(Expression::Literal(ScalarValue::Int64(1))),
             }
