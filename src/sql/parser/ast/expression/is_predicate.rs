@@ -1,3 +1,5 @@
+use crate::sql::parser::Keyword;
+
 /// Predicates to the 'IS' keyword.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IsPredicate {
@@ -12,6 +14,19 @@ impl std::fmt::Display for IsPredicate {
             IsPredicate::True => write!(f, "TRUE"),
             IsPredicate::False => write!(f, "FALSE"),
             IsPredicate::Null => write!(f, "NULL"),
+        }
+    }
+}
+
+impl TryFrom<Keyword> for IsPredicate {
+    type Error = ();
+
+    fn try_from(kw: Keyword) -> Result<Self, Self::Error> {
+        match kw {
+            Keyword::True => Ok(IsPredicate::True),
+            Keyword::False => Ok(IsPredicate::False),
+            Keyword::Null => Ok(IsPredicate::Null),
+            _ => Err(()), // This keyword is not a predicate
         }
     }
 }

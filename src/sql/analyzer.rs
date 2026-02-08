@@ -177,7 +177,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     plan = self.analyze_where(plan, &expr)?;
                 }
 
-                plan = self.analyze_projection(plan, select_list)?;
+                plan = self.analyze_projection(plan, &select_list)?;
 
                 Ok(plan)
             }
@@ -212,7 +212,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
     fn analyze_projection(
         &self,
         input_plan: LogicalPlan,
-        select_list: SelectList,
+        select_list: &SelectList,
     ) -> Result<LogicalPlan> {
         let input_schema = input_plan.schema();
 

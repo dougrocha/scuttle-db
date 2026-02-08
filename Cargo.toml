@@ -13,8 +13,3 @@ categories = ["database-implementations", "development-tools"]
 miette = { version = "7.6.0", features = ["fancy"] }
 strum = { version = "0.27", features = ["derive"] }
 thiserror = "2.0.18"
-
-# Enable documentation features
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]

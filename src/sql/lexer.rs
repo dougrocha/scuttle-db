@@ -2,10 +2,10 @@ use std::str::FromStr;
 
 use miette::{IntoDiagnostic, Result, miette};
 
-use crate::keyword::Keyword;
+use super::parser::Keyword;
 
 /// A token in the SQL language.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Token<'a> {
     /// SQL keyword (SELECT, FROM, WHERE, etc.)
     Keyword(Keyword),
@@ -15,8 +15,6 @@ pub enum Token<'a> {
     Integer(i64),
     Float(f64),
     String(&'a str),
-    Boolean(bool),
-    Null,
 
     Comma,
     SemiColon,
@@ -230,12 +228,7 @@ impl<'a> Iterator for Lexer<'a> {
                     return Some(Ok(Token::Keyword(kw)));
                 }
 
-                let token = match word.to_ascii_uppercase().as_str() {
-                    "TRUE" => Token::Boolean(true),
-                    "FALSE" => Token::Boolean(false),
-                    "NULL" => Token::Null,
-                    _ => Token::Identifier(word),
-                };
+                let token = Token::Identifier(word);
 
                 Ok(token)
             }
@@ -343,7 +336,7 @@ mod tests {
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
         assert_token_eq(lexer.next(), Token::Identifier("email"));
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::Is));
-        assert_token_eq(lexer.next(), Token::Null);
+        assert_token_eq(lexer.next(), Token::Keyword(Keyword::Null));
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
         assert_token_eq(lexer.next(), Token::Identifier("users"));
         assert!(lexer.next().is_none());

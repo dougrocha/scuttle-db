@@ -2,22 +2,21 @@ use std::iter::Peekable;
 
 use miette::{Result, miette};
 
-use crate::{
-    keyword::Keyword,
-    sql::{
-        lexer::{Lexer, Token},
-        parser::{
-            expression::IsPredicate,
-            statement::{FromClause, SelectStatement},
-        },
+use crate::sql::{
+    lexer::{Lexer, Token},
+    parser::{
+        expression::IsPredicate,
+        statement::{FromClause, SelectStatement},
     },
 };
 
 pub(crate) use ast::*;
+pub(crate) use keyword::Keyword;
 pub(crate) use literal::Literal;
 pub(crate) use operators::Operator;
 
 pub(crate) mod ast;
+pub(crate) mod keyword;
 pub(crate) mod literal;
 pub(crate) mod operators;
 
@@ -60,15 +59,16 @@ impl<'src> SqlParser<'src> {
         let select_list = self.parse_targets()?;
 
         self.expect_keyword(Keyword::From)?;
-        let table_name = match self.lexer.next() {
-            Some(Ok(Token::Identifier(table_name))) => table_name,
-            _ => return Err(miette!("Expected table name after FROM")),
+
+        let Some(Ok(Token::Identifier(table_name))) = self.lexer.next() else {
+            return Err(miette!("Expected table name after FROM"));
         };
 
-        let where_clause = match self.expect_keyword(Keyword::Where) {
-            Ok(_) => Some(self.parse_expression(0)?),
-            Err(_) => None,
-        };
+        let where_clause = self
+            .expect_keyword(Keyword::Where)
+            .ok()
+            .map(|_| self.parse_expression(0))
+            .transpose()?;
 
         Ok(Statement::Select(SelectStatement {
             select_list,
@@ -104,7 +104,10 @@ impl<'src> SqlParser<'src> {
                     // implicit alias (no AS keyword)
                     match self.lexer.next() {
                         Some(Ok(Token::Identifier(name))) => Some(name),
-                        _ => unreachable!(),
+                        Some(Ok(token)) => {
+                            return Err(miette!("Expected an Implicit alias but found {token:?}"));
+                        }
+                        _ => return Err(miette!("Unexpected EOF")),
                     }
                 } else {
                     // no alias
@@ -151,7 +154,9 @@ impl<'src> SqlParser<'src> {
             .ok_or(miette!("Unexpected end of input"))??;
 
         let expr = match token {
-            Token::Boolean(b) => Expression::Literal(Literal::Bool(b)),
+            Token::Keyword(kw) if kw.is_bool() => {
+                Expression::Literal(Literal::Bool(matches!(kw, Keyword::True)))
+            }
             Token::Integer(i) => Expression::Literal(Literal::Int64(i)),
             Token::Float(f) => Expression::Literal(Literal::Float64(f)),
             Token::String(s) => Expression::Literal(Literal::Text(s)),
@@ -223,20 +228,14 @@ impl<'src> SqlParser<'src> {
 
         // Expect TRUE/FALSE/NULL
         match self.lexer.next() {
-            Some(Ok(Token::Null)) => Ok(Expression::Is {
-                expr: Box::new(expr),
-                predicate: IsPredicate::Null,
-                is_negated,
-            }),
-            Some(Ok(Token::Boolean(bool))) => Ok(Expression::Is {
-                expr: Box::new(expr),
-                predicate: if bool {
-                    IsPredicate::True
-                } else {
-                    IsPredicate::False
-                },
-                is_negated,
-            }),
+            Some(Ok(Token::Keyword(kw @ (Keyword::True | Keyword::False | Keyword::Null)))) => {
+                let predicate = IsPredicate::try_from(kw).unwrap();
+                Ok(Expression::Is {
+                    expr: Box::new(expr),
+                    predicate,
+                    is_negated,
+                })
+            }
             Some(Ok(t)) => Err(miette!("Expected TRUE/FALSE/NULL after IS, found {:?}", t)),
             Some(Err(e)) => Err(e),
             None => Err(miette!("Expected TRUE/FALSE/NULL after IS, found EOF")),

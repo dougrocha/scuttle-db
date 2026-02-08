@@ -1,7 +1,6 @@
 pub(crate) mod catalog;
 pub(crate) mod common;
 pub(crate) mod db;
-pub(crate) mod keyword;
 pub(crate) mod sql;
 pub(crate) mod storage;
 
