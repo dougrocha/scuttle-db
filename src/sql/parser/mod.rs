@@ -1,20 +1,24 @@
 use std::iter::Peekable;
 
-pub(crate) use ast::*;
-pub(crate) use literal_value::ScalarValue;
 use miette::{Result, miette};
-pub(crate) use operators::Operator;
 
 use crate::{
     keyword::Keyword,
     sql::{
         lexer::{Lexer, Token},
-        parser::statement::{FromClause, SelectStatement},
+        parser::{
+            expression::IsPredicate,
+            statement::{FromClause, SelectStatement},
+        },
     },
 };
 
+pub(crate) use ast::*;
+pub(crate) use literal::Literal;
+pub(crate) use operators::Operator;
+
 pub(crate) mod ast;
-pub(crate) mod literal_value;
+pub(crate) mod literal;
 pub(crate) mod operators;
 
 /// SQL parser that converts tokens into an AST.
@@ -147,10 +151,10 @@ impl<'src> SqlParser<'src> {
             .ok_or(miette!("Unexpected end of input"))??;
 
         let expr = match token {
-            Token::Boolean(b) => Expression::Literal(ScalarValue::Bool(b)),
-            Token::Integer(i) => Expression::Literal(ScalarValue::Int64(i)),
-            Token::Float(f) => Expression::Literal(ScalarValue::Float64(f)),
-            Token::String(s) => Expression::Literal(ScalarValue::Text(s)),
+            Token::Boolean(b) => Expression::Literal(Literal::Bool(b)),
+            Token::Integer(i) => Expression::Literal(Literal::Int64(i)),
+            Token::Float(f) => Expression::Literal(Literal::Float64(f)),
+            Token::String(s) => Expression::Literal(Literal::Text(s)),
 
             Token::Identifier(i) => Expression::Identifier(i),
 
@@ -288,9 +292,12 @@ mod tests {
                 where_clause,
             }) => {
                 assert_eq!(select_list.0, vec![SelectTarget::Star]);
-                assert_eq!(from_clause, FromClause {
-                    table_name: "users",
-                });
+                assert_eq!(
+                    from_clause,
+                    FromClause {
+                        table_name: "users",
+                    }
+                );
                 assert!(where_clause.is_none());
             }
             _ => panic!("Expected Select statement"),
@@ -365,7 +372,7 @@ mod tests {
             Expression::BinaryOp {
                 left: Box::new(Expression::Identifier("id")),
                 op: Operator::Equal,
-                right: Box::new(Expression::Literal(ScalarValue::Int64(1))),
+                right: Box::new(Expression::Literal(Literal::Int64(1))),
             }
         );
     }
@@ -516,19 +523,19 @@ mod tests {
         // Integer
         let expr = parse_where("SELECT * FROM t WHERE x = 42");
         if let Expression::BinaryOp { right, .. } = expr {
-            assert_eq!(*right, Expression::Literal(ScalarValue::Int64(42)));
+            assert_eq!(*right, Expression::Literal(Literal::Int64(42)));
         }
 
         // Float
         let expr = parse_where("SELECT * FROM t WHERE x = 3.15");
         if let Expression::BinaryOp { right, .. } = expr {
-            assert_eq!(*right, Expression::Literal(ScalarValue::Float64(3.15)));
+            assert_eq!(*right, Expression::Literal(Literal::Float64(3.15)));
         }
 
         // Boolean
         let expr = parse_where("SELECT * FROM t WHERE active = TRUE");
         if let Expression::BinaryOp { right, .. } = expr {
-            assert_eq!(*right, Expression::Literal(ScalarValue::Bool(true)));
+            assert_eq!(*right, Expression::Literal(Literal::Bool(true)));
         }
     }
 }

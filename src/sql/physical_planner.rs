@@ -1,34 +1,34 @@
 use miette::Result;
 
-use super::planner_context::PlannerContext;
+use super::catalog_context::CatalogContext;
 use crate::{
     Row, Value,
     sql::{
-        analyzer::{AnalyzedExpression, AnalyzedPlan, ResolvedSchema},
+        analyzer::{AnalyzedExpression, LogicalPlan, OutputSchema},
         evaluator::{Evaluator, expression::ExpressionEvaluator, predicate::PredicateEvaluator},
     },
 };
 
 pub struct PhysicalPlanner<'a, 'db> {
-    context: &'a mut PlannerContext<'db>,
+    context: &'a mut CatalogContext<'db>,
 }
 
 impl<'a, 'db> PhysicalPlanner<'a, 'db> {
-    pub(crate) fn new(context: &'a mut PlannerContext<'db>) -> Self {
+    pub(crate) fn new(context: &'a mut CatalogContext<'db>) -> Self {
         Self { context }
     }
 
     pub fn create_physical_plan(
         &mut self,
-        analyzed_plan: AnalyzedPlan,
+        analyzed_plan: LogicalPlan,
     ) -> Result<Box<dyn ExecutionNode>> {
         match analyzed_plan {
-            AnalyzedPlan::Scan { table_name, schema } => {
+            LogicalPlan::Scan { table_name, schema } => {
                 let data = self.context.database.get_rows(&table_name)?;
 
                 Ok(Box::new(ScanExec { schema, data }))
             }
-            AnalyzedPlan::Filter { input, condition } => {
+            LogicalPlan::Filter { input, condition } => {
                 let child_node = self.create_physical_plan(*input)?;
 
                 Ok(Box::new(FilterExec {
@@ -36,7 +36,7 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                     expr: condition,
                 }))
             }
-            AnalyzedPlan::Projection {
+            LogicalPlan::Projection {
                 input,
                 expressions,
                 schema,
@@ -59,18 +59,18 @@ pub struct RecordBatch {
 }
 
 pub trait ExecutionNode: std::fmt::Debug {
-    fn schema(&self) -> &ResolvedSchema;
+    fn schema(&self) -> &OutputSchema;
 
     fn next(&mut self) -> Result<Option<RecordBatch>>;
 }
 
 #[derive(Debug)]
 pub struct ScanExec {
-    schema: ResolvedSchema,
+    schema: OutputSchema,
     data: Vec<Row>,
 }
 impl ExecutionNode for ScanExec {
-    fn schema(&self) -> &ResolvedSchema {
+    fn schema(&self) -> &OutputSchema {
         &self.schema
     }
 
@@ -91,10 +91,10 @@ impl ExecutionNode for ScanExec {
 pub struct ProjectionExec {
     child: Box<dyn ExecutionNode>,
     exprs: Vec<AnalyzedExpression>,
-    schema: ResolvedSchema,
+    schema: OutputSchema,
 }
 impl ExecutionNode for ProjectionExec {
-    fn schema(&self) -> &ResolvedSchema {
+    fn schema(&self) -> &OutputSchema {
         &self.schema
     }
 
@@ -132,7 +132,7 @@ pub struct FilterExec {
     expr: AnalyzedExpression,
 }
 impl ExecutionNode for FilterExec {
-    fn schema(&self) -> &ResolvedSchema {
+    fn schema(&self) -> &OutputSchema {
         self.child.schema()
     }
 

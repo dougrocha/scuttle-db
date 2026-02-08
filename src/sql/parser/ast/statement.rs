@@ -1,5 +1,17 @@
 use super::{Expression, SelectList};
 
+/// A SQL statement (top-level AST node).
+///
+/// Currently only SELECT is fully implemented.
+#[derive(Debug, Clone)]
+pub enum Statement<'src> {
+    Create(CreateStatement<'src>),
+    Select(SelectStatement<'src>),
+    Update,
+    Insert,
+    Delete,
+}
+
 #[derive(Debug, Clone)]
 pub struct SelectStatement<'src> {
     pub select_list: SelectList<'src>,
@@ -12,14 +24,7 @@ pub struct FromClause<'src> {
     pub table_name: &'src str,
 }
 
-/// A SQL statement (top-level AST node).
-///
-/// Currently only SELECT is fully implemented.
 #[derive(Debug, Clone)]
-pub enum Statement<'src> {
-    Create,
-    Select(SelectStatement<'src>),
-    Update,
-    Insert,
-    Delete,
+pub struct CreateStatement<'src> {
+    table_name: &'src str,
 }

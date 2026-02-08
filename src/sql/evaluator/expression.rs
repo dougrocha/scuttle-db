@@ -49,7 +49,7 @@ impl Evaluator<Value> for ExpressionEvaluator {
                     Operator::Equal => Ok(values_equal(&left_val, &right_val)),
                     Operator::NotEqual => {
                         let eq = match values_equal(&left_val, &right_val) {
-                            Value::Boolean(b) => Value::Boolean(!b),
+                            Value::Bool(b) => Value::Bool(!b),
                             Value::Null => Value::Null,
                             _ => unreachable!("values_equal should only return Boolean or Null"),
                         };
@@ -61,7 +61,7 @@ impl Evaluator<Value> for ExpressionEvaluator {
                     Operator::GreaterThanEqual => {
                         let less = values_less_than(&left_val, &right_val)?;
                         match less {
-                            Value::Boolean(b) => Ok(Value::Boolean(!b)),
+                            Value::Bool(b) => Ok(Value::Bool(!b)),
                             Value::Null => Ok(Value::Null),
                             _ => unreachable!("Comparison should return Bool or Null"),
                         }
@@ -69,7 +69,7 @@ impl Evaluator<Value> for ExpressionEvaluator {
                     Operator::LessThanEqual => {
                         let less = values_greater_than(&left_val, &right_val)?;
                         match less {
-                            Value::Boolean(b) => Ok(Value::Boolean(!b)),
+                            Value::Bool(b) => Ok(Value::Bool(!b)),
                             Value::Null => Ok(Value::Null),
                             _ => unreachable!("Comparison should return Bool or Null"),
                         }
@@ -89,8 +89,8 @@ impl Evaluator<Value> for ExpressionEvaluator {
                 let value = self.evaluate(expr, row)?;
 
                 let match_against = match predicate {
-                    IsPredicateTarget::True => Value::Boolean(true),
-                    IsPredicateTarget::False => Value::Boolean(false),
+                    IsPredicateTarget::True => Value::Bool(true),
+                    IsPredicateTarget::False => Value::Bool(false),
                     IsPredicateTarget::Null => Value::Null,
                 };
 
@@ -100,7 +100,7 @@ impl Evaluator<Value> for ExpressionEvaluator {
                     value == match_against
                 };
 
-                Ok(Value::Boolean(bool))
+                Ok(Value::Bool(bool))
             }
         }
     }
@@ -110,7 +110,7 @@ impl ExpressionEvaluator {
     /// Helper to determine if a Value is "True" in SQL logic
     fn is_truthy(val: &Value) -> bool {
         match val {
-            Value::Boolean(b) => *b,
+            Value::Bool(b) => *b,
             _ => false, // Null, 0, strings are all "False" in strict boolean logic
         }
     }
@@ -123,11 +123,11 @@ impl ExpressionEvaluator {
     ) -> Result<Value> {
         let left_val = self.evaluate(left, row)?;
         if !Self::is_truthy(&left_val) {
-            return Ok(Value::Boolean(false));
+            return Ok(Value::Bool(false));
         }
 
         let right_val = self.evaluate(right, row)?;
-        Ok(Value::Boolean(Self::is_truthy(&right_val)))
+        Ok(Value::Bool(Self::is_truthy(&right_val)))
     }
 
     fn evaluate_or(
@@ -138,10 +138,10 @@ impl ExpressionEvaluator {
     ) -> Result<Value> {
         let left_val = self.evaluate(left, row)?;
         if Self::is_truthy(&left_val) {
-            return Ok(Value::Boolean(true));
+            return Ok(Value::Bool(true));
         }
 
         let right_val = self.evaluate(right, row)?;
-        Ok(Value::Boolean(Self::is_truthy(&right_val)))
+        Ok(Value::Bool(Self::is_truthy(&right_val)))
     }
 }

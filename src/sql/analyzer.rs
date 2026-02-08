@@ -1,18 +1,20 @@
 use miette::{Result, miette};
 
 use crate::{
-    PhysicalType, Table, Value,
+    DataType, Table, Value,
     sql::{
+        catalog_context::CatalogContext,
         parser::{
-            Expression, IsPredicate, Operator, ScalarValue, SelectList, SelectTarget, Statement,
+            Expression, Literal, Operator, SelectList, SelectTarget, Statement,
+            expression::IsPredicate,
             statement::{FromClause, SelectStatement},
         },
-        planner_context::PlannerContext,
     },
 };
 
+/// Logical Type used in the planning step
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColumnType {
+pub enum LogicalType {
     Int64,
     Float64,
     Text,
@@ -20,19 +22,19 @@ pub enum ColumnType {
     Null,
 }
 
-impl From<PhysicalType> for ColumnType {
-    fn from(value: PhysicalType) -> Self {
+impl From<DataType> for LogicalType {
+    fn from(value: DataType) -> Self {
         match value {
-            PhysicalType::Int64 => Self::Int64,
-            PhysicalType::Text | PhysicalType::VarChar(_) => Self::Text,
-            PhysicalType::Bool => Self::Bool,
-            PhysicalType::Float64 => Self::Float64,
+            DataType::Int64 => Self::Int64,
+            DataType::Text | DataType::VarChar(_) => Self::Text,
+            DataType::Bool => Self::Bool,
+            DataType::Float64 => Self::Float64,
         }
     }
 }
 
 #[derive(Debug)]
-pub struct ColumnReference {
+pub struct ColumnRef {
     pub index: usize,
     pub relation: Option<String>, // 'u' in 'u.name'
 }
@@ -41,19 +43,19 @@ pub struct ColumnReference {
 pub struct Field {
     pub name: String,
     pub alias: Option<String>,
-    pub data_type: ColumnType,
+    pub data_type: LogicalType,
     pub is_nullable: bool,
 }
 
 #[derive(Debug)]
 pub enum AnalyzedExpression {
     Literal(Value),
-    Column(ColumnReference, ColumnType),
+    Column(ColumnRef, LogicalType),
     BinaryExpr {
         left: Box<AnalyzedExpression>,
         op: Operator,
         right: Box<AnalyzedExpression>,
-        return_type: ColumnType,
+        return_type: LogicalType,
     },
     IsPredicate {
         expr: Box<AnalyzedExpression>,
@@ -80,23 +82,23 @@ impl From<&IsPredicate> for IsPredicateTarget {
 }
 
 impl AnalyzedExpression {
-    pub fn get_type(&self) -> ColumnType {
+    pub fn get_type(&self) -> LogicalType {
         match self {
             AnalyzedExpression::Literal(value) => match value {
-                Value::Integer(_) => ColumnType::Int64,
-                Value::Float(_) => ColumnType::Float64,
-                Value::Text(_) => ColumnType::Text,
-                Value::Boolean(_) => ColumnType::Bool,
-                Value::Null => ColumnType::Null,
+                Value::Int64(_) => LogicalType::Int64,
+                Value::Float64(_) => LogicalType::Float64,
+                Value::Text(_) => LogicalType::Text,
+                Value::Bool(_) => LogicalType::Bool,
+                Value::Null => LogicalType::Null,
             },
             AnalyzedExpression::Column(_, column_type) => *column_type,
             AnalyzedExpression::BinaryExpr { return_type, .. } => *return_type,
-            AnalyzedExpression::IsPredicate { .. } => ColumnType::Bool,
+            AnalyzedExpression::IsPredicate { .. } => LogicalType::Bool,
         }
     }
 
     /// Determines whether this expression can produce NULL given the input schema.
-    pub fn is_nullable(&self, input_schema: &ResolvedSchema) -> bool {
+    pub fn is_nullable(&self, input_schema: &OutputSchema) -> bool {
         match self {
             // Literals are never null (null literals are rejected during analysis)
             AnalyzedExpression::Literal(_) => false,
@@ -117,52 +119,52 @@ impl AnalyzedExpression {
 }
 
 #[derive(Debug)]
-pub enum AnalyzedPlan {
+pub enum LogicalPlan {
     Scan {
         table_name: String,
-        schema: ResolvedSchema,
+        schema: OutputSchema,
     },
     Filter {
-        input: Box<AnalyzedPlan>,
+        input: Box<LogicalPlan>,
         condition: AnalyzedExpression,
     },
     Projection {
-        input: Box<AnalyzedPlan>,
+        input: Box<LogicalPlan>,
         expressions: Vec<AnalyzedExpression>,
-        schema: ResolvedSchema,
+        schema: OutputSchema,
     },
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolvedSchema {
+pub struct OutputSchema {
     pub fields: Vec<Field>,
 }
 
-impl ResolvedSchema {
+impl OutputSchema {
     pub fn find_column(&self, name: &str) -> Option<usize> {
         self.fields.iter().position(|field| field.name == name)
     }
 }
 
-impl AnalyzedPlan {
-    fn schema(&self) -> &ResolvedSchema {
+impl LogicalPlan {
+    fn schema(&self) -> &OutputSchema {
         match self {
-            AnalyzedPlan::Scan { schema, .. } | AnalyzedPlan::Projection { schema, .. } => schema,
-            AnalyzedPlan::Filter { input, .. } => input.schema(),
+            LogicalPlan::Scan { schema, .. } | LogicalPlan::Projection { schema, .. } => schema,
+            LogicalPlan::Filter { input, .. } => input.schema(),
         }
     }
 }
 
 pub struct Analyzer<'a, 'db> {
-    context: &'a PlannerContext<'db>,
+    context: &'a CatalogContext<'db>,
 }
 
 impl<'a, 'db> Analyzer<'a, 'db> {
-    pub fn new(context: &'a PlannerContext<'db>) -> Self {
+    pub fn new(context: &'a CatalogContext<'db>) -> Self {
         Self { context }
     }
 
-    pub fn analyze(&self, statement: Statement) -> Result<AnalyzedPlan> {
+    pub fn analyze(&self, statement: Statement) -> Result<LogicalPlan> {
         match statement {
             Statement::Select(SelectStatement {
                 select_list,
@@ -183,7 +185,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         }
     }
 
-    fn analyze_from(&self, from_clause: FromClause) -> Result<AnalyzedPlan> {
+    fn analyze_from(&self, from_clause: FromClause) -> Result<LogicalPlan> {
         let physical_schema = self.context.get_table(from_clause.table_name)?.schema();
 
         let virtual_fields = physical_schema
@@ -197,11 +199,11 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             })
             .collect();
 
-        let resolved_schema = ResolvedSchema {
+        let resolved_schema = OutputSchema {
             fields: virtual_fields,
         };
 
-        Ok(AnalyzedPlan::Scan {
+        Ok(LogicalPlan::Scan {
             table_name: from_clause.table_name.to_string(),
             schema: resolved_schema,
         })
@@ -209,9 +211,9 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
     fn analyze_projection(
         &self,
-        input_plan: AnalyzedPlan,
+        input_plan: LogicalPlan,
         select_list: SelectList,
-    ) -> Result<AnalyzedPlan> {
+    ) -> Result<LogicalPlan> {
         let input_schema = input_plan.schema();
 
         let mut analyzed_exprs = Vec::new();
@@ -222,7 +224,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 SelectTarget::Star => {
                     for (i, field) in input_schema.fields.iter().enumerate() {
                         let expr = AnalyzedExpression::Column(
-                            ColumnReference {
+                            ColumnRef {
                                 index: i,
                                 relation: None,
                             },
@@ -248,10 +250,10 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             }
         }
 
-        Ok(AnalyzedPlan::Projection {
+        Ok(LogicalPlan::Projection {
             input: Box::new(input_plan),
             expressions: analyzed_exprs,
-            schema: ResolvedSchema {
+            schema: OutputSchema {
                 fields: output_fields,
             },
         })
@@ -259,14 +261,14 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
     fn analyze_where(
         &self,
-        input_plan: AnalyzedPlan,
+        input_plan: LogicalPlan,
         where_expr: &Expression,
-    ) -> Result<AnalyzedPlan> {
+    ) -> Result<LogicalPlan> {
         let schema = input_plan.schema();
 
         let analyzed_expr = self.bind_expression(where_expr, schema)?;
 
-        Ok(AnalyzedPlan::Filter {
+        Ok(LogicalPlan::Filter {
             input: Box::new(input_plan),
             condition: analyzed_expr,
         })
@@ -275,7 +277,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
     pub fn bind_expression(
         &self,
         expr: &Expression,
-        input_schema: &ResolvedSchema,
+        input_schema: &OutputSchema,
     ) -> Result<AnalyzedExpression> {
         match expr {
             Expression::BinaryOp { left, op, right } => {
@@ -298,7 +300,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 let field = &input_schema.fields[index];
 
                 Ok(AnalyzedExpression::Column(
-                    ColumnReference {
+                    ColumnRef {
                         index,
                         relation: None,
                     },
@@ -306,7 +308,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 ))
             }
             Expression::Literal(scalar_value) => match scalar_value {
-                ScalarValue::Null => Err(miette!(
+                Literal::Null => Err(miette!(
                     "NULL literal cannot be used in this context. Use 'IS NULL' or 'IS NOT NULL' instead"
                 )),
                 scalar_value => Ok(AnalyzedExpression::Literal(Value::from(scalar_value))),
@@ -321,7 +323,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 let inner_type = inner_analyzed.get_type();
                 match predicate {
                     IsPredicate::True | IsPredicate::False => {
-                        if inner_type != ColumnType::Bool {
+                        if inner_type != LogicalType::Bool {
                             return Err(miette!("IS TRUE/FALSE requires boolean input"));
                         }
                     }
@@ -343,10 +345,10 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
     fn resolve_binary_op(
         &self,
-        left: ColumnType,
+        left: LogicalType,
         op: Operator,
-        right: ColumnType,
-    ) -> Result<ColumnType> {
+        right: LogicalType,
+    ) -> Result<LogicalType> {
         match op {
             Operator::Equal
             | Operator::GreaterThan
@@ -356,44 +358,44 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             | Operator::NotEqual
                 if Self::can_coerce(left, right) =>
             {
-                Ok(ColumnType::Bool)
+                Ok(LogicalType::Bool)
             }
             Operator::Add | Operator::Subtract | Operator::Multiply | Operator::Divide => {
                 Self::get_common_numeric_type(left, right)
             }
             Operator::And | Operator::Or
-                if left == ColumnType::Bool && right == ColumnType::Bool =>
+                if left == LogicalType::Bool && right == LogicalType::Bool =>
             {
-                Ok(ColumnType::Bool)
+                Ok(LogicalType::Bool)
             }
             _ => Err(miette!("Type mismatch between {left:?} {op} {right:?}")),
         }
     }
 
-    fn get_common_numeric_type(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
+    fn get_common_numeric_type(left: LogicalType, right: LogicalType) -> Result<LogicalType> {
         if left == right {
             return Ok(left);
         }
 
         match (left, right) {
-            (_, ColumnType::Float64) | (ColumnType::Float64, _) => Ok(ColumnType::Float64),
-            (_, ColumnType::Int64) | (ColumnType::Int64, _) => Ok(ColumnType::Int64),
+            (_, LogicalType::Float64) | (LogicalType::Float64, _) => Ok(LogicalType::Float64),
+            (_, LogicalType::Int64) | (LogicalType::Int64, _) => Ok(LogicalType::Int64),
             _ => Err(miette!(
                 "Cannot perform arithmetic between {left:?} and {right:?}"
             )),
         }
     }
 
-    fn can_coerce(from: ColumnType, to: ColumnType) -> bool {
+    fn can_coerce(from: LogicalType, to: LogicalType) -> bool {
         if from == to {
             return true;
         }
 
         matches!(
             (from, to),
-            (ColumnType::Int64, ColumnType::Float64)
-                | (ColumnType::Text, _)
-                | (_, ColumnType::Text)
+            (LogicalType::Int64, LogicalType::Float64)
+                | (LogicalType::Text, _)
+                | (_, LogicalType::Text)
         )
     }
 }
@@ -401,15 +403,15 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ColumnDefinition, PhysicalType, Schema};
+    use crate::{ColumnDef, DataType, Schema};
 
     /// Creates a test schema with common columns
     fn create_test_schema() -> Schema {
         Schema::new(vec![
-            ColumnDefinition::new("id", PhysicalType::Int64, false),
-            ColumnDefinition::new("name", PhysicalType::Text, false),
-            ColumnDefinition::new("email", PhysicalType::Text, true),
-            ColumnDefinition::new("age", PhysicalType::Int64, true),
+            ColumnDef::new("id", DataType::Int64, false),
+            ColumnDef::new("name", DataType::Text, false),
+            ColumnDef::new("email", DataType::Text, true),
+            ColumnDef::new("age", DataType::Int64, true),
         ])
     }
 }

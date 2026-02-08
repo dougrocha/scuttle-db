@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use miette::{Result, miette};
 
-use crate::{DatabaseError, db::null_bitmap::NullBitmap, sql::parser::literal_value::ScalarValue};
+use crate::{DatabaseError, db::null_bitmap::NullBitmap, sql::parser::literal::Literal};
 
 /// Trait for table-like structures.
 ///
@@ -27,7 +27,7 @@ pub trait Table {
 /// These types define the kind of data a column can hold and how
 /// it's encoded/decoded in storage.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PhysicalType {
+pub enum DataType {
     /// 64-bit signed integer.
     ///
     /// Stored as 8 bytes in little-endian format.
@@ -51,13 +51,13 @@ pub enum PhysicalType {
     Float64,
 }
 
-impl Display for PhysicalType {
+impl Display for DataType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PhysicalType::Int64 => write!(f, "Integer"),
-            PhysicalType::Text | PhysicalType::VarChar(_) => write!(f, "String"),
-            PhysicalType::Bool => write!(f, "Boolean"),
-            PhysicalType::Float64 => write!(f, "Float"),
+            DataType::Int64 => write!(f, "Integer"),
+            DataType::Text | DataType::VarChar(_) => write!(f, "String"),
+            DataType::Bool => write!(f, "Boolean"),
+            DataType::Float64 => write!(f, "Float"),
         }
     }
 }
@@ -69,16 +69,16 @@ impl Display for PhysicalType {
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Value {
     /// A 64-bit signed integer value.
-    Integer(i64),
+    Int64(i64),
+
+    /// A 64-bit floating point number.
+    Float64(f64),
 
     /// A UTF-8 text string.
     Text(String),
 
     /// A boolean value (true/false).
-    Boolean(bool),
-
-    /// A 64-bit floating point number.
-    Float(f64),
+    Bool(bool),
 
     /// Represents a NULL value (absence of data).
     ///
@@ -89,35 +89,35 @@ pub enum Value {
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Integer(i) => write!(f, "{}", i),
+            Value::Int64(i) => write!(f, "{}", i),
             Value::Text(s) => write!(f, "{}", s),
-            Value::Boolean(b) => write!(f, "{}", b),
-            Value::Float(fl) => write!(f, "{}", fl),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Float64(fl) => write!(f, "{}", fl),
             Value::Null => write!(f, "NULL"),
         }
     }
 }
 
-impl From<&ScalarValue<'_>> for Value {
-    fn from(literal: &ScalarValue) -> Self {
+impl From<&Literal<'_>> for Value {
+    fn from(literal: &Literal) -> Self {
         match literal {
-            ScalarValue::Int64(i) => Value::Integer(*i),
-            ScalarValue::Float64(f) => Value::Float(*f),
-            ScalarValue::Text(s) => Value::Text(s.to_string()),
-            ScalarValue::Bool(b) => Value::Boolean(*b),
-            ScalarValue::Null => Value::Null,
+            Literal::Int64(i) => Value::Int64(*i),
+            Literal::Float64(f) => Value::Float64(*f),
+            Literal::Text(s) => Value::Text(s.to_string()),
+            Literal::Bool(b) => Value::Bool(*b),
+            Literal::Null => Value::Null,
         }
     }
 }
 
 impl Value {
     /// Returns the data type of this value.
-    pub fn data_type(&self) -> Option<PhysicalType> {
+    pub fn data_type(&self) -> Option<DataType> {
         match self {
-            Value::Integer(_) => Some(PhysicalType::Int64),
-            Value::Text(_) => Some(PhysicalType::Text),
-            Value::Boolean(_) => Some(PhysicalType::Bool),
-            Value::Float(_) => Some(PhysicalType::Float64),
+            Value::Int64(_) => Some(DataType::Int64),
+            Value::Text(_) => Some(DataType::Text),
+            Value::Bool(_) => Some(DataType::Bool),
+            Value::Float64(_) => Some(DataType::Float64),
             Value::Null => None,
         }
     }
@@ -125,9 +125,9 @@ impl Value {
     /// Checks if this value can be stored in a column of the given type.
     ///
     /// Performs type checking and, for VARCHAR, length validation.
-    pub fn is_compatible_with(&self, data_type: &PhysicalType) -> Result<(), String> {
+    pub fn is_compatible_with(&self, data_type: &DataType) -> Result<(), String> {
         match (self, data_type) {
-            (Value::Text(s), PhysicalType::VarChar(max_len)) => {
+            (Value::Text(s), DataType::VarChar(max_len)) => {
                 if s.len() <= *max_len {
                     Ok(())
                 } else {
@@ -138,11 +138,11 @@ impl Value {
                     ))
                 }
             }
-            (Value::Integer(_), PhysicalType::Int64)
-            | (Value::Boolean(_), PhysicalType::Bool)
-            | (Value::Float(_), PhysicalType::Float64)
+            (Value::Int64(_), DataType::Int64)
+            | (Value::Bool(_), DataType::Bool)
+            | (Value::Float64(_), DataType::Float64)
             | (Value::Null, _)
-            | (Value::Text(_), PhysicalType::Text) => Ok(()),
+            | (Value::Text(_), DataType::Text) => Ok(()),
 
             _ => Err(format!(
                 "Type mismatch: {self:?} cannot be stored as {data_type:?}"
@@ -155,20 +155,20 @@ impl Value {
 ///
 /// Specifies the column name, data type, and whether NULL values are allowed.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ColumnDefinition {
+pub struct ColumnDef {
     /// The column name.
     pub name: String,
 
     /// The data type for values in this column.
-    pub data_type: PhysicalType,
+    pub data_type: DataType,
 
     /// Whether this column can contain NULL values.
     pub nullable: bool,
 }
 
-impl ColumnDefinition {
+impl ColumnDef {
     /// Creates a new column definition.
-    pub fn new(name: &str, data_type: PhysicalType, nullable: bool) -> Self {
+    pub fn new(name: &str, data_type: DataType, nullable: bool) -> Self {
         Self {
             name: name.to_owned(),
             data_type,
@@ -184,12 +184,12 @@ impl ColumnDefinition {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Schema {
     /// The ordered list of column definitions.
-    pub columns: Vec<ColumnDefinition>,
+    pub columns: Vec<ColumnDef>,
 }
 
 impl Schema {
     /// Creates a new schema from a vector of column definitions.
-    pub fn new(columns: Vec<ColumnDefinition>) -> Self {
+    pub fn new(columns: Vec<ColumnDef>) -> Self {
         Self { columns }
     }
 
@@ -223,19 +223,19 @@ impl Schema {
             }
 
             match (column.data_type, value) {
-                (PhysicalType::Int64, Value::Integer(number)) => {
+                (DataType::Int64, Value::Int64(number)) => {
                     bytes.extend_from_slice(&number.to_le_bytes());
                 }
-                (PhysicalType::Float64, Value::Float(number)) => {
+                (DataType::Float64, Value::Float64(number)) => {
                     bytes.extend_from_slice(&number.to_le_bytes());
                 }
-                (PhysicalType::Text, Value::Text(text)) => {
+                (DataType::Text, Value::Text(text)) => {
                     let text_bytes = text.as_bytes();
                     let length = text_bytes.len() as u32;
                     bytes.extend_from_slice(&length.to_le_bytes());
                     bytes.extend_from_slice(text_bytes);
                 }
-                (PhysicalType::VarChar(max_length), Value::Text(text)) => {
+                (DataType::VarChar(max_length), Value::Text(text)) => {
                     let text_bytes = text.as_bytes();
                     let length = text_bytes.len() as u32;
                     assert!(
@@ -245,7 +245,7 @@ impl Schema {
                     bytes.extend_from_slice(&length.to_le_bytes());
                     bytes.extend_from_slice(text_bytes);
                 }
-                (PhysicalType::Bool, Value::Boolean(b)) => {
+                (DataType::Bool, Value::Bool(b)) => {
                     bytes.push(if *b { 1 } else { 0 });
                 }
                 _ => panic!(
@@ -276,36 +276,36 @@ impl Schema {
             }
 
             match column.data_type {
-                PhysicalType::Int64 => {
+                DataType::Int64 => {
                     if offset + 8 > bytes.len() {
                         return Err(miette!("Not enough bytes for integer value"));
                     }
                     let mut num_bytes = [0u8; 8];
                     num_bytes.copy_from_slice(&bytes[offset..offset + 8]);
                     let value = i64::from_le_bytes(num_bytes);
-                    values.push(Value::Integer(value));
+                    values.push(Value::Int64(value));
                     offset += 8;
                 }
-                PhysicalType::Float64 => {
+                DataType::Float64 => {
                     if offset + 8 > bytes.len() {
                         return Err(miette!("Not enough bytes for float value"));
                     }
                     let mut num_bytes = [0u8; 8];
                     num_bytes.copy_from_slice(&bytes[offset..offset + 8]);
                     let value = f64::from_le_bytes(num_bytes);
-                    values.push(Value::Float(value));
+                    values.push(Value::Float64(value));
                     offset += 8;
                 }
-                PhysicalType::Bool => {
+                DataType::Bool => {
                     if offset + 1 > bytes.len() {
                         return Err(miette!("Not enough bytes for boolean value"));
                     }
                     let raw_byte = bytes[offset];
                     let bool_val = raw_byte != 0;
-                    values.push(Value::Boolean(bool_val));
+                    values.push(Value::Bool(bool_val));
                     offset += 1;
                 }
-                PhysicalType::Text | PhysicalType::VarChar(_) => {
+                DataType::Text | DataType::VarChar(_) => {
                     if offset + 4 > bytes.len() {
                         return Err(miette!("Not enough bytes for string length"));
                     }
@@ -363,7 +363,7 @@ impl Row {
 /// Currently, the actual row data is stored separately in pages managed
 /// by the buffer pool.
 #[derive(Debug, Clone)]
-pub struct Relation {
+pub struct TableDef {
     /// The table name.
     name: String,
 
@@ -371,14 +371,14 @@ pub struct Relation {
     schema: Schema,
 }
 
-impl Relation {
+impl TableDef {
     /// Creates a new relation (table) with the given name and schema.
     pub fn new(name: String, schema: Schema) -> Self {
         Self { name, schema }
     }
 }
 
-impl Table for Relation {
+impl Table for TableDef {
     fn name(&self) -> &str {
         &self.name
     }

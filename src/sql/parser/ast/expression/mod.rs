@@ -1,6 +1,10 @@
 use std::fmt;
 
-use crate::sql::parser::{ScalarValue, operators::Operator};
+use crate::sql::parser::{Literal, operators::Operator};
+
+pub use is_predicate::IsPredicate;
+
+pub mod is_predicate;
 
 /// An expression in a WHERE clause.
 ///
@@ -22,7 +26,7 @@ pub enum Expression<'src> {
     Identifier(&'src str),
 
     /// Literal value (e.g., `25`, `'Alice'`)
-    Literal(ScalarValue<'src>),
+    Literal(Literal<'src>),
 
     Is {
         expr: Box<Expression<'src>>,
@@ -39,13 +43,13 @@ impl fmt::Display for Expression<'_> {
             }
             Expression::Identifier(name) => write!(f, "{name}"),
             Expression::Literal(value) => match value {
-                ScalarValue::Float64(num) => write!(f, "{num}"),
-                ScalarValue::Int64(num) => write!(f, "{num}"),
-                ScalarValue::Text(s) => write!(f, "\"{s}\""),
-                ScalarValue::Bool(bool) => {
+                Literal::Float64(num) => write!(f, "{num}"),
+                Literal::Int64(num) => write!(f, "{num}"),
+                Literal::Text(s) => write!(f, "\"{s}\""),
+                Literal::Bool(bool) => {
                     write!(f, "{}", bool.to_string().to_uppercase())
                 }
-                ScalarValue::Null => write!(f, "NULL"),
+                Literal::Null => write!(f, "NULL"),
             },
             Expression::Is {
                 expr,
@@ -65,24 +69,6 @@ impl Expression<'_> {
         match self {
             Expression::Identifier(name) => name,
             _ => "?column?",
-        }
-    }
-}
-
-/// Predicates to the 'IS' keyword.
-#[derive(Debug, Clone, PartialEq)]
-pub enum IsPredicate {
-    True,
-    False,
-    Null,
-}
-
-impl fmt::Display for IsPredicate {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            IsPredicate::True => write!(f, "TRUE"),
-            IsPredicate::False => write!(f, "FALSE"),
-            IsPredicate::Null => write!(f, "NULL"),
         }
     }
 }

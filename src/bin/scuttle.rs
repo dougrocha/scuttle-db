@@ -1,7 +1,7 @@
 use std::io::{BufRead, Write, stdin, stdout};
 
 use miette::{IntoDiagnostic, Result, miette};
-use scuttle_db::{ColumnDefinition, Database, PhysicalType, Row, Schema, Value};
+use scuttle_db::{ColumnDef, DataType, Database, Row, Schema, Value};
 
 fn main() -> Result<()> {
     // Delete to start from fresh right now
@@ -25,24 +25,24 @@ fn main() -> Result<()> {
     db.initialize().expect("Failed to init catalog");
 
     let schema = Schema::new(vec![
-        ColumnDefinition {
+        ColumnDef {
             name: "id".to_string(),
-            data_type: PhysicalType::Int64,
+            data_type: DataType::Int64,
             nullable: false,
         },
-        ColumnDefinition {
+        ColumnDef {
             name: "name".to_string(),
-            data_type: PhysicalType::VarChar(255),
+            data_type: DataType::VarChar(255),
             nullable: false,
         },
-        ColumnDefinition {
+        ColumnDef {
             name: "age".to_string(),
-            data_type: PhysicalType::Int64,
+            data_type: DataType::Int64,
             nullable: true,
         },
-        ColumnDefinition {
+        ColumnDef {
             name: "is_active".to_string(),
-            data_type: PhysicalType::Bool,
+            data_type: DataType::Bool,
             nullable: true,
         },
     ]);
@@ -53,28 +53,28 @@ fn main() -> Result<()> {
     let _ = db.insert_row(
         "users",
         Row::new(vec![
-            Value::Integer(1),
+            Value::Int64(1),
             Value::Text("Alice".to_string()),
-            Value::Integer(30),
+            Value::Int64(30),
             Value::Null,
         ]),
     );
     let _ = db.insert_row(
         "users",
         Row::new(vec![
-            Value::Integer(2),
+            Value::Int64(2),
             Value::Text("Bob".to_string()),
             Value::Null,
-            Value::Boolean(false),
+            Value::Bool(false),
         ]),
     );
     let _ = db.insert_row(
         "users",
         Row::new(vec![
-            Value::Integer(3),
+            Value::Int64(3),
             Value::Text("Charlie".to_string()),
-            Value::Integer(35),
-            Value::Boolean(true),
+            Value::Int64(35),
+            Value::Bool(true),
         ]),
     );
 

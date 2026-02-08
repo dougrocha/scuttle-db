@@ -7,12 +7,12 @@ use miette::Result;
 
 use crate::{
     DatabaseError,
-    db::table::{Relation, Row, Schema, Table},
+    db::table::{Row, Schema, Table, TableDef},
     sql::{
-        analyzer::{Analyzer, ResolvedSchema},
+        analyzer::{Analyzer, OutputSchema},
+        catalog_context::CatalogContext,
         parser::SqlParser,
         physical_planner::PhysicalPlanner,
-        planner_context::PlannerContext,
     },
     storage::{
         buffer_pool::BufferPool,
@@ -25,7 +25,7 @@ use crate::{
 /// Contains the table metadata and the result rows.
 #[derive(Debug)]
 pub struct QueryResponse {
-    pub schema: ResolvedSchema,
+    pub schema: OutputSchema,
 
     /// The rows returned by the query.
     pub rows: Vec<Row>,
@@ -51,7 +51,7 @@ pub struct Database {
     /// All tables currently loaded in the database.
     ///
     /// Maps table names to their relation definitions (schema + metadata).
-    pub tables: std::collections::BTreeMap<String, Relation>,
+    pub tables: std::collections::BTreeMap<String, TableDef>,
 
     /// Buffer pool managing pages in memory.
     ///
@@ -117,20 +117,20 @@ impl Database {
             println!("Table {name} already exists");
         }
 
-        let table = Relation::new(name.to_string(), schema);
+        let table = TableDef::new(name.to_string(), schema);
         self.tables.insert(name.to_string(), table);
         Ok(())
     }
 
     /// Gets an immutable reference to a table.
-    pub fn get_table(&self, name: &str) -> Result<&Relation, DatabaseError> {
+    pub fn get_table(&self, name: &str) -> Result<&TableDef, DatabaseError> {
         self.tables
             .get(name)
             .ok_or_else(|| DatabaseError::TableNotFound(name.to_string()))
     }
 
     /// Gets a mutable reference to a table.
-    pub fn get_table_mut(&mut self, name: &str) -> Result<&mut Relation, DatabaseError> {
+    pub fn get_table_mut(&mut self, name: &str) -> Result<&mut TableDef, DatabaseError> {
         if self.table_exists(name) {
             #[expect(clippy::missing_panics_doc, reason = "infallible")]
             return Ok(self.tables.get_mut(name).unwrap());
@@ -262,7 +262,7 @@ impl Database {
             .parse()
             .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))?;
 
-        let mut context = PlannerContext::new(self);
+        let mut context = CatalogContext::new(self);
         let analyzer = Analyzer::new(&context);
         let anayzed_plan = analyzer.analyze(statement)?;
 
