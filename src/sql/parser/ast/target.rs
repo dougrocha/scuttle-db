@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use super::expression::Expression;
 
 /// Target list in a SELECT statement.
@@ -9,7 +11,7 @@ pub enum SelectTarget<'src> {
     /// SELECT col1, col2, ... (specific columns)
     Expression {
         expr: Expression<'src>,
-        alias: Option<&'src str>,
+        alias: Option<Cow<'src, str>>,
     },
 }
 

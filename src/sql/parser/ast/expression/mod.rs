@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 use crate::sql::parser::{Literal, operators::Operator};
 
@@ -23,7 +23,7 @@ pub enum Expression<'src> {
     },
 
     /// Column reference (e.g., `age`, `name`)
-    Identifier(&'src str),
+    Identifier(Cow<'src, str>),
 
     /// Literal value (e.g., `25`, `'Alice'`)
     Literal(Literal<'src>),

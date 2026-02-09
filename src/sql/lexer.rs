@@ -1,20 +1,20 @@
-use std::str::FromStr;
+use std::{borrow::Cow, str::FromStr};
 
 use miette::{IntoDiagnostic, Result, miette};
 
 use super::parser::Keyword;
 
 /// A token in the SQL language.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Token<'a> {
     /// SQL keyword (SELECT, FROM, WHERE, etc.)
     Keyword(Keyword),
 
     /// Literals
-    Identifier(&'a str),
+    Identifier(Cow<'a, str>),
     Integer(i64),
     Float(f64),
-    String(&'a str),
+    String(Cow<'a, str>),
 
     Comma,
     SemiColon,
@@ -46,9 +46,9 @@ pub struct Lexer<'a> {
     position: usize,
 }
 
-impl<'a> Lexer<'a> {
+impl<'src> Lexer<'src> {
     /// Creates a new lexer for the given SQL query string.
-    pub fn new(input: &'a str) -> Self {
+    pub fn new(input: &'src str) -> Self {
         Self {
             whole: input,
             rest: input,
@@ -71,7 +71,7 @@ impl<'a> Lexer<'a> {
     /// Consumes a symbol, assumes we have peeked ahead.
     ///
     /// Only consume one symbol
-    fn consume_symbol(&mut self, token: Token<'a>) -> Token<'a> {
+    fn consume_symbol(&mut self, token: Token<'src>) -> Token<'src> {
         let char_len = self.rest.chars().next().unwrap().len_utf8();
         self.rest = &self.rest[char_len..];
         self.position += char_len;
@@ -80,7 +80,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Consumes a word (identifier or keyword) from the input.
-    fn consume_word(&mut self) -> Option<&'a str> {
+    fn consume_word(&mut self) -> Option<&'src str> {
         if self.rest.is_empty() {
             return None;
         }
@@ -89,7 +89,10 @@ impl<'a> Lexer<'a> {
             .rest
             .find(|c: char| {
                 c.is_whitespace()
-                    || matches!(c, ',' | ';' | '=' | '*' | '(' | ')' | '<' | '>' | '!')
+                    || matches!(
+                        c,
+                        ',' | ';' | '=' | '*' | '/' | '+' | '-' | '(' | ')' | '<' | '>' | '!'
+                    )
             })
             .unwrap_or(self.rest.len());
 
@@ -104,7 +107,7 @@ impl<'a> Lexer<'a> {
     ///
     /// Expects the opening quote to have already been consumed.
     /// Reads until the closing quote character.
-    fn consume_string(&mut self, closing: char) -> &'a str {
+    fn consume_string(&mut self, closing: char) -> Cow<'src, str> {
         let mut end_index = 1;
         while end_index < self.rest.len() {
             if self.rest[end_index..].starts_with(closing) {
@@ -117,13 +120,13 @@ impl<'a> Lexer<'a> {
         self.position += end_index + 1;
         self.rest = &self.rest[end_index + 1..];
 
-        string_value
+        Cow::from(string_value)
     }
 
     /// Consumes a numeric literal from the input.
     ///
     /// Reads digits and optional decimal point.
-    fn consume_number(&mut self) -> Result<Token<'a>> {
+    fn consume_number(&mut self) -> Result<Token<'src>> {
         let mut is_float = false;
 
         let number_end = self
@@ -228,7 +231,7 @@ impl<'a> Iterator for Lexer<'a> {
                     return Some(Ok(Token::Keyword(kw)));
                 }
 
-                let token = Token::Identifier(word);
+                let token = Token::Identifier(Cow::from(word));
 
                 Ok(token)
             }
@@ -261,7 +264,7 @@ mod tests {
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
         assert_token_eq(lexer.next(), Token::Asterisk);
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
-        assert_token_eq(lexer.next(), Token::Identifier("users"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("users")));
         assert!(lexer.next().is_none());
     }
 
@@ -272,7 +275,7 @@ mod tests {
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
         assert_token_eq(lexer.next(), Token::Asterisk);
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
-        assert_token_eq(lexer.next(), Token::Identifier("users"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("users")));
         assert!(lexer.next().is_none());
     }
 
@@ -281,13 +284,13 @@ mod tests {
         let mut lexer = Lexer::new("SELECT id, name, email FROM users");
 
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
-        assert_token_eq(lexer.next(), Token::Identifier("id"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("id")));
         assert_token_eq(lexer.next(), Token::Comma);
-        assert_token_eq(lexer.next(), Token::Identifier("name"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("name")));
         assert_token_eq(lexer.next(), Token::Comma);
-        assert_token_eq(lexer.next(), Token::Identifier("email"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("email")));
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
-        assert_token_eq(lexer.next(), Token::Identifier("users"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("users")));
         assert!(lexer.next().is_none());
     }
 
@@ -296,13 +299,13 @@ mod tests {
         let mut lexer = Lexer::new("SELECT id FROM users WHERE name = 'Alice'");
 
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
-        assert_token_eq(lexer.next(), Token::Identifier("id"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("id")));
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
-        assert_token_eq(lexer.next(), Token::Identifier("users"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("users")));
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::Where));
-        assert_token_eq(lexer.next(), Token::Identifier("name"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("name")));
         assert_token_eq(lexer.next(), Token::Equal);
-        assert_token_eq(lexer.next(), Token::String("Alice"));
+        assert_token_eq(lexer.next(), Token::String(Cow::from("Alice")));
         assert!(lexer.next().is_none());
     }
 
@@ -313,19 +316,19 @@ mod tests {
         );
 
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
-        assert_token_eq(lexer.next(), Token::Identifier("id"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("id")));
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::As));
-        assert_token_eq(lexer.next(), Token::Identifier("userID"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("userID")));
         assert_token_eq(lexer.next(), Token::Comma);
-        assert_token_eq(lexer.next(), Token::Identifier("name"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("name")));
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::As));
-        assert_token_eq(lexer.next(), Token::Identifier("firstName"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("firstName")));
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
-        assert_token_eq(lexer.next(), Token::Identifier("users"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("users")));
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::Where));
-        assert_token_eq(lexer.next(), Token::Identifier("name"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("name")));
         assert_token_eq(lexer.next(), Token::Equal);
-        assert_token_eq(lexer.next(), Token::String("Alice"));
+        assert_token_eq(lexer.next(), Token::String(Cow::from("Alice")));
         assert!(lexer.next().is_none());
     }
 
@@ -334,11 +337,11 @@ mod tests {
         let mut lexer = Lexer::new("SELECT email IS NULL FROM users");
 
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::Select));
-        assert_token_eq(lexer.next(), Token::Identifier("email"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("email")));
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::Is));
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::Null));
         assert_token_eq(lexer.next(), Token::Keyword(Keyword::From));
-        assert_token_eq(lexer.next(), Token::Identifier("users"));
+        assert_token_eq(lexer.next(), Token::Identifier(Cow::from("users")));
         assert!(lexer.next().is_none());
     }
 

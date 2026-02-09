@@ -49,6 +49,8 @@ pub enum DataType {
 
     /// 64-bit floating point number.
     Float64,
+
+    Timestamp,
 }
 
 impl Display for DataType {
@@ -58,6 +60,7 @@ impl Display for DataType {
             DataType::Text | DataType::VarChar(_) => write!(f, "String"),
             DataType::Bool => write!(f, "Boolean"),
             DataType::Float64 => write!(f, "Float"),
+            DataType::Timestamp => write!(f, "Timestamp"),
         }
     }
 }
@@ -328,6 +331,7 @@ impl Schema {
                         }
                     }
                 }
+                DataType::Timestamp => todo!(),
             }
         }
 

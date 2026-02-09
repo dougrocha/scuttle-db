@@ -1,3 +1,7 @@
+use std::borrow::Cow;
+
+use crate::DataType;
+
 use super::{Expression, SelectList};
 
 /// A SQL statement (top-level AST node).
@@ -21,10 +25,28 @@ pub struct SelectStatement<'src> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FromClause<'src> {
-    pub table_name: &'src str,
+    pub table_name: Cow<'src, str>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CreateStatement<'src> {
-    table_name: &'src str,
+    pub table_name: Cow<'src, str>,
+    pub if_not_exists: bool,
+    pub columns: Vec<ColumnDefinition<'src>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnDefinition<'src> {
+    pub name: Cow<'src, str>,
+    pub data_type: DataType,
+    pub constraints: Vec<ColumnConstraint<'src>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColumnConstraint<'src> {
+    NotNull,
+    Nullable,
+    PrimaryKey,
+    Unique,
+    Default(Expression<'src>),
 }

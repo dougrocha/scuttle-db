@@ -1,4 +1,4 @@
-use miette::Result;
+use miette::{Result, miette};
 
 use crate::Serializable;
 
@@ -159,7 +159,7 @@ impl Page {
     pub fn add_data(&mut self, data: &[u8]) -> Result<ItemId> {
         let needed_space = data.len() + ItemPointer::SIZE;
         if self.free_space() < needed_space {
-            return Err(miette::miette!("Not enough space in the page to add data."));
+            return Err(miette!("Not enough space in the page to add data."));
         }
 
         self.header.upper -= data.len() as u16;
@@ -183,7 +183,7 @@ impl Page {
         let item_pointer = self
             .item_pointers()
             .nth(item_id as usize)
-            .ok_or(miette::miette!("Item not found."))?;
+            .ok_or_else(|| miette!("Item not found."))?;
 
         let start = item_pointer.offset as usize - PageHeader::SIZE;
         let end = start + item_pointer.length as usize;
@@ -199,7 +199,7 @@ impl Page {
         let index = item_id as usize;
 
         if index >= self.header.item_count as usize {
-            return Err(miette::miette!("Item ID out of bounds."));
+            return Err(miette!("Item ID out of bounds."));
         }
 
         let start = index * ItemPointer::SIZE;

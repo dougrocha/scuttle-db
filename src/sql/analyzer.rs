@@ -19,6 +19,7 @@ pub enum LogicalType {
     Float64,
     Text,
     Bool,
+    Timestamp,
     Null,
 }
 
@@ -29,6 +30,7 @@ impl From<DataType> for LogicalType {
             DataType::Text | DataType::VarChar(_) => Self::Text,
             DataType::Bool => Self::Bool,
             DataType::Float64 => Self::Float64,
+            DataType::Timestamp => Self::Timestamp,
         }
     }
 }
@@ -186,7 +188,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
     }
 
     fn analyze_from(&self, from_clause: FromClause) -> Result<LogicalPlan> {
-        let physical_schema = self.context.get_table(from_clause.table_name)?.schema();
+        let physical_schema = self.context.get_table(&from_clause.table_name)?.schema();
 
         let virtual_fields = physical_schema
             .columns
@@ -239,7 +241,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
                     let field = Field {
                         name: expr.to_column_name().to_string(),
-                        alias: alias.map(|a| a.to_string()),
+                        alias: alias.as_ref().map(|a| a.to_string()),
                         data_type: analyzed_expr.get_type(),
                         is_nullable: analyzed_expr.is_nullable(input_schema),
                     };
@@ -296,7 +298,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             Expression::Identifier(name) => {
                 let index = input_schema
                     .find_column(name)
-                    .ok_or(miette!("Column {name} could not be found"))?;
+                    .ok_or_else(|| miette!("Column {name} could not be found"))?;
                 let field = &input_schema.fields[index];
 
                 Ok(AnalyzedExpression::Column(
