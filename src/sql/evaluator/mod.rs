@@ -94,40 +94,34 @@ pub fn values_equal(left: &Value, right: &Value) -> Value {
     Value::Bool(result)
 }
 
-pub fn values_greater_than(left: &Value, right: &Value) -> Result<Value> {
+pub fn values_greater_than(left: &Value, right: &Value) -> Value {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Value::Null;
+    }
+
     let result = match (left, right) {
         (Value::Int64(a), Value::Int64(b)) => a > b,
         (Value::Float64(a), Value::Float64(b)) => a > b,
         (Value::Int64(a), Value::Float64(b)) => (*a as f64) > *b,
         (Value::Float64(a), Value::Int64(b)) => *a > (*b as f64),
-        (Value::Null, _) | (_, Value::Null) => false,
-        _ => {
-            return Err(miette!(
-                "Invalid comparison between {:?} and {:?}",
-                left,
-                right
-            ));
-        }
+        _ => false,
     };
-    Ok(Value::Bool(result))
+    Value::Bool(result)
 }
 
-pub fn values_less_than(left: &Value, right: &Value) -> Result<Value> {
+pub fn values_less_than(left: &Value, right: &Value) -> Value {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Value::Null;
+    }
+
     let result = match (left, right) {
         (Value::Int64(a), Value::Int64(b)) => a < b,
         (Value::Float64(a), Value::Float64(b)) => a < b,
         (Value::Int64(a), Value::Float64(b)) => (*a as f64) < *b,
         (Value::Float64(a), Value::Int64(b)) => *a < (*b as f64),
-        (Value::Null, _) | (_, Value::Null) => false,
-        _ => {
-            return Err(miette!(
-                "Invalid comparison between {:?} and {:?}",
-                left,
-                right
-            ));
-        }
+        _ => false,
     };
-    Ok(Value::Bool(result))
+    Value::Bool(result)
 }
 
 #[cfg(test)]
@@ -273,56 +267,48 @@ mod tests {
     #[test]
     fn test_values_greater_than_integers() {
         let result = values_greater_than(&Value::Int64(10), &Value::Int64(5));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Bool(true));
+        assert_eq!(result, Value::Bool(true));
 
         let result = values_greater_than(&Value::Int64(3), &Value::Int64(5));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Bool(false));
+        assert_eq!(result, Value::Bool(false));
     }
 
     #[test]
     fn test_values_greater_than_floats() {
         let result = values_greater_than(&Value::Float64(10.5), &Value::Float64(5.2));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Bool(true));
+        assert_eq!(result, Value::Bool(true));
     }
 
     #[test]
     fn test_values_greater_than_mixed_types() {
         let result = values_greater_than(&Value::Int64(10), &Value::Float64(5.5));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Bool(true));
+        assert_eq!(result, Value::Bool(true));
     }
 
     #[test]
     fn test_values_greater_than_with_null() {
         let result = values_greater_than(&Value::Int64(10), &Value::Null);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Bool(false));
+        assert_eq!(result, Value::Null);
     }
 
     #[test]
     fn test_values_greater_than_invalid_types() {
         let result = values_greater_than(&Value::Text("hello".to_string()), &Value::Int64(5));
-        assert!(result.is_err());
+        assert_eq!(result, Value::Bool(false));
     }
 
     #[test]
     fn test_values_less_than_integers() {
         let result = values_less_than(&Value::Int64(3), &Value::Int64(10));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Bool(true));
+        assert_eq!(result, Value::Bool(true));
 
         let result = values_less_than(&Value::Int64(10), &Value::Int64(5));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Bool(false));
+        assert_eq!(result, Value::Bool(false));
     }
 
     #[test]
     fn test_values_less_than_with_null() {
         let result = values_less_than(&Value::Null, &Value::Int64(10));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Bool(false));
+        assert_eq!(result, Value::Null);
     }
 }

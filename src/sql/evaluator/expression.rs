@@ -56,22 +56,22 @@ impl Evaluator<Value> for ExpressionEvaluator {
 
                         Ok(eq)
                     }
-                    Operator::GreaterThan => values_greater_than(&left_val, &right_val),
-                    Operator::LessThan => values_less_than(&left_val, &right_val),
+                    Operator::GreaterThan => Ok(values_greater_than(&left_val, &right_val)),
+                    Operator::LessThan => Ok(values_less_than(&left_val, &right_val)),
                     Operator::GreaterThanEqual => {
-                        let less = values_less_than(&left_val, &right_val)?;
+                        let less = values_less_than(&left_val, &right_val);
                         match less {
                             Value::Bool(b) => Ok(Value::Bool(!b)),
                             Value::Null => Ok(Value::Null),
-                            _ => unreachable!("Comparison should return Bool or Null"),
+                            _ => unreachable!("Comparison should either return a NULL or BOOL"),
                         }
                     }
                     Operator::LessThanEqual => {
-                        let less = values_greater_than(&left_val, &right_val)?;
-                        match less {
+                        let greater = values_greater_than(&left_val, &right_val);
+                        match greater {
                             Value::Bool(b) => Ok(Value::Bool(!b)),
                             Value::Null => Ok(Value::Null),
-                            _ => unreachable!("Comparison should return Bool or Null"),
+                            _ => unreachable!("Comparison should either return a NULL or BOOL"),
                         }
                     }
 
