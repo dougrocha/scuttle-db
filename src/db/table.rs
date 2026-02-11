@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use miette::{Result, miette};
 
-use crate::{DatabaseError, db::null_bitmap::NullBitmap, sql::parser::literal::Literal};
+use crate::{DatabaseError, db::null_bitmap::NullBitmap};
 
 /// Trait for table-like structures.
 ///
@@ -65,6 +65,25 @@ impl Display for DataType {
     }
 }
 
+impl DataType {
+    /// If two types are able to coerced
+    pub fn can_coerce(from: DataType, to: DataType) -> bool {
+        if from == to {
+            return true;
+        }
+
+        matches!(
+            (from, to),
+            // Int64 can be coerced to Float64
+            (DataType::Int64, DataType::Float64)
+            // Text and VarChar are interchangeable for comparison purposes
+            | (DataType::Text, DataType::VarChar(_))
+            | (DataType::VarChar(_), DataType::Text)
+            | (DataType::VarChar(_), DataType::VarChar(_))
+        )
+    }
+}
+
 /// A value that can be stored in a database column.
 ///
 /// Values are strongly typed and correspond to [`DataType`] definitions.
@@ -101,30 +120,7 @@ impl Display for Value {
     }
 }
 
-impl From<&Literal<'_>> for Value {
-    fn from(literal: &Literal) -> Self {
-        match literal {
-            Literal::Int64(i) => Value::Int64(*i),
-            Literal::Float64(f) => Value::Float64(*f),
-            Literal::Text(s) => Value::Text(s.to_string()),
-            Literal::Bool(b) => Value::Bool(*b),
-            Literal::Null => Value::Null,
-        }
-    }
-}
-
 impl Value {
-    /// Returns the data type of this value.
-    pub fn data_type(&self) -> Option<DataType> {
-        match self {
-            Value::Int64(_) => Some(DataType::Int64),
-            Value::Text(_) => Some(DataType::Text),
-            Value::Bool(_) => Some(DataType::Bool),
-            Value::Float64(_) => Some(DataType::Float64),
-            Value::Null => None,
-        }
-    }
-
     /// Checks if this value can be stored in a column of the given type.
     ///
     /// Performs type checking and, for VARCHAR, length validation.

@@ -5,35 +5,12 @@ use crate::{
     sql::{
         catalog_context::CatalogContext,
         parser::{
-            Expression, Literal, Operator, SelectList, SelectTarget, Statement,
+            Expression, Operator, SelectList, SelectTarget, Statement,
             expression::IsPredicate,
             statement::{FromClause, SelectStatement},
         },
     },
 };
-
-/// Logical Type used in the planning step
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogicalType {
-    Int64,
-    Float64,
-    Text,
-    Bool,
-    Timestamp,
-    Null,
-}
-
-impl From<DataType> for LogicalType {
-    fn from(value: DataType) -> Self {
-        match value {
-            DataType::Int64 => Self::Int64,
-            DataType::Text | DataType::VarChar(_) => Self::Text,
-            DataType::Bool => Self::Bool,
-            DataType::Float64 => Self::Float64,
-            DataType::Timestamp => Self::Timestamp,
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct ColumnRef {
@@ -45,19 +22,19 @@ pub struct ColumnRef {
 pub struct Field {
     pub name: String,
     pub alias: Option<String>,
-    pub data_type: LogicalType,
+    pub data_type: DataType,
     pub is_nullable: bool,
 }
 
 #[derive(Debug)]
 pub enum AnalyzedExpression {
     Literal(Value),
-    Column(ColumnRef, LogicalType),
+    Column(ColumnRef, DataType),
     BinaryExpr {
         left: Box<AnalyzedExpression>,
         op: Operator,
         right: Box<AnalyzedExpression>,
-        return_type: LogicalType,
+        return_type: DataType,
     },
     IsPredicate {
         expr: Box<AnalyzedExpression>,
@@ -84,18 +61,19 @@ impl From<&IsPredicate> for IsPredicateTarget {
 }
 
 impl AnalyzedExpression {
-    pub fn get_type(&self) -> LogicalType {
+    /// Get the type of the expression
+    pub fn get_type(&self) -> DataType {
         match self {
             AnalyzedExpression::Literal(value) => match value {
-                Value::Int64(_) => LogicalType::Int64,
-                Value::Float64(_) => LogicalType::Float64,
-                Value::Text(_) => LogicalType::Text,
-                Value::Bool(_) => LogicalType::Bool,
-                Value::Null => LogicalType::Null,
+                Value::Int64(_) => DataType::Int64,
+                Value::Float64(_) => DataType::Float64,
+                Value::Text(_) => DataType::Text,
+                Value::Bool(_) => DataType::Bool,
+                Value::Null => unreachable!("Null has no definite type."),
             },
             AnalyzedExpression::Column(_, column_type) => *column_type,
             AnalyzedExpression::BinaryExpr { return_type, .. } => *return_type,
-            AnalyzedExpression::IsPredicate { .. } => LogicalType::Bool,
+            AnalyzedExpression::IsPredicate { .. } => DataType::Bool,
         }
     }
 
@@ -196,7 +174,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             .map(|col| Field {
                 name: col.name.clone(),
                 alias: None,
-                data_type: col.data_type.into(),
+                data_type: col.data_type,
                 is_nullable: col.nullable,
             })
             .collect();
@@ -310,10 +288,10 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 ))
             }
             Expression::Literal(scalar_value) => match scalar_value {
-                Literal::Null => Err(miette!(
+                Value::Null => Err(miette!(
                     "NULL literal cannot be used in this context. Use 'IS NULL' or 'IS NOT NULL' instead"
                 )),
-                scalar_value => Ok(AnalyzedExpression::Literal(Value::from(scalar_value))),
+                scalar_value => Ok(AnalyzedExpression::Literal(scalar_value.clone())),
             },
             Expression::Is {
                 expr,
@@ -325,7 +303,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 let inner_type = inner_analyzed.get_type();
                 match predicate {
                     IsPredicate::True | IsPredicate::False => {
-                        if inner_type != LogicalType::Bool {
+                        if inner_type != DataType::Bool {
                             return Err(miette!("IS TRUE/FALSE requires boolean input"));
                         }
                     }
@@ -345,12 +323,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         }
     }
 
-    fn resolve_binary_op(
-        &self,
-        left: LogicalType,
-        op: Operator,
-        right: LogicalType,
-    ) -> Result<LogicalType> {
+    fn resolve_binary_op(&self, left: DataType, op: Operator, right: DataType) -> Result<DataType> {
         match op {
             Operator::Equal
             | Operator::GreaterThan
@@ -358,47 +331,32 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             | Operator::GreaterThanEqual
             | Operator::LessThanEqual
             | Operator::NotEqual
-                if Self::can_coerce(left, right) =>
+                if DataType::can_coerce(left, right) =>
             {
-                Ok(LogicalType::Bool)
+                Ok(DataType::Bool)
             }
             Operator::Add | Operator::Subtract | Operator::Multiply | Operator::Divide => {
                 Self::get_common_numeric_type(left, right)
             }
-            Operator::And | Operator::Or
-                if left == LogicalType::Bool && right == LogicalType::Bool =>
-            {
-                Ok(LogicalType::Bool)
+            Operator::And | Operator::Or if left == DataType::Bool && right == DataType::Bool => {
+                Ok(DataType::Bool)
             }
             _ => Err(miette!("Type mismatch between {left:?} {op} {right:?}")),
         }
     }
 
-    fn get_common_numeric_type(left: LogicalType, right: LogicalType) -> Result<LogicalType> {
+    fn get_common_numeric_type(left: DataType, right: DataType) -> Result<DataType> {
         if left == right {
             return Ok(left);
         }
 
         match (left, right) {
-            (_, LogicalType::Float64) | (LogicalType::Float64, _) => Ok(LogicalType::Float64),
-            (_, LogicalType::Int64) | (LogicalType::Int64, _) => Ok(LogicalType::Int64),
+            (_, DataType::Float64) | (DataType::Float64, _) => Ok(DataType::Float64),
+            (_, DataType::Int64) | (DataType::Int64, _) => Ok(DataType::Int64),
             _ => Err(miette!(
                 "Cannot perform arithmetic between {left:?} and {right:?}"
             )),
         }
-    }
-
-    fn can_coerce(from: LogicalType, to: LogicalType) -> bool {
-        if from == to {
-            return true;
-        }
-
-        matches!(
-            (from, to),
-            (LogicalType::Int64, LogicalType::Float64)
-                | (LogicalType::Text, _)
-                | (_, LogicalType::Text)
-        )
     }
 }
 

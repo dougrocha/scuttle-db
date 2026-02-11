@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use crate::DataType;
 
 use super::{Expression, SelectList};
@@ -8,45 +6,45 @@ use super::{Expression, SelectList};
 ///
 /// Currently only SELECT is fully implemented.
 #[derive(Debug, Clone)]
-pub enum Statement<'src> {
-    Create(CreateStatement<'src>),
-    Select(SelectStatement<'src>),
+pub enum Statement {
+    Create(CreateStatement),
+    Select(SelectStatement),
     Update,
     Insert,
     Delete,
 }
 
 #[derive(Debug, Clone)]
-pub struct SelectStatement<'src> {
-    pub select_list: SelectList<'src>,
-    pub from_clause: FromClause<'src>,
-    pub where_clause: Option<Expression<'src>>,
+pub struct SelectStatement {
+    pub select_list: SelectList,
+    pub from_clause: FromClause,
+    pub where_clause: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FromClause<'src> {
-    pub table_name: Cow<'src, str>,
+pub struct FromClause {
+    pub table_name: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct CreateStatement<'src> {
-    pub table_name: Cow<'src, str>,
+pub struct CreateStatement {
+    pub table_name: String,
     pub if_not_exists: bool,
-    pub columns: Vec<ColumnDefinition<'src>>,
+    pub columns: Vec<ColumnDefinition>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ColumnDefinition<'src> {
-    pub name: Cow<'src, str>,
+pub struct ColumnDefinition {
+    pub name: String,
     pub data_type: DataType,
-    pub constraints: Vec<ColumnConstraint<'src>>,
+    pub constraints: Vec<ColumnConstraint>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ColumnConstraint<'src> {
+pub enum ColumnConstraint {
     NotNull,
     Nullable,
     PrimaryKey,
     Unique,
-    Default(Expression<'src>),
+    Default(Expression),
 }

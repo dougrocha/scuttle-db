@@ -1,7 +1,5 @@
 use strum::EnumString;
 
-use crate::DataType;
-
 /// SQL keywords recognized by the parser.
 ///
 /// These keywords are case-insensitive and reserved for SQL syntax.

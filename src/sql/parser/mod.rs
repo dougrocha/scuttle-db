@@ -3,7 +3,7 @@ use std::{borrow::Cow, iter::Peekable};
 use miette::{Result, miette};
 
 use crate::{
-    DataType,
+    DataType, Value,
     sql::{
         lexer::{Lexer, Token},
         parser::{
@@ -17,12 +17,10 @@ use crate::{
 
 pub(crate) use ast::*;
 pub(crate) use keyword::Keyword;
-pub(crate) use literal::Literal;
 pub(crate) use operators::Operator;
 
 pub(crate) mod ast;
 pub(crate) mod keyword;
-pub(crate) mod literal;
 pub(crate) mod operators;
 
 /// SQL parser that converts tokens into an AST.
@@ -42,7 +40,7 @@ impl<'src> SqlParser<'src> {
     }
 
     /// Parses the query and returns the top-level AST node (Statement).
-    pub fn parse(&mut self) -> Result<Statement<'src>> {
+    pub fn parse(&mut self) -> Result<Statement> {
         let token = self.peek_token()?;
 
         let statement = match token {
@@ -57,7 +55,7 @@ impl<'src> SqlParser<'src> {
         Ok(statement)
     }
 
-    fn parse_select_statement(&mut self) -> Result<Statement<'src>> {
+    fn parse_select_statement(&mut self) -> Result<Statement> {
         self.expect_keyword(Keyword::Select)?;
 
         let select_list = self.parse_targets()?;
@@ -74,12 +72,14 @@ impl<'src> SqlParser<'src> {
 
         Ok(Statement::Select(SelectStatement {
             select_list,
-            from_clause: FromClause { table_name },
+            from_clause: FromClause {
+                table_name: table_name.to_string(),
+            },
             where_clause,
         }))
     }
 
-    fn parse_create_statement(&mut self) -> Result<Statement<'src>> {
+    fn parse_create_statement(&mut self) -> Result<Statement> {
         self.expect_keyword(Keyword::Create)?;
         self.expect_keyword(Keyword::Table)?;
 
@@ -96,13 +96,13 @@ impl<'src> SqlParser<'src> {
         self.expect_token(Token::RightParen)?;
 
         Ok(Statement::Create(CreateStatement {
-            table_name,
+            table_name: table_name.to_string(),
             if_not_exists: false,
             columns,
         }))
     }
 
-    fn parse_targets(&mut self) -> Result<SelectList<'src>> {
+    fn parse_targets(&mut self) -> Result<SelectList> {
         let mut columns = Vec::new();
 
         while !self.peek_keyword(Keyword::From) {
@@ -124,7 +124,10 @@ impl<'src> SqlParser<'src> {
                 None
             };
 
-            columns.push(SelectTarget::Expression { expr, alias });
+            columns.push(SelectTarget::Expression {
+                expr,
+                alias: alias.map(|s| s.to_string()),
+            });
 
             self.consume_if(Token::Comma);
         }
@@ -132,7 +135,7 @@ impl<'src> SqlParser<'src> {
         Ok(SelectList(columns))
     }
 
-    fn parse_expression(&mut self, min_prec: u8) -> Result<Expression<'src>> {
+    fn parse_expression(&mut self, min_prec: u8) -> Result<Expression> {
         let mut lhs = self.parse_primary()?;
 
         while let Ok(op) = self.peek_binary_op() {
@@ -155,16 +158,16 @@ impl<'src> SqlParser<'src> {
         Ok(lhs)
     }
 
-    fn parse_primary(&mut self) -> Result<Expression<'src>> {
+    fn parse_primary(&mut self) -> Result<Expression> {
         let expr = match self.next_token()? {
             Token::Keyword(kw) if kw.is_bool_literal() => {
-                Expression::Literal(Literal::Bool(matches!(kw, Keyword::True)))
+                Expression::Literal(Value::Bool(matches!(kw, Keyword::True)))
             }
-            Token::Integer(i) => Expression::Literal(Literal::Int64(i)),
-            Token::Float(f) => Expression::Literal(Literal::Float64(f)),
-            Token::String(s) => Expression::Literal(Literal::Text(s)),
-            Token::Identifier(i) => Expression::Identifier(i),
-            Token::Asterisk => Expression::Identifier(Cow::from("*")),
+            Token::Integer(i) => Expression::Literal(Value::Int64(i)),
+            Token::Float(f) => Expression::Literal(Value::Float64(f)),
+            Token::String(s) => Expression::Literal(Value::Text(s.to_string())),
+            Token::Identifier(i) => Expression::Identifier(i.to_string()),
+            Token::Asterisk => Expression::Identifier("*".to_string()),
             Token::LeftParen => {
                 let expr = self.parse_expression(0)?;
 
@@ -182,7 +185,7 @@ impl<'src> SqlParser<'src> {
     }
 
     // Potentially parse "IS" postfix
-    fn parse_is_postfix(&mut self, expr: Expression<'src>) -> Result<Expression<'src>> {
+    fn parse_is_postfix(&mut self, expr: Expression) -> Result<Expression> {
         if !self.consume_if(Token::Keyword(Keyword::Is)) {
             return Ok(expr);
         }
@@ -202,7 +205,7 @@ impl<'src> SqlParser<'src> {
         }
     }
 
-    fn parse_column_definition(&mut self) -> Result<ColumnDefinition<'src>> {
+    fn parse_column_definition(&mut self) -> Result<ColumnDefinition> {
         let name = self.expect_identifier()?;
 
         let Token::Keyword(data_type) = self.next_token()? else {
@@ -262,7 +265,7 @@ impl<'src> SqlParser<'src> {
         self.consume_if(Token::Comma);
 
         Ok(ColumnDefinition {
-            name,
+            name: name.to_string(),
             data_type,
             constraints,
         })
@@ -366,13 +369,13 @@ mod tests {
     use super::*;
 
     /// Helper to parse a query and extract components
-    fn parse(query: &str) -> Statement<'_> {
+    fn parse(query: &str) -> Statement {
         let mut parser = SqlParser::new(query);
         parser.parse().expect("Failed to parse query")
     }
 
     /// Helper to parse and extract WHERE expression
-    fn parse_where(query: &str) -> Expression<'_> {
+    fn parse_where(query: &str) -> Expression {
         match parse(query) {
             Statement::Select(SelectStatement {
                 where_clause: Some(expr),
@@ -394,7 +397,7 @@ mod tests {
                 assert_eq!(
                     from_clause,
                     FromClause {
-                        table_name: Cow::from("users"),
+                        table_name: "users".to_string(),
                     }
                 );
                 assert!(where_clause.is_none());
@@ -411,11 +414,11 @@ mod tests {
                     select_list.0,
                     vec![
                         SelectTarget::Expression {
-                            expr: Expression::Identifier(Cow::from("id")),
+                            expr: Expression::Identifier("id".to_string()),
                             alias: None,
                         },
                         SelectTarget::Expression {
-                            expr: Expression::Identifier(Cow::from("name")),
+                            expr: Expression::Identifier("name".to_string()),
                             alias: None,
                         }
                     ]
@@ -432,8 +435,8 @@ mod tests {
                 assert_eq!(
                     select_list.0,
                     vec![SelectTarget::Expression {
-                        expr: Expression::Identifier(Cow::from("id")),
-                        alias: Some(Cow::from("user_id")),
+                        expr: Expression::Identifier("id".to_string()),
+                        alias: Some("user_id".to_string()),
                     }]
                 );
             }
@@ -449,12 +452,12 @@ mod tests {
                     select_list.0,
                     vec![
                         SelectTarget::Expression {
-                            expr: Expression::Identifier(Cow::from("id")),
-                            alias: Some(Cow::from("Identity")),
+                            expr: Expression::Identifier("id".to_string()),
+                            alias: Some("Identity".to_string()),
                         },
                         SelectTarget::Expression {
-                            expr: Expression::Identifier(Cow::from("name")),
-                            alias: Some(Cow::from("firstName")),
+                            expr: Expression::Identifier("name".to_string()),
+                            alias: Some("firstName".to_string()),
                         },
                     ]
                 );
@@ -469,9 +472,9 @@ mod tests {
         assert_eq!(
             expr,
             Expression::BinaryOp {
-                left: Box::new(Expression::Identifier(Cow::from("id"))),
+                left: Box::new(Expression::Identifier("id".to_string())),
                 op: Operator::Equal,
-                right: Box::new(Expression::Literal(Literal::Int64(1))),
+                right: Box::new(Expression::Literal(Value::Int64(1))),
             }
         );
     }
@@ -622,19 +625,19 @@ mod tests {
         // Integer
         let expr = parse_where("SELECT * FROM t WHERE x = 42");
         if let Expression::BinaryOp { right, .. } = expr {
-            assert_eq!(*right, Expression::Literal(Literal::Int64(42)));
+            assert_eq!(*right, Expression::Literal(Value::Int64(42)));
         }
 
         // Float
         let expr = parse_where("SELECT * FROM t WHERE x = 3.15");
         if let Expression::BinaryOp { right, .. } = expr {
-            assert_eq!(*right, Expression::Literal(Literal::Float64(3.15)));
+            assert_eq!(*right, Expression::Literal(Value::Float64(3.15)));
         }
 
         // Boolean
         let expr = parse_where("SELECT * FROM t WHERE active = TRUE");
         if let Expression::BinaryOp { right, .. } = expr {
-            assert_eq!(*right, Expression::Literal(Literal::Bool(true)));
+            assert_eq!(*right, Expression::Literal(Value::Bool(true)));
         }
     }
 
@@ -648,23 +651,23 @@ mod tests {
                 if_not_exists,
                 columns,
             }) => {
-                assert_eq!(table_name, Cow::from("users"));
+                assert_eq!(table_name, "users");
                 assert!(!if_not_exists);
                 assert_eq!(
                     columns,
                     vec![
                         ColumnDefinition {
-                            name: Cow::from("id"),
+                            name: "id".to_string(),
                             data_type: DataType::Int64,
                             constraints: vec![ColumnConstraint::PrimaryKey],
                         },
                         ColumnDefinition {
-                            name: Cow::from("name"),
+                            name: "name".to_string(),
                             data_type: DataType::Text,
                             constraints: vec![ColumnConstraint::NotNull],
                         },
                         ColumnDefinition {
-                            name: Cow::from("active"),
+                            name: "active".to_string(),
                             data_type: DataType::Bool,
                             constraints: vec![ColumnConstraint::Unique],
                         },

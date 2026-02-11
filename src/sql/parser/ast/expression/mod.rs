@@ -1,6 +1,6 @@
-use std::{borrow::Cow, fmt};
+use std::fmt;
 
-use crate::sql::parser::{Literal, operators::Operator};
+use crate::sql::parser::{Value, operators::Operator};
 
 pub use is_predicate::IsPredicate;
 
@@ -10,32 +10,32 @@ pub mod is_predicate;
 ///
 /// Expressions form a tree structure representing the filtering logic.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Expression<'src> {
+pub enum Expression {
     BinaryOp {
         /// Left operand
-        left: Box<Expression<'src>>,
+        left: Box<Expression>,
 
         /// Operator
         op: Operator,
 
         /// Right operand
-        right: Box<Expression<'src>>,
+        right: Box<Expression>,
     },
 
     /// Column reference (e.g., `age`, `name`)
-    Identifier(Cow<'src, str>),
+    Identifier(String),
 
     /// Literal value (e.g., `25`, `'Alice'`)
-    Literal(Literal<'src>),
+    Literal(Value),
 
     Is {
-        expr: Box<Expression<'src>>,
+        expr: Box<Expression>,
         predicate: IsPredicate,
         is_negated: bool,
     },
 }
 
-impl fmt::Display for Expression<'_> {
+impl fmt::Display for Expression {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expression::BinaryOp { left, op, right } => {
@@ -43,13 +43,13 @@ impl fmt::Display for Expression<'_> {
             }
             Expression::Identifier(name) => write!(f, "{name}"),
             Expression::Literal(value) => match value {
-                Literal::Float64(num) => write!(f, "{num}"),
-                Literal::Int64(num) => write!(f, "{num}"),
-                Literal::Text(s) => write!(f, "\"{s}\""),
-                Literal::Bool(bool) => {
+                Value::Float64(num) => write!(f, "{num}"),
+                Value::Int64(num) => write!(f, "{num}"),
+                Value::Text(s) => write!(f, "\"{s}\""),
+                Value::Bool(bool) => {
                     write!(f, "{}", bool.to_string().to_uppercase())
                 }
-                Literal::Null => write!(f, "NULL"),
+                Value::Null => write!(f, "NULL"),
             },
             Expression::Is {
                 expr,
@@ -64,7 +64,7 @@ impl fmt::Display for Expression<'_> {
     }
 }
 
-impl Expression<'_> {
+impl Expression {
     pub fn to_column_name(&self) -> &str {
         match self {
             Expression::Identifier(name) => name,
