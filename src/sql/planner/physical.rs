@@ -1,11 +1,13 @@
 use miette::Result;
 
-use super::catalog_context::CatalogContext;
 use crate::{
-    Row, Value,
+    Value,
+    db::table::row::Row,
     sql::{
-        analyzer::{AnalyzedExpression, LogicalPlan, OutputSchema},
+        analyzer::{AnalyzedExpression, schema::OutputSchema},
+        catalog_context::CatalogContext,
         evaluator::{Evaluator, expression::ExpressionEvaluator, predicate::PredicateEvaluator},
+        planner::logical::LogicalPlan,
     },
 };
 
@@ -82,7 +84,7 @@ impl ExecutionNode for ScanExec {
         }
 
         let end = batch_size.min(self.data.len());
-        let chunk: Vec<Row> = self.data.drain(..end).collect();
+        let chunk = self.data.drain(..end).collect();
 
         Ok(Some(RecordBatch { rows: chunk }))
     }

@@ -5,23 +5,20 @@ use miette::{Result, miette};
 use crate::{
     DataType, Value,
     sql::{
-        lexer::{Lexer, Token},
-        parser::{
-            expression::IsPredicate,
+        ast::{
+            expression::Expression,
+            keyword::Keyword,
+            operator::Operator,
+            predicate::IsPredicate,
             statement::{
                 ColumnConstraint, ColumnDefinition, CreateStatement, FromClause, SelectStatement,
+                Statement,
             },
+            target::{SelectList, SelectTarget},
         },
+        lexer::{Lexer, Token},
     },
 };
-
-pub(crate) use ast::*;
-pub(crate) use keyword::Keyword;
-pub(crate) use operators::Operator;
-
-pub(crate) mod ast;
-pub(crate) mod keyword;
-pub(crate) mod operators;
 
 /// SQL parser that converts tokens into an AST.
 ///
@@ -171,10 +168,9 @@ impl<'src> SqlParser<'src> {
             Token::LeftParen => {
                 let expr = self.parse_expression(0)?;
 
-                match self.next_token()? {
-                    Token::RightParen => expr,
-                    t => return Err(miette!("Expected ')', found {:?}", t)),
-                }
+                self.expect_token(Token::RightParen)?;
+
+                expr
             }
             t => {
                 return Err(miette!("Expected a column or value, but found {:?}", t));
@@ -364,8 +360,6 @@ impl<'src> SqlParser<'src> {
 
 #[cfg(test)]
 mod tests {
-    use crate::sql::parser::{SelectStatement, statement::ColumnConstraint};
-
     use super::*;
 
     /// Helper to parse a query and extract components

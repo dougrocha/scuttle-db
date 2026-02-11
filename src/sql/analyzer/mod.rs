@@ -1,29 +1,28 @@
 use miette::{Result, miette};
 
 use crate::{
-    DataType, Table, Value,
+    DataType, Value,
+    db::table::Table,
     sql::{
-        catalog_context::CatalogContext,
-        parser::{
-            Expression, Operator, SelectList, SelectTarget, Statement,
-            expression::IsPredicate,
-            statement::{FromClause, SelectStatement},
+        analyzer::schema::{Field, OutputSchema},
+        ast::{
+            expression::Expression,
+            operator::Operator,
+            predicate::IsPredicate,
+            statement::{FromClause, SelectStatement, Statement},
+            target::{SelectList, SelectTarget},
         },
+        catalog_context::CatalogContext,
+        planner::logical::LogicalPlan,
     },
 };
+
+pub(crate) mod schema;
 
 #[derive(Debug)]
 pub struct ColumnRef {
     pub index: usize,
     pub relation: Option<String>, // 'u' in 'u.name'
-}
-
-#[derive(Debug, Clone)]
-pub struct Field {
-    pub name: String,
-    pub alias: Option<String>,
-    pub data_type: DataType,
-    pub is_nullable: bool,
 }
 
 #[derive(Debug)]
@@ -94,43 +93,6 @@ impl AnalyzedExpression {
             }
             // IS TRUE / IS NULL / etc. always returns a definite bool, never null
             AnalyzedExpression::IsPredicate { .. } => false,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum LogicalPlan {
-    Scan {
-        table_name: String,
-        schema: OutputSchema,
-    },
-    Filter {
-        input: Box<LogicalPlan>,
-        condition: AnalyzedExpression,
-    },
-    Projection {
-        input: Box<LogicalPlan>,
-        expressions: Vec<AnalyzedExpression>,
-        schema: OutputSchema,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct OutputSchema {
-    pub fields: Vec<Field>,
-}
-
-impl OutputSchema {
-    pub fn find_column(&self, name: &str) -> Option<usize> {
-        self.fields.iter().position(|field| field.name == name)
-    }
-}
-
-impl LogicalPlan {
-    fn schema(&self) -> &OutputSchema {
-        match self {
-            LogicalPlan::Scan { schema, .. } | LogicalPlan::Projection { schema, .. } => schema,
-            LogicalPlan::Filter { input, .. } => input.schema(),
         }
     }
 }
@@ -336,7 +298,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 Ok(DataType::Bool)
             }
             Operator::Add | Operator::Subtract | Operator::Multiply | Operator::Divide => {
-                Self::get_common_numeric_type(left, right)
+                Self::resolve_arithmetic_type(left, right)
             }
             Operator::And | Operator::Or if left == DataType::Bool && right == DataType::Bool => {
                 Ok(DataType::Bool)
@@ -345,7 +307,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         }
     }
 
-    fn get_common_numeric_type(left: DataType, right: DataType) -> Result<DataType> {
+    fn resolve_arithmetic_type(left: DataType, right: DataType) -> Result<DataType> {
         if left == right {
             return Ok(left);
         }
@@ -362,8 +324,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{ColumnDef, DataType, Schema};
+    use crate::{ColumnDef, Schema, core::types::DataType};
 
     /// Creates a test schema with common columns
     fn create_test_schema() -> Schema {

@@ -1,10 +1,9 @@
 use std::fmt;
 
-use crate::sql::parser::{Value, operators::Operator};
-
-pub use is_predicate::IsPredicate;
-
-pub mod is_predicate;
+use crate::{
+    core::types::Value,
+    sql::ast::{operator::Operator, predicate::IsPredicate},
+};
 
 /// An expression in a WHERE clause.
 ///

@@ -1,6 +1,4 @@
-use std::borrow::Cow;
-
-use super::expression::Expression;
+use crate::sql::ast::expression::Expression;
 
 /// Target list in a SELECT statement.
 #[derive(Debug, Clone, PartialEq)]

@@ -1,6 +1,6 @@
 use miette::{Result, miette};
 
-use crate::{Row, Value, sql::analyzer::AnalyzedExpression};
+use crate::{Row, core::types::Value, sql::analyzer::AnalyzedExpression};
 
 pub mod expression;
 pub mod predicate;

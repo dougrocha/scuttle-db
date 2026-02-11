@@ -1,14 +1,15 @@
 use miette::{Result, miette};
 
 use crate::{
-    Row, Value,
+    Row,
+    core::types::Value,
     sql::{
         analyzer::{AnalyzedExpression, IsPredicateTarget},
+        ast::operator::Operator,
         evaluator::{
             Evaluator, values_add, values_divide, values_equal, values_greater_than,
             values_less_than, values_multiply, values_subtract,
         },
-        parser::Operator,
     },
 };
 

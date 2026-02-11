@@ -1,6 +1,7 @@
-use crate::DataType;
-
-use super::{Expression, SelectList};
+use crate::{
+    core::types::DataType,
+    sql::ast::{expression::Expression, target::SelectList},
+};
 
 /// A SQL statement (top-level AST node).
 ///

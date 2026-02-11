@@ -1,6 +1,7 @@
 use crate::{
     DatabaseError,
-    db::table::{Row, Schema, Table, Value},
+    core::types::Value,
+    db::table::{Table, row::Row, schema::Schema},
     storage::page::PageId,
 };
 

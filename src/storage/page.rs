@@ -1,6 +1,6 @@
 use miette::{Result, miette};
 
-use crate::Serializable;
+use crate::core::serialization::Serializable;
 
 pub type PageId = u32;
 pub type ItemId = u16;

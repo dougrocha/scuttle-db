@@ -7,12 +7,12 @@ use miette::Result;
 
 use crate::{
     DatabaseError,
-    db::table::{Row, Schema, Table, TableDef},
+    db::table::{Table, row::Row, schema::Schema, table_def::TableDef},
     sql::{
-        analyzer::{Analyzer, OutputSchema},
+        analyzer::{Analyzer, schema::OutputSchema},
         catalog_context::CatalogContext,
         parser::SqlParser,
-        physical_planner::PhysicalPlanner,
+        planner::physical::PhysicalPlanner,
     },
     storage::{
         buffer_pool::BufferPool,

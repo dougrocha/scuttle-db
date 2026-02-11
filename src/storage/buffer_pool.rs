@@ -7,8 +7,10 @@ use std::{
 
 use miette::{IntoDiagnostic, Result, miette};
 
-use super::page::{Page, PageId, PageType};
-use crate::Serializable;
+use crate::{
+    core::serialization::Serializable,
+    storage::page::{Page, PageId, PageType},
+};
 
 #[derive(Debug)]
 pub struct TableFile {

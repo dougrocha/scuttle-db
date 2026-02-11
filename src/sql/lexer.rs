@@ -2,7 +2,7 @@ use std::{borrow::Cow, str::FromStr};
 
 use miette::{IntoDiagnostic, Result, miette};
 
-use super::parser::Keyword;
+use crate::sql::ast::keyword::Keyword;
 
 /// A token in the SQL language.
 #[derive(Debug, PartialEq)]

@@ -1,4 +1,4 @@
-use crate::sql::parser::Keyword;
+use crate::sql::ast::keyword::Keyword;
 
 /// Predicates to the 'IS' keyword.
 #[derive(Debug, Clone, PartialEq)]

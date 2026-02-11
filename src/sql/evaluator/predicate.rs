@@ -1,7 +1,8 @@
 use miette::{Result, miette};
 
 use crate::{
-    db::table::{Row, Value},
+    Row,
+    core::types::Value,
     sql::{
         analyzer::AnalyzedExpression,
         evaluator::{Evaluator, expression::ExpressionEvaluator},

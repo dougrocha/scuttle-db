@@ -1,6 +1,6 @@
 use miette::{IntoDiagnostic, Result};
 
-use crate::{TableDef, db::database::Database};
+use crate::db::{database::Database, table::table_def::TableDef};
 
 pub struct CatalogContext<'db> {
     pub database: &'db mut Database,
