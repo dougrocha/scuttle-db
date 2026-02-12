@@ -1,5 +1,5 @@
 use crate::{
-    ColumnDef, Value,
+    ColumnDef,
     sql::ast::{expression::Expression, target::SelectList},
 };
 
@@ -37,12 +37,12 @@ pub struct CreateStatement {
 #[derive(Debug, Clone)]
 pub struct InsertStatement {
     pub table_name: String,
-    pub columns: Vec<String>,
+    pub columns: Option<Vec<String>>,
     pub source: InsertSource,
 }
 
 #[derive(Debug, Clone)]
 pub enum InsertSource {
-    Values(Vec<Expression>),
+    Values(Vec<Vec<Expression>>),
     Select(SelectStatement),
 }

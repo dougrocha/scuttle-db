@@ -20,7 +20,7 @@ impl ColumnDef {
         }
     }
 
-    pub fn has_constraint(&self, constraint: ColumnConstraint) -> bool {
+    pub(crate) fn has_constraint(&self, constraint: ColumnConstraint) -> bool {
         self.constraints.contains(&constraint)
     }
 
@@ -28,6 +28,12 @@ impl ColumnDef {
         self.constraints
             .iter()
             .any(|c| matches!(c, ColumnConstraint::Default(_) | ColumnConstraint::Nullable))
+    }
+
+    pub(crate) fn has_default(&self) -> bool {
+        self.constraints
+            .iter()
+            .any(|c| matches!(c, ColumnConstraint::Default(_)))
     }
 }
 

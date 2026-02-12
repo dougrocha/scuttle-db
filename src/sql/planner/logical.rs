@@ -19,7 +19,7 @@ pub enum LogicalPlan {
         schema: OutputSchema,
     },
     Values {
-        expressions: Vec<AnalyzedExpression>,
+        expressions: Vec<Vec<AnalyzedExpression>>,
         schema: OutputSchema,
     },
     Insert {

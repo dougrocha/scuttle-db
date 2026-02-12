@@ -106,30 +106,42 @@ impl<'src> SqlParser<'src> {
         self.expect_keyword(Keyword::Into)?;
 
         let table_name = self.expect_identifier()?;
-        let mut columns = Vec::new();
 
+        let mut columns = None;
         if self.consume_if(Token::LeftParen) {
+            let mut cols = Vec::new();
             while !self.consume_if(Token::RightParen) {
                 self.consume_if(Token::Comma);
 
-                columns.push(self.expect_identifier()?.to_string());
+                cols.push(self.expect_identifier()?.to_string());
             }
+
+            columns = Some(cols);
         }
 
         let insert_source = {
             if self.peek_keyword(Keyword::Values) {
                 self.expect_keyword(Keyword::Values)?;
 
-                let mut values = Vec::new();
-                if self.consume_if(Token::LeftParen) {
-                    while !self.consume_if(Token::RightParen) {
-                        self.consume_if(Token::Comma);
+                let mut rows = Vec::new();
+                loop {
+                    let mut row_vals = Vec::new();
+                    if self.consume_if(Token::LeftParen) {
+                        while !self.consume_if(Token::RightParen) {
+                            self.consume_if(Token::Comma);
 
-                        values.push(self.parse_primary()?);
+                            row_vals.push(self.parse_primary()?);
+                        }
+                    }
+
+                    rows.push(row_vals);
+
+                    if !self.consume_if(Token::Comma) {
+                        break;
                     }
                 }
 
-                InsertSource::Values(values)
+                InsertSource::Values(rows)
             } else if self.peek_keyword(Keyword::Select) {
                 self.expect_keyword(Keyword::Select)?;
 
@@ -724,6 +736,86 @@ mod tests {
                 );
             }
             _ => panic!("Expected CREATE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_insert_single_row() {
+        match parse("INSERT INTO users (id, name) VALUES (1, 'Alice')") {
+            Statement::Insert(InsertStatement {
+                table_name,
+                columns,
+                source,
+            }) => {
+                assert_eq!(table_name, "users");
+                assert_eq!(columns.unwrap(), vec!["id".to_string(), "name".to_string()]);
+                match source {
+                    InsertSource::Values { .. } => {
+                        // Values plan is validated during analysis
+                    }
+                    _ => panic!("Expected Values source"),
+                }
+            }
+            _ => panic!("Expected Insert statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_insert_multiple_rows() {
+        match parse("INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob')") {
+            Statement::Insert(InsertStatement {
+                table_name,
+                columns,
+                source,
+            }) => {
+                assert_eq!(table_name, "users");
+                assert_eq!(columns.unwrap(), vec!["id".to_string(), "name".to_string()]);
+                match source {
+                    InsertSource::Values { .. } => {
+                        // Values plan is validated during analysis
+                    }
+                    _ => panic!("Expected Values source"),
+                }
+            }
+            _ => panic!("Expected Insert statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_insert_all_columns() {
+        match parse("INSERT INTO users VALUES (1, 'Alice', true)") {
+            Statement::Insert(InsertStatement {
+                table_name,
+                columns,
+                source,
+            }) => {
+                assert_eq!(table_name, "users");
+                // When columns are not specified, they should be empty and inferred during analysis
+                assert!(columns.is_none());
+                match source {
+                    InsertSource::Values { .. } => {}
+                    _ => panic!("Expected Values source"),
+                }
+            }
+            _ => panic!("Expected Insert statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_insert_with_different_types() {
+        match parse("INSERT INTO users (id, name, active) VALUES (42, 'Charlie', false)") {
+            Statement::Insert(InsertStatement {
+                table_name,
+                columns,
+                ..
+            }) => {
+                assert_eq!(table_name, "users");
+                assert_eq!(
+                    columns.unwrap(),
+                    vec!["id".to_string(), "name".to_string(), "active".to_string()]
+                );
+            }
+            _ => panic!("Expected Insert statement"),
         }
     }
 }

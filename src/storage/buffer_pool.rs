@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fs::File,
+    fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
 };
@@ -138,7 +138,11 @@ impl BufferPool {
     pub(crate) fn save_page(&mut self, table_name: &str, page_id: PageId) -> Result<()> {
         let page = self.get_page(table_name, page_id)?;
 
-        let mut file = File::create(format!("./db/{table_name}.table")).into_diagnostic()?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(format!("./db/{table_name}.table"))
+            .into_diagnostic()?;
 
         let offset = (page_id as usize) * Page::SIZE;
         file.seek(SeekFrom::Start(offset as u64))

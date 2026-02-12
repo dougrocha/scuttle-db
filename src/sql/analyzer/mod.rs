@@ -137,7 +137,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         // Get columns that we are inserting
         let mut insert_cols = Vec::new();
         for col in &schema.columns {
-            if columns.contains(&col.name) {
+            if columns.as_ref().is_some_and(|v| v.contains(&col.name)) | columns.is_none() {
                 insert_cols.push(col);
             } else if col.can_be_omitted() {
                 println!("Column {:?} can be either default or null", col.name);
@@ -156,22 +156,32 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
         let source = match source {
             InsertSource::Values(expressions) => {
-                let analyzed_values: Vec<AnalyzedExpression> = expressions
+                let analyzed_values: Vec<Vec<AnalyzedExpression>> = expressions
                     .iter()
-                    .map(|expr| self.bind_expression(expr, &output_schema))
-                    .collect::<Result<Vec<_>>>()?;
+                    .map(|expr| {
+                        let analyzed_vals: Vec<AnalyzedExpression> = expr
+                            .iter()
+                            .map(|expr| self.bind_expression(expr, &output_schema))
+                            .collect::<Result<Vec<_>>>()?;
 
-                for (insert_col, analyzed_val) in insert_cols.iter().zip(analyzed_values.iter()) {
-                    if !DataType::can_coerce(insert_col.data_type, analyzed_val.get_type()) {
-                        return Err(miette!(
-                            "Tried to insert ({:?}, {:?}) into column ({:?}, {:?})",
-                            analyzed_val,
-                            analyzed_val.get_type(),
-                            insert_col.name,
-                            insert_col.data_type
-                        ));
-                    }
-                }
+                        for (insert_col, analyzed_val) in
+                            insert_cols.iter().zip(analyzed_vals.iter())
+                        {
+                            if !DataType::can_coerce(insert_col.data_type, analyzed_val.get_type())
+                            {
+                                return Err(miette!(
+                                    "Tried to insert ({:?}, {:?}) into column ({:?}, {:?})",
+                                    analyzed_val,
+                                    analyzed_val.get_type(),
+                                    insert_col.name,
+                                    insert_col.data_type
+                                ));
+                            }
+                        }
+
+                        Ok(analyzed_vals)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
 
                 LogicalPlan::Values {
                     expressions: analyzed_values,
@@ -183,7 +193,8 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
         Ok(LogicalPlan::Insert {
             table_name,
-            column_names: columns,
+            column_names: columns
+                .unwrap_or_else(|| schema.columns.iter().map(|col| col.name.clone()).collect()),
             source: Box::new(source),
         })
     }

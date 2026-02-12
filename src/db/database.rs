@@ -6,7 +6,7 @@ use std::{
 use miette::Result;
 
 use crate::{
-    DatabaseError, Value,
+    ColumnConstraint, DatabaseError, Value,
     db::table::{Table, row::Row, schema::Schema, table_def::TableDef},
     sql::{
         analyzer::{AnalyzedExpression, Analyzer, schema::OutputSchema},
@@ -312,33 +312,36 @@ impl Database {
         let analyzer = Analyzer::new(&context);
         let analyzed_plan = analyzer.analyze_insert(insert_stmt)?;
 
-        dbg!(&analyzed_plan);
-
         if let LogicalPlan::Insert {
             table_name,
-            column_names,
+            column_names: insert_columns,
             source,
         } = analyzed_plan
         {
-            let schema = context.get_table(&table_name)?.schema();
-            let mut rows = Vec::new();
-            for cols in &schema.columns {
-                if let Some(idx) = column_names.iter().position(|name| *name == cols.name) {
-                    if let LogicalPlan::Values {
-                        ref expressions, ..
-                    } = *source
-                    {
-                        if let AnalyzedExpression::Literal(value) = &expressions[idx] {
-                            rows.push(value.clone());
+            if let LogicalPlan::Values { expressions, .. } = *source {
+                for expr in expressions {
+                    let schema = context.get_table(&table_name)?.schema();
+                    let mut rows = Vec::with_capacity(schema.columns.len());
+
+                    for (col_idx, col_def) in schema.columns.iter().enumerate() {
+                        if let Some(idx) =
+                            insert_columns.iter().position(|name| *name == col_def.name)
+                        {
+                            if let AnalyzedExpression::Literal(value) = &expr[idx] {
+                                rows.insert(col_idx, value.clone());
+                            }
+                        } else if col_def.has_default() {
+                            todo!("Enable values to have default")
+                        } else {
+                            rows.push(Value::Null);
                         }
-                    } else {
-                        todo!()
                     }
-                } else {
-                    rows.push(Value::Null);
+
+                    context.database.insert_row(&table_name, Row::new(rows))?;
                 }
+            } else {
+                todo!()
             }
-            context.database.insert_row(&table_name, Row::new(rows))?;
         } else {
             unreachable!("")
         }
