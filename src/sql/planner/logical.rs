@@ -1,4 +1,7 @@
-use crate::sql::analyzer::{AnalyzedExpression, schema::OutputSchema};
+use crate::{
+    ColumnDef,
+    sql::analyzer::{AnalyzedExpression, schema::OutputSchema},
+};
 
 #[derive(Debug)]
 pub enum LogicalPlan {
@@ -15,13 +18,27 @@ pub enum LogicalPlan {
         expressions: Vec<AnalyzedExpression>,
         schema: OutputSchema,
     },
+    Values {
+        expressions: Vec<AnalyzedExpression>,
+        schema: OutputSchema,
+    },
+    Insert {
+        table_name: String,
+        column_names: Vec<String>,
+        source: Box<LogicalPlan>,
+    },
+    CreateTable {
+        table_name: String,
+        columns: Vec<ColumnDef>,
+    },
 }
 
 impl LogicalPlan {
-    pub fn schema(&self) -> &OutputSchema {
+    pub fn output_schema(&self) -> &OutputSchema {
         match self {
             LogicalPlan::Scan { schema, .. } | LogicalPlan::Projection { schema, .. } => schema,
-            LogicalPlan::Filter { input, .. } => input.schema(),
+            LogicalPlan::Filter { input, .. } => input.output_schema(),
+            _ => panic!(),
         }
     }
 }

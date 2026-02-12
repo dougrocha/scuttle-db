@@ -3,7 +3,8 @@ use std::{borrow::Cow, iter::Peekable};
 use miette::{Result, miette};
 
 use crate::{
-    DataType, Value,
+    ColumnDef, DataType, Value,
+    db::table::column_def::ColumnConstraint,
     sql::{
         ast::{
             expression::Expression,
@@ -11,7 +12,7 @@ use crate::{
             operator::Operator,
             predicate::IsPredicate,
             statement::{
-                ColumnConstraint, ColumnDefinition, CreateStatement, FromClause, SelectStatement,
+                CreateStatement, FromClause, InsertSource, InsertStatement, SelectStatement,
                 Statement,
             },
             target::{SelectList, SelectTarget},
@@ -44,6 +45,7 @@ impl<'src> SqlParser<'src> {
             Token::Keyword(keyword) => match keyword {
                 Keyword::Select => self.parse_select_statement()?,
                 Keyword::Create => self.parse_create_statement()?,
+                Keyword::Insert => self.parse_insert_statement()?,
                 _ => return Err(miette!("Unsupported keyword: {:?}", keyword)),
             },
             _ => return Err(miette!("Unexpected token: {:?}", token)),
@@ -96,6 +98,59 @@ impl<'src> SqlParser<'src> {
             table_name: table_name.to_string(),
             if_not_exists: false,
             columns,
+        }))
+    }
+
+    fn parse_insert_statement(&mut self) -> Result<Statement> {
+        self.expect_keyword(Keyword::Insert)?;
+        self.expect_keyword(Keyword::Into)?;
+
+        let table_name = self.expect_identifier()?;
+        let mut columns = Vec::new();
+
+        if self.consume_if(Token::LeftParen) {
+            while !self.consume_if(Token::RightParen) {
+                self.consume_if(Token::Comma);
+
+                columns.push(self.expect_identifier()?.to_string());
+            }
+        }
+
+        let insert_source = {
+            if self.peek_keyword(Keyword::Values) {
+                self.expect_keyword(Keyword::Values)?;
+
+                let mut values = Vec::new();
+                if self.consume_if(Token::LeftParen) {
+                    while !self.consume_if(Token::RightParen) {
+                        self.consume_if(Token::Comma);
+
+                        values.push(self.parse_primary()?);
+                    }
+                }
+
+                InsertSource::Values(values)
+            } else if self.peek_keyword(Keyword::Select) {
+                self.expect_keyword(Keyword::Select)?;
+
+                let stmt = self.parse_select_statement()?;
+                if let Statement::Select(select_stmt) = stmt {
+                    InsertSource::Select(select_stmt)
+                } else {
+                    unreachable!("Expected SELECT statement")
+                }
+            } else {
+                return Err(miette!(
+                    "Expected either VALUES or SELECT, found {:?}",
+                    self.peek_token()?,
+                ));
+            }
+        };
+
+        Ok(Statement::Insert(InsertStatement {
+            table_name: table_name.to_string(),
+            columns,
+            source: insert_source,
         }))
     }
 
@@ -201,7 +256,7 @@ impl<'src> SqlParser<'src> {
         }
     }
 
-    fn parse_column_definition(&mut self) -> Result<ColumnDefinition> {
+    fn parse_column_definition(&mut self) -> Result<ColumnDef> {
         let name = self.expect_identifier()?;
 
         let Token::Keyword(data_type) = self.next_token()? else {
@@ -260,7 +315,7 @@ impl<'src> SqlParser<'src> {
         // optionally consume comma
         self.consume_if(Token::Comma);
 
-        Ok(ColumnDefinition {
+        Ok(ColumnDef {
             name: name.to_string(),
             data_type,
             constraints,
@@ -650,17 +705,17 @@ mod tests {
                 assert_eq!(
                     columns,
                     vec![
-                        ColumnDefinition {
+                        ColumnDef {
                             name: "id".to_string(),
                             data_type: DataType::Int64,
                             constraints: vec![ColumnConstraint::PrimaryKey],
                         },
-                        ColumnDefinition {
+                        ColumnDef {
                             name: "name".to_string(),
                             data_type: DataType::Text,
                             constraints: vec![ColumnConstraint::NotNull],
                         },
-                        ColumnDefinition {
+                        ColumnDef {
                             name: "active".to_string(),
                             data_type: DataType::Bool,
                             constraints: vec![ColumnConstraint::Unique],

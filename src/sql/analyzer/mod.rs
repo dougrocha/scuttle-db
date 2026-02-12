@@ -2,14 +2,14 @@ use miette::{Result, miette};
 
 use crate::{
     DataType, Value,
-    db::table::Table,
+    db::table::{Table, column_def::ColumnConstraint},
     sql::{
         analyzer::schema::{Field, OutputSchema},
         ast::{
             expression::Expression,
             operator::Operator,
             predicate::IsPredicate,
-            statement::{FromClause, SelectStatement, Statement},
+            statement::{FromClause, InsertSource, InsertStatement, SelectStatement},
             target::{SelectList, SelectTarget},
         },
         catalog_context::CatalogContext,
@@ -106,28 +106,89 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         Self { context }
     }
 
-    pub fn analyze(&self, statement: Statement) -> Result<LogicalPlan> {
-        match statement {
-            Statement::Select(SelectStatement {
-                select_list,
-                from_clause,
-                where_clause,
-            }) => {
-                let mut plan = self.analyze_from(from_clause)?;
+    pub fn analyze_from(&self, statement: SelectStatement) -> Result<LogicalPlan> {
+        let SelectStatement {
+            select_list,
+            from_clause,
+            where_clause,
+        } = statement;
+        let mut plan = self.analyze_from_clause(from_clause)?;
 
-                if let Some(expr) = where_clause {
-                    plan = self.analyze_where(plan, &expr)?;
-                }
-
-                plan = self.analyze_projection(plan, &select_list)?;
-
-                Ok(plan)
-            }
-            _ => Err(miette!("Analysis not implemented for this statement.")),
+        if let Some(expr) = where_clause {
+            plan = self.analyze_where_clause(plan, &expr)?;
         }
+
+        plan = self.analyze_projection_clause(plan, &select_list)?;
+
+        Ok(plan)
     }
 
-    fn analyze_from(&self, from_clause: FromClause) -> Result<LogicalPlan> {
+    pub fn analyze_insert(&self, statement: InsertStatement) -> Result<LogicalPlan> {
+        let InsertStatement {
+            table_name,
+            columns,
+            source,
+        } = statement;
+        let table = self.context.get_table(&table_name)?;
+        let schema = table.schema();
+
+        let mut fields = Vec::new();
+
+        // Get columns that we are inserting
+        let mut insert_cols = Vec::new();
+        for col in &schema.columns {
+            if columns.contains(&col.name) {
+                insert_cols.push(col);
+            } else if col.can_be_omitted() {
+                println!("Column {:?} can be either default or null", col.name);
+            } else {
+                return Err(miette!("Column {:?} must be inserted.", col.name));
+            }
+
+            fields.push(Field {
+                name: col.name.clone(),
+                alias: None,
+                data_type: col.data_type,
+                is_nullable: col.has_constraint(ColumnConstraint::Nullable),
+            });
+        }
+        let output_schema = OutputSchema { fields };
+
+        let source = match source {
+            InsertSource::Values(expressions) => {
+                let analyzed_values: Vec<AnalyzedExpression> = expressions
+                    .iter()
+                    .map(|expr| self.bind_expression(expr, &output_schema))
+                    .collect::<Result<Vec<_>>>()?;
+
+                for (insert_col, analyzed_val) in insert_cols.iter().zip(analyzed_values.iter()) {
+                    if !DataType::can_coerce(insert_col.data_type, analyzed_val.get_type()) {
+                        return Err(miette!(
+                            "Tried to insert ({:?}, {:?}) into column ({:?}, {:?})",
+                            analyzed_val,
+                            analyzed_val.get_type(),
+                            insert_col.name,
+                            insert_col.data_type
+                        ));
+                    }
+                }
+
+                LogicalPlan::Values {
+                    expressions: analyzed_values,
+                    schema: output_schema,
+                }
+            }
+            InsertSource::Select(_select_statement) => todo!(),
+        };
+
+        Ok(LogicalPlan::Insert {
+            table_name,
+            column_names: columns,
+            source: Box::new(source),
+        })
+    }
+
+    fn analyze_from_clause(&self, from_clause: FromClause) -> Result<LogicalPlan> {
         let physical_schema = self.context.get_table(&from_clause.table_name)?.schema();
 
         let virtual_fields = physical_schema
@@ -137,7 +198,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 name: col.name.clone(),
                 alias: None,
                 data_type: col.data_type,
-                is_nullable: col.nullable,
+                is_nullable: col.has_constraint(ColumnConstraint::Nullable),
             })
             .collect();
 
@@ -151,12 +212,12 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         })
     }
 
-    fn analyze_projection(
+    fn analyze_projection_clause(
         &self,
         input_plan: LogicalPlan,
         select_list: &SelectList,
     ) -> Result<LogicalPlan> {
-        let input_schema = input_plan.schema();
+        let input_schema = input_plan.output_schema();
 
         let mut analyzed_exprs = Vec::new();
         let mut output_fields = Vec::new();
@@ -201,12 +262,12 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         })
     }
 
-    fn analyze_where(
+    fn analyze_where_clause(
         &self,
         input_plan: LogicalPlan,
         where_expr: &Expression,
     ) -> Result<LogicalPlan> {
-        let schema = input_plan.schema();
+        let schema = input_plan.output_schema();
 
         let analyzed_expr = self.bind_expression(where_expr, schema)?;
 
@@ -329,10 +390,10 @@ mod tests {
     /// Creates a test schema with common columns
     fn create_test_schema() -> Schema {
         Schema::new(vec![
-            ColumnDef::new("id", DataType::Int64, false),
-            ColumnDef::new("name", DataType::Text, false),
-            ColumnDef::new("email", DataType::Text, true),
-            ColumnDef::new("age", DataType::Int64, true),
+            ColumnDef::new("id", DataType::Int64),
+            ColumnDef::new("name", DataType::Text),
+            ColumnDef::new("email", DataType::Text),
+            ColumnDef::new("age", DataType::Int64),
         ])
     }
 }

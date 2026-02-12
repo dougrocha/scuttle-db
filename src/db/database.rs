@@ -6,13 +6,14 @@ use std::{
 use miette::Result;
 
 use crate::{
-    DatabaseError,
+    DatabaseError, Value,
     db::table::{Table, row::Row, schema::Schema, table_def::TableDef},
     sql::{
-        analyzer::{Analyzer, schema::OutputSchema},
+        analyzer::{AnalyzedExpression, Analyzer, schema::OutputSchema},
+        ast::statement::{self, Statement},
         catalog_context::CatalogContext,
         parser::SqlParser,
-        planner::physical::PhysicalPlanner,
+        planner::{logical::LogicalPlan, physical::PhysicalPlanner},
     },
     storage::{
         buffer_pool::BufferPool,
@@ -262,9 +263,29 @@ impl Database {
             .parse()
             .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))?;
 
+        match statement {
+            Statement::Create(create_stmt) => self.handle_create(create_stmt),
+            Statement::Select(select_stmt) => self.handle_select(select_stmt),
+            Statement::Insert(insert_stmt) => self.handle_insert(insert_stmt),
+            _ => Err(DatabaseError::Unsupported.into()),
+        }
+    }
+
+    fn handle_create(&mut self, create_stmt: statement::CreateStatement) -> Result<QueryResponse> {
+        let schema = Schema::new(create_stmt.columns);
+
+        self.create_table(&create_stmt.table_name, schema)?;
+
+        Ok(QueryResponse {
+            schema: OutputSchema { fields: vec![] },
+            rows: vec![],
+        })
+    }
+
+    fn handle_select(&mut self, select_stmt: statement::SelectStatement) -> Result<QueryResponse> {
         let mut context = CatalogContext::new(self);
         let analyzer = Analyzer::new(&context);
-        let anayzed_plan = analyzer.analyze(statement)?;
+        let anayzed_plan = analyzer.analyze_from(select_stmt)?;
 
         // TODO: Eventually add a optimizer here for logical_plan.
         // Will do a series of "pushdowns".
@@ -274,9 +295,7 @@ impl Database {
         //  - Constant Folding: turn 'age > 10 + 5' to 'age > 25'
 
         let mut physical_planner = PhysicalPlanner::new(&mut context);
-        let mut executor = physical_planner
-            .create_physical_plan(anayzed_plan)
-            .map_err(|e| DatabaseError::InvalidQuery(format!("Physical Plan error: {e}")))?;
+        let mut executor = physical_planner.create_physical_plan(anayzed_plan)?;
 
         let mut batches = Vec::new();
         while let Some(batch) = executor.next()? {
@@ -286,5 +305,47 @@ impl Database {
         let schema = executor.schema().clone(); // ONE clone
         let rows = batches.into_iter().flat_map(|b| b.rows).collect();
         Ok(QueryResponse { schema, rows })
+    }
+
+    fn handle_insert(&mut self, insert_stmt: statement::InsertStatement) -> Result<QueryResponse> {
+        let context = CatalogContext::new(self);
+        let analyzer = Analyzer::new(&context);
+        let analyzed_plan = analyzer.analyze_insert(insert_stmt)?;
+
+        dbg!(&analyzed_plan);
+
+        if let LogicalPlan::Insert {
+            table_name,
+            column_names,
+            source,
+        } = analyzed_plan
+        {
+            let schema = context.get_table(&table_name)?.schema();
+            let mut rows = Vec::new();
+            for cols in &schema.columns {
+                if let Some(idx) = column_names.iter().position(|name| *name == cols.name) {
+                    if let LogicalPlan::Values {
+                        ref expressions, ..
+                    } = *source
+                    {
+                        if let AnalyzedExpression::Literal(value) = &expressions[idx] {
+                            rows.push(value.clone());
+                        }
+                    } else {
+                        todo!()
+                    }
+                } else {
+                    rows.push(Value::Null);
+                }
+            }
+            context.database.insert_row(&table_name, Row::new(rows))?;
+        } else {
+            unreachable!("")
+        }
+
+        Ok(QueryResponse {
+            schema: OutputSchema { fields: vec![] },
+            rows: vec![],
+        })
     }
 }

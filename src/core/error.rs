@@ -26,4 +26,7 @@ pub enum DatabaseError {
     /// The SQL query is invalid or malformed.
     #[error("Invalid query: {0}")]
     InvalidQuery(String),
+
+    #[error("Unsupported Action")]
+    Unsupported,
 }

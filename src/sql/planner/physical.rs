@@ -2,7 +2,7 @@ use miette::Result;
 
 use crate::{
     Value,
-    db::table::row::Row,
+    db::table::{Table, row::Row},
     sql::{
         analyzer::{AnalyzedExpression, schema::OutputSchema},
         catalog_context::CatalogContext,
@@ -51,6 +51,7 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                     schema,
                 }))
             }
+            _ => todo!(),
         }
     }
 }

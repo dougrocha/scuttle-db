@@ -1,7 +1,7 @@
 use std::io::{BufRead, Write, stdin, stdout};
 
 use miette::{IntoDiagnostic, Result, miette};
-use scuttle_db::{ColumnDef, DataType, Database, Row, Schema, Value};
+use scuttle_db::{ColumnConstraint, ColumnDef, DataType, Database, Row, Schema, Value};
 
 fn main() -> Result<()> {
     // Delete to start from fresh right now
@@ -28,22 +28,22 @@ fn main() -> Result<()> {
         ColumnDef {
             name: "id".to_string(),
             data_type: DataType::Int64,
-            nullable: false,
+            constraints: vec![ColumnConstraint::PrimaryKey],
         },
         ColumnDef {
             name: "name".to_string(),
             data_type: DataType::VarChar(255),
-            nullable: false,
+            constraints: vec![],
         },
         ColumnDef {
             name: "age".to_string(),
             data_type: DataType::Int64,
-            nullable: true,
+            constraints: vec![],
         },
         ColumnDef {
             name: "is_active".to_string(),
             data_type: DataType::Bool,
-            nullable: true,
+            constraints: vec![ColumnConstraint::Nullable],
         },
     ]);
 
@@ -64,7 +64,7 @@ fn main() -> Result<()> {
         Row::new(vec![
             Value::Int64(2),
             Value::Text("Bob".to_string()),
-            Value::Null,
+            Value::Int64(20),
             Value::Bool(false),
         ]),
     );

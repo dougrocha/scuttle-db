@@ -9,5 +9,9 @@ pub use core::{
 };
 pub use db::{
     database::Database,
-    table::{column_def::ColumnDef, row::Row, schema::Schema},
+    table::{
+        column_def::{ColumnConstraint, ColumnDef},
+        row::Row,
+        schema::Schema,
+    },
 };

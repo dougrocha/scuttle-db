@@ -1,6 +1,6 @@
 use miette::Result;
 
-use crate::{DatabaseError, core::types::Value};
+use crate::{DatabaseError, core::types::Value, db::table::column_def::ColumnConstraint};
 
 use super::{Table, row::Row, schema::Schema};
 
@@ -46,7 +46,7 @@ impl Table for TableDef {
 
             match value {
                 Value::Null => {
-                    if !column.nullable {
+                    if column.has_constraint(ColumnConstraint::NotNull) {
                         return Err(DatabaseError::TypeMismatch(format!(
                             "Column {} cannot be null",
                             column.name

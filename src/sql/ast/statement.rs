@@ -1,5 +1,5 @@
 use crate::{
-    core::types::DataType,
+    ColumnDef, Value,
     sql::ast::{expression::Expression, target::SelectList},
 };
 
@@ -11,7 +11,7 @@ pub enum Statement {
     Create(CreateStatement),
     Select(SelectStatement),
     Update,
-    Insert,
+    Insert(InsertStatement),
     Delete,
 }
 
@@ -31,21 +31,18 @@ pub struct FromClause {
 pub struct CreateStatement {
     pub table_name: String,
     pub if_not_exists: bool,
-    pub columns: Vec<ColumnDefinition>,
+    pub columns: Vec<ColumnDef>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ColumnDefinition {
-    pub name: String,
-    pub data_type: DataType,
-    pub constraints: Vec<ColumnConstraint>,
+#[derive(Debug, Clone)]
+pub struct InsertStatement {
+    pub table_name: String,
+    pub columns: Vec<String>,
+    pub source: InsertSource,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ColumnConstraint {
-    NotNull,
-    Nullable,
-    PrimaryKey,
-    Unique,
-    Default(Expression),
+#[derive(Debug, Clone)]
+pub enum InsertSource {
+    Values(Vec<Expression>),
+    Select(SelectStatement),
 }
