@@ -10,39 +10,30 @@ use crate::{
 pub enum Statement {
     Create(CreateStatement),
     Select(SelectStatement),
-    Update,
     Insert(InsertStatement),
-    Delete,
 }
 
 #[derive(Debug, Clone)]
 pub struct SelectStatement {
     pub select_list: SelectList,
-    pub from_clause: FromClause,
+    pub from_clause: From,
     pub where_clause: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FromClause {
-    pub table_name: String,
+pub struct From {
+    pub table: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct CreateStatement {
     pub table_name: String,
-    pub if_not_exists: bool,
     pub columns: Vec<ColumnDef>,
 }
 
 #[derive(Debug, Clone)]
 pub struct InsertStatement {
-    pub table_name: String,
+    pub table: String,
     pub columns: Option<Vec<String>>,
-    pub source: InsertSource,
-}
-
-#[derive(Debug, Clone)]
-pub enum InsertSource {
-    Values(Vec<Vec<Expression>>),
-    Select(SelectStatement),
+    pub source: Vec<Vec<Expression>>,
 }

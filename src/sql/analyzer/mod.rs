@@ -1,23 +1,20 @@
 use miette::{Result, miette};
 
 use crate::{
-    DataType, Value,
+    DataType, Schema, Value,
     db::table::{Table, column_def::ColumnConstraint},
     sql::{
-        analyzer::schema::{Field, OutputSchema},
         ast::{
             expression::Expression,
             operator::Operator,
             predicate::IsPredicate,
-            statement::{FromClause, InsertSource, InsertStatement, SelectStatement},
+            statement::{self, InsertStatement, SelectStatement},
             target::{SelectList, SelectTarget},
         },
         catalog_context::CatalogContext,
         planner::logical::LogicalPlan,
     },
 };
-
-pub(crate) mod schema;
 
 #[derive(Debug)]
 pub struct ColumnRef {
@@ -77,15 +74,15 @@ impl AnalyzedExpression {
     }
 
     /// Determines whether this expression can produce NULL given the input schema.
-    pub fn is_nullable(&self, input_schema: &OutputSchema) -> bool {
+    pub fn is_nullable(&self, input_schema: &Schema) -> bool {
         match self {
             // Literals are never null (null literals are rejected during analysis)
             AnalyzedExpression::Literal(_) => false,
             // Column nullability comes from the source field
             AnalyzedExpression::Column(col_ref, _) => input_schema
-                .fields
+                .columns
                 .get(col_ref.index)
-                .map(|f| f.is_nullable)
+                .map(|f| f.has_constraint(ColumnConstraint::Nullable))
                 .unwrap_or(true),
             // A binary expression is nullable if either operand is nullable
             AnalyzedExpression::BinaryExpr { left, right, .. } => {
@@ -112,27 +109,27 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             from_clause,
             where_clause,
         } = statement;
+        let schema = self.context.get_table(&from_clause.table)?.schema();
+
         let mut plan = self.analyze_from_clause(from_clause)?;
 
         if let Some(expr) = where_clause {
-            plan = self.analyze_where_clause(plan, &expr)?;
+            plan = self.analyze_where_clause(plan, &expr, schema)?;
         }
 
-        plan = self.analyze_projection_clause(plan, &select_list)?;
+        plan = self.analyze_projection_clause(plan, &select_list, schema)?;
 
         Ok(plan)
     }
 
     pub fn analyze_insert(&self, statement: InsertStatement) -> Result<LogicalPlan> {
         let InsertStatement {
-            table_name,
+            table: table_name,
             columns,
             source,
         } = statement;
         let table = self.context.get_table(&table_name)?;
         let schema = table.schema();
-
-        let mut fields = Vec::new();
 
         // Get columns that we are inserting
         let mut insert_cols = Vec::new();
@@ -144,51 +141,36 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             } else {
                 return Err(miette!("Column {:?} must be inserted.", col.name));
             }
-
-            fields.push(Field {
-                name: col.name.clone(),
-                alias: None,
-                data_type: col.data_type,
-                is_nullable: col.has_constraint(ColumnConstraint::Nullable),
-            });
         }
-        let output_schema = OutputSchema { fields };
 
-        let source = match source {
-            InsertSource::Values(expressions) => {
-                let analyzed_values: Vec<Vec<AnalyzedExpression>> = expressions
-                    .iter()
-                    .map(|expr| {
-                        let analyzed_vals: Vec<AnalyzedExpression> = expr
-                            .iter()
-                            .map(|expr| self.bind_expression(expr, &output_schema))
-                            .collect::<Result<Vec<_>>>()?;
+        let source = {
+            let analyzed_values: Vec<Vec<AnalyzedExpression>> = source
+                .iter()
+                .map(|expr| {
+                    let analyzed_vals: Vec<AnalyzedExpression> = expr
+                        .iter()
+                        .map(|expr| self.bind_expression(expr, schema))
+                        .collect::<Result<Vec<_>>>()?;
 
-                        for (insert_col, analyzed_val) in
-                            insert_cols.iter().zip(analyzed_vals.iter())
-                        {
-                            if !DataType::can_coerce(insert_col.data_type, analyzed_val.get_type())
-                            {
-                                return Err(miette!(
-                                    "Tried to insert ({:?}, {:?}) into column ({:?}, {:?})",
-                                    analyzed_val,
-                                    analyzed_val.get_type(),
-                                    insert_col.name,
-                                    insert_col.data_type
-                                ));
-                            }
+                    for (insert_col, analyzed_val) in insert_cols.iter().zip(analyzed_vals.iter()) {
+                        if !DataType::can_coerce(insert_col.data_type, analyzed_val.get_type()) {
+                            return Err(miette!(
+                                "Tried to insert ({:?}, {:?}) into column ({:?}, {:?})",
+                                analyzed_val,
+                                analyzed_val.get_type(),
+                                insert_col.name,
+                                insert_col.data_type
+                            ));
                         }
+                    }
 
-                        Ok(analyzed_vals)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                    Ok(analyzed_vals)
+                })
+                .collect::<Result<Vec<_>>>()?;
 
-                LogicalPlan::Values {
-                    expressions: analyzed_values,
-                    schema: output_schema,
-                }
+            LogicalPlan::Values {
+                expressions: analyzed_values,
             }
-            InsertSource::Select(_select_statement) => todo!(),
         };
 
         Ok(LogicalPlan::Insert {
@@ -199,27 +181,9 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         })
     }
 
-    fn analyze_from_clause(&self, from_clause: FromClause) -> Result<LogicalPlan> {
-        let physical_schema = self.context.get_table(&from_clause.table_name)?.schema();
-
-        let virtual_fields = physical_schema
-            .columns
-            .iter()
-            .map(|col| Field {
-                name: col.name.clone(),
-                alias: None,
-                data_type: col.data_type,
-                is_nullable: col.has_constraint(ColumnConstraint::Nullable),
-            })
-            .collect();
-
-        let resolved_schema = OutputSchema {
-            fields: virtual_fields,
-        };
-
+    fn analyze_from_clause(&self, from_clause: statement::From) -> Result<LogicalPlan> {
         Ok(LogicalPlan::Scan {
-            table_name: from_clause.table_name.to_string(),
-            schema: resolved_schema,
+            table_name: from_clause.table.to_string(),
         })
     }
 
@@ -227,16 +191,15 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         &self,
         input_plan: LogicalPlan,
         select_list: &SelectList,
+        schema: &Schema,
     ) -> Result<LogicalPlan> {
-        let input_schema = input_plan.output_schema();
-
         let mut analyzed_exprs = Vec::new();
         let mut output_fields = Vec::new();
 
         for item in select_list.iter() {
             match item {
                 SelectTarget::Star => {
-                    for (i, field) in input_schema.fields.iter().enumerate() {
+                    for (i, field) in schema.columns.iter().enumerate() {
                         let expr = AnalyzedExpression::Column(
                             ColumnRef {
                                 index: i,
@@ -248,18 +211,10 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                         output_fields.push(field.clone());
                     }
                 }
-                SelectTarget::Expression { expr, alias } => {
-                    let analyzed_expr = self.bind_expression(expr, input_schema)?;
-
-                    let field = Field {
-                        name: expr.to_column_name().to_string(),
-                        alias: alias.as_ref().map(|a| a.to_string()),
-                        data_type: analyzed_expr.get_type(),
-                        is_nullable: analyzed_expr.is_nullable(input_schema),
-                    };
+                SelectTarget::Expression { expr, alias: _ } => {
+                    let analyzed_expr = self.bind_expression(expr, schema)?;
 
                     analyzed_exprs.push(analyzed_expr);
-                    output_fields.push(field);
                 }
             }
         }
@@ -267,9 +222,6 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         Ok(LogicalPlan::Projection {
             input: Box::new(input_plan),
             expressions: analyzed_exprs,
-            schema: OutputSchema {
-                fields: output_fields,
-            },
         })
     }
 
@@ -277,9 +229,8 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         &self,
         input_plan: LogicalPlan,
         where_expr: &Expression,
+        schema: &Schema,
     ) -> Result<LogicalPlan> {
-        let schema = input_plan.output_schema();
-
         let analyzed_expr = self.bind_expression(where_expr, schema)?;
 
         Ok(LogicalPlan::Filter {
@@ -291,7 +242,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
     pub fn bind_expression(
         &self,
         expr: &Expression,
-        input_schema: &OutputSchema,
+        input_schema: &Schema,
     ) -> Result<AnalyzedExpression> {
         match expr {
             Expression::BinaryOp { left, op, right } => {
@@ -309,9 +260,9 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             }
             Expression::Identifier(name) => {
                 let index = input_schema
-                    .find_column(name)
+                    .get_column_index(name)
                     .ok_or_else(|| miette!("Column {name} could not be found"))?;
-                let field = &input_schema.fields[index];
+                let field = &input_schema.columns[index];
 
                 Ok(AnalyzedExpression::Column(
                     ColumnRef {

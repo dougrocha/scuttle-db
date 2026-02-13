@@ -6,13 +6,15 @@ use std::{
 use miette::Result;
 
 use crate::{
-    ColumnConstraint, DatabaseError, Value,
+    DatabaseError, Value,
     db::table::{Table, row::Row, schema::Schema, table_def::TableDef},
     sql::{
-        analyzer::{AnalyzedExpression, Analyzer, schema::OutputSchema},
-        ast::statement::{self, Statement},
+        analyzer::{AnalyzedExpression, Analyzer},
+        ast::{
+            parser::SqlParser,
+            statement::{self, Statement},
+        },
         catalog_context::CatalogContext,
-        parser::SqlParser,
         planner::{logical::LogicalPlan, physical::PhysicalPlanner},
     },
     storage::{
@@ -26,8 +28,6 @@ use crate::{
 /// Contains the table metadata and the result rows.
 #[derive(Debug)]
 pub struct QueryResponse {
-    pub schema: OutputSchema,
-
     /// The rows returned by the query.
     pub rows: Vec<Row>,
 }
@@ -276,10 +276,7 @@ impl Database {
 
         self.create_table(&create_stmt.table_name, schema)?;
 
-        Ok(QueryResponse {
-            schema: OutputSchema { fields: vec![] },
-            rows: vec![],
-        })
+        Ok(QueryResponse { rows: vec![] })
     }
 
     fn handle_select(&mut self, select_stmt: statement::SelectStatement) -> Result<QueryResponse> {
@@ -302,9 +299,8 @@ impl Database {
             batches.push(batch);
         }
 
-        let schema = executor.schema().clone(); // ONE clone
         let rows = batches.into_iter().flat_map(|b| b.rows).collect();
-        Ok(QueryResponse { schema, rows })
+        Ok(QueryResponse { rows })
     }
 
     fn handle_insert(&mut self, insert_stmt: statement::InsertStatement) -> Result<QueryResponse> {
@@ -346,9 +342,6 @@ impl Database {
             unreachable!("")
         }
 
-        Ok(QueryResponse {
-            schema: OutputSchema { fields: vec![] },
-            rows: vec![],
-        })
+        Ok(QueryResponse { rows: vec![] })
     }
 }

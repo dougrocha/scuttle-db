@@ -111,7 +111,6 @@ fn main() -> Result<()> {
                 continue;
             }
         };
-        let schema = query_response.schema;
         let rows = query_response.rows;
 
         if rows.is_empty() {
@@ -120,28 +119,13 @@ fn main() -> Result<()> {
             continue;
         }
 
-        stdout
-            .write_all(format!("{: <8}", "Row #").as_bytes())
-            .into_diagnostic()?;
-        for col in &schema.fields {
-            stdout
-                .write_all(
-                    format!(" | {: <12}", col.alias.clone().unwrap_or(col.name.clone()),)
-                        .as_bytes(),
-                )
-                .into_diagnostic()?;
-        }
-        stdout.write_all(b"\n").into_diagnostic()?;
-        let separator_len = 8 + (schema.fields.len() * 15);
+        let separator_len = 8 + (rows[0].values.len() * 15);
         stdout
             .write_all(&"-".repeat(separator_len).into_bytes())
             .into_diagnostic()?;
         stdout.write_all(b"\n").into_diagnostic()?;
 
-        for (idx, row) in rows.iter().enumerate() {
-            stdout
-                .write_all(format!("{: <8}", idx).as_bytes())
-                .into_diagnostic()?;
+        for row in rows.iter() {
             for value in &row.values {
                 stdout
                     .write_all(format!(" | {: <12}", value.to_string()).as_bytes())
@@ -149,6 +133,11 @@ fn main() -> Result<()> {
             }
             stdout.write_all(b"\n").into_diagnostic()?;
         }
+
+        stdout
+            .write_all(&"-".repeat(separator_len).into_bytes())
+            .into_diagnostic()?;
+        stdout.write_all(b"\n").into_diagnostic()?;
 
         stdout.flush().into_diagnostic()?;
         buf.clear();

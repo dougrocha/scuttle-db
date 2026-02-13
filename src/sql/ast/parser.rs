@@ -11,10 +11,7 @@ use crate::{
             keyword::Keyword,
             operator::Operator,
             predicate::IsPredicate,
-            statement::{
-                CreateStatement, FromClause, InsertSource, InsertStatement, SelectStatement,
-                Statement,
-            },
+            statement::{CreateStatement, From, InsertStatement, SelectStatement, Statement},
             target::{SelectList, SelectTarget},
         },
         lexer::{Lexer, Token},
@@ -71,8 +68,8 @@ impl<'src> SqlParser<'src> {
 
         Ok(Statement::Select(SelectStatement {
             select_list,
-            from_clause: FromClause {
-                table_name: table_name.to_string(),
+            from_clause: From {
+                table: table_name.to_string(),
             },
             where_clause,
         }))
@@ -96,7 +93,6 @@ impl<'src> SqlParser<'src> {
 
         Ok(Statement::Create(CreateStatement {
             table_name: table_name.to_string(),
-            if_not_exists: false,
             columns,
         }))
     }
@@ -119,50 +115,37 @@ impl<'src> SqlParser<'src> {
             columns = Some(cols);
         }
 
-        let insert_source = {
-            if self.peek_keyword(Keyword::Values) {
-                self.expect_keyword(Keyword::Values)?;
+        let mut values = Vec::new();
+        if self.peek_keyword(Keyword::Values) {
+            self.expect_keyword(Keyword::Values)?;
 
-                let mut rows = Vec::new();
-                loop {
-                    let mut row_vals = Vec::new();
-                    if self.consume_if(Token::LeftParen) {
-                        while !self.consume_if(Token::RightParen) {
-                            self.consume_if(Token::Comma);
+            loop {
+                let mut row_vals = Vec::new();
+                if self.consume_if(Token::LeftParen) {
+                    while !self.consume_if(Token::RightParen) {
+                        self.consume_if(Token::Comma);
 
-                            row_vals.push(self.parse_primary()?);
-                        }
-                    }
-
-                    rows.push(row_vals);
-
-                    if !self.consume_if(Token::Comma) {
-                        break;
+                        row_vals.push(self.parse_primary()?);
                     }
                 }
 
-                InsertSource::Values(rows)
-            } else if self.peek_keyword(Keyword::Select) {
-                self.expect_keyword(Keyword::Select)?;
+                values.push(row_vals);
 
-                let stmt = self.parse_select_statement()?;
-                if let Statement::Select(select_stmt) = stmt {
-                    InsertSource::Select(select_stmt)
-                } else {
-                    unreachable!("Expected SELECT statement")
+                if !self.consume_if(Token::Comma) {
+                    break;
                 }
-            } else {
-                return Err(miette!(
-                    "Expected either VALUES or SELECT, found {:?}",
-                    self.peek_token()?,
-                ));
             }
-        };
+        } else {
+            return Err(miette!(
+                "Expected either VALUES or SELECT, found {:?}",
+                self.peek_token()?,
+            ));
+        }
 
         Ok(Statement::Insert(InsertStatement {
-            table_name: table_name.to_string(),
+            table: table_name.to_string(),
             columns,
-            source: insert_source,
+            source: values,
         }))
     }
 
@@ -225,7 +208,7 @@ impl<'src> SqlParser<'src> {
     fn parse_primary(&mut self) -> Result<Expression> {
         let expr = match self.next_token()? {
             Token::Keyword(kw) if kw.is_bool_literal() => {
-                Expression::Literal(Value::Bool(matches!(kw, Keyword::True)))
+                Expression::Literal(Value::from(matches!(kw, Keyword::True)))
             }
             Token::Integer(i) => Expression::Literal(Value::Int64(i)),
             Token::Float(f) => Expression::Literal(Value::Float64(f)),
@@ -410,13 +393,6 @@ impl<'src> SqlParser<'src> {
         }
     }
 
-    fn expect_float(&mut self) -> Result<f64> {
-        match self.next_token()? {
-            Token::Float(n) => Ok(n),
-            other => Err(miette!("Expected integer, found {:?}", other)),
-        }
-    }
-
     fn expect_keyword(&mut self, expected: Keyword) -> Result<()> {
         match self.next_token()? {
             Token::Keyword(kw) if kw == expected => Ok(()),
@@ -457,8 +433,8 @@ mod tests {
                 assert_eq!(select_list.0, vec![SelectTarget::Star]);
                 assert_eq!(
                     from_clause,
-                    FromClause {
-                        table_name: "users".to_string(),
+                    From {
+                        table: "users".to_string(),
                     }
                 );
                 assert!(where_clause.is_none());
@@ -709,11 +685,9 @@ mod tests {
         ) {
             Statement::Create(CreateStatement {
                 table_name,
-                if_not_exists,
                 columns,
             }) => {
                 assert_eq!(table_name, "users");
-                assert!(!if_not_exists);
                 assert_eq!(
                     columns,
                     vec![
@@ -743,18 +717,19 @@ mod tests {
     fn test_parse_insert_single_row() {
         match parse("INSERT INTO users (id, name) VALUES (1, 'Alice')") {
             Statement::Insert(InsertStatement {
-                table_name,
+                table: table_name,
                 columns,
                 source,
             }) => {
                 assert_eq!(table_name, "users");
                 assert_eq!(columns.unwrap(), vec!["id".to_string(), "name".to_string()]);
-                match source {
-                    InsertSource::Values { .. } => {
-                        // Values plan is validated during analysis
-                    }
-                    _ => panic!("Expected Values source"),
-                }
+                assert_eq!(
+                    source,
+                    vec![vec![
+                        Expression::Literal(Value::from(1)),
+                        Expression::Literal(Value::from("Alice")),
+                    ]]
+                );
             }
             _ => panic!("Expected Insert statement"),
         }
@@ -764,18 +739,25 @@ mod tests {
     fn test_parse_insert_multiple_rows() {
         match parse("INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob')") {
             Statement::Insert(InsertStatement {
-                table_name,
+                table: table_name,
                 columns,
                 source,
             }) => {
                 assert_eq!(table_name, "users");
                 assert_eq!(columns.unwrap(), vec!["id".to_string(), "name".to_string()]);
-                match source {
-                    InsertSource::Values { .. } => {
-                        // Values plan is validated during analysis
-                    }
-                    _ => panic!("Expected Values source"),
-                }
+                assert_eq!(
+                    source,
+                    vec![
+                        vec![
+                            Expression::Literal(Value::from(1)),
+                            Expression::Literal(Value::from("Alice")),
+                        ],
+                        vec![
+                            Expression::Literal(Value::from(2)),
+                            Expression::Literal(Value::from("Bob")),
+                        ]
+                    ]
+                );
             }
             _ => panic!("Expected Insert statement"),
         }
@@ -785,17 +767,21 @@ mod tests {
     fn test_parse_insert_all_columns() {
         match parse("INSERT INTO users VALUES (1, 'Alice', true)") {
             Statement::Insert(InsertStatement {
-                table_name,
+                table: table_name,
                 columns,
                 source,
             }) => {
                 assert_eq!(table_name, "users");
                 // When columns are not specified, they should be empty and inferred during analysis
                 assert!(columns.is_none());
-                match source {
-                    InsertSource::Values { .. } => {}
-                    _ => panic!("Expected Values source"),
-                }
+                assert_eq!(
+                    source,
+                    vec![vec![
+                        Expression::Literal(Value::from(1)),
+                        Expression::Literal(Value::from("Alice")),
+                        Expression::Literal(Value::from(true)),
+                    ]]
+                );
             }
             _ => panic!("Expected Insert statement"),
         }
@@ -805,7 +791,7 @@ mod tests {
     fn test_parse_insert_with_different_types() {
         match parse("INSERT INTO users (id, name, active) VALUES (42, 'Charlie', false)") {
             Statement::Insert(InsertStatement {
-                table_name,
+                table: table_name,
                 columns,
                 ..
             }) => {

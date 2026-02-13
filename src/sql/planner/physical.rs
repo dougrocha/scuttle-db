@@ -2,9 +2,9 @@ use miette::Result;
 
 use crate::{
     Value,
-    db::table::{Table, row::Row},
+    db::table::row::Row,
     sql::{
-        analyzer::{AnalyzedExpression, schema::OutputSchema},
+        analyzer::AnalyzedExpression,
         catalog_context::CatalogContext,
         evaluator::{Evaluator, expression::ExpressionEvaluator, predicate::PredicateEvaluator},
         planner::logical::LogicalPlan,
@@ -25,10 +25,10 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
         analyzed_plan: LogicalPlan,
     ) -> Result<Box<dyn ExecutionNode>> {
         match analyzed_plan {
-            LogicalPlan::Scan { table_name, schema } => {
+            LogicalPlan::Scan { table_name } => {
                 let data = self.context.database.get_rows(&table_name)?;
 
-                Ok(Box::new(ScanExec { schema, data }))
+                Ok(Box::new(ScanExec { data }))
             }
             LogicalPlan::Filter { input, condition } => {
                 let child_node = self.create_physical_plan(*input)?;
@@ -38,17 +38,12 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                     expr: condition,
                 }))
             }
-            LogicalPlan::Projection {
-                input,
-                expressions,
-                schema,
-            } => {
+            LogicalPlan::Projection { input, expressions } => {
                 let child_node = self.create_physical_plan(*input)?;
 
                 Ok(Box::new(ProjectionExec {
                     child: child_node,
                     exprs: expressions,
-                    schema,
                 }))
             }
             _ => todo!(),
@@ -62,21 +57,14 @@ pub struct RecordBatch {
 }
 
 pub trait ExecutionNode: std::fmt::Debug {
-    fn schema(&self) -> &OutputSchema;
-
     fn next(&mut self) -> Result<Option<RecordBatch>>;
 }
 
 #[derive(Debug)]
 pub struct ScanExec {
-    schema: OutputSchema,
     data: Vec<Row>,
 }
 impl ExecutionNode for ScanExec {
-    fn schema(&self) -> &OutputSchema {
-        &self.schema
-    }
-
     fn next(&mut self) -> Result<Option<RecordBatch>> {
         let batch_size = 1024;
 
@@ -94,13 +82,8 @@ impl ExecutionNode for ScanExec {
 pub struct ProjectionExec {
     child: Box<dyn ExecutionNode>,
     exprs: Vec<AnalyzedExpression>,
-    schema: OutputSchema,
 }
 impl ExecutionNode for ProjectionExec {
-    fn schema(&self) -> &OutputSchema {
-        &self.schema
-    }
-
     fn next(&mut self) -> Result<Option<RecordBatch>> {
         let Some(batch) = self.child.next()? else {
             return Ok(None);
@@ -135,10 +118,6 @@ pub struct FilterExec {
     expr: AnalyzedExpression,
 }
 impl ExecutionNode for FilterExec {
-    fn schema(&self) -> &OutputSchema {
-        self.child.schema()
-    }
-
     fn next(&mut self) -> Result<Option<RecordBatch>> {
         let evaluator = PredicateEvaluator;
 
