@@ -110,9 +110,6 @@ impl Database {
     /// continues (re-creating the table in memory).
     pub fn create_table(&mut self, name: &str, schema: Schema) -> Result<(), DatabaseError> {
         if self.table_exists(name) {
-            // return Err(DatabaseError::InvalidQuery(format!(
-            //     "Table {name} already exists"
-            // )));
             // Eventually save table information in a catalog table,
             // but for now just load the table with the schema normally
             println!("Table {name} already exists");

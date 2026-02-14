@@ -13,3 +13,11 @@ categories = ["database-implementations", "development-tools"]
 miette = { version = "7.6.0", features = ["fancy"] }
 strum = { version = "0.27", features = ["derive"] }
 thiserror = "2.0.18"
+
+[[bin]]
+name = "test-repl"
+path = "src/bin/test-repl.rs"
+
+[[bin]]
+name = "scuttle-db"
+path = "src/bin/scuttle.rs"
