@@ -7,7 +7,10 @@ use miette::Result;
 
 use crate::{
     DatabaseError, Value,
-    db::table::{Table, row::Row, schema::Schema, table_def::TableDef},
+    db::{
+        catalog::system_catalog::SystemCatalog,
+        table::{Table, row::Row, schema::Schema, table_def::TableDef},
+    },
     sql::{
         analyzer::{AnalyzedExpression, Analyzer},
         ast::{
@@ -58,6 +61,7 @@ pub struct Database {
     ///
     /// Handles reading/writing data pages and caching them for performance.
     pub buffer_manager: BufferPool,
+    pub catalog: SystemCatalog,
 
     /// Directory where database files are stored.
     data_directory: PathBuf,
@@ -76,6 +80,7 @@ impl Database {
         Self {
             tables: std::collections::BTreeMap::default(),
             buffer_manager: BufferPool::new(),
+            catalog: SystemCatalog::new(),
 
             data_directory: data_directory.as_ref().to_path_buf(),
         }
@@ -88,6 +93,20 @@ impl Database {
     /// - Setting up metadata tables
     /// - Recovering from crash (WAL replay)
     pub fn initialize(&mut self) -> Result<()> {
+        let path = self
+            .data_directory
+            .join(format!("{}.table", self.catalog.name()));
+
+        if Path::new(&path).exists() {
+            let tables = self.catalog.load_all_tables(&mut self.buffer_manager)?;
+
+            for (name, schema) in tables {
+                self.tables.insert(name.clone(), TableDef { name, schema });
+            }
+        } else {
+            println!("No catalog exists. Creates when adding a table");
+        }
+
         Ok(())
     }
 
@@ -113,10 +132,17 @@ impl Database {
             // Eventually save table information in a catalog table,
             // but for now just load the table with the schema normally
             println!("Table {name} already exists");
+
+            return Ok(());
         }
+
+        let _ = self
+            .catalog
+            .save_table_metadata(&mut self.buffer_manager, name, &schema, 0);
 
         let table = TableDef::new(name.to_string(), schema);
         self.tables.insert(name.to_string(), table);
+
         Ok(())
     }
 

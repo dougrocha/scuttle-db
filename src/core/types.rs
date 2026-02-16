@@ -1,8 +1,10 @@
+use serde::{Deserialize, Serialize};
+
 /// SQL data types supported by Scuttle DB.
 ///
 /// These types define the kind of data a column can hold and how
 /// it's encoded/decoded in storage.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub enum DataType {
     /// 64-bit signed integer.
     ///

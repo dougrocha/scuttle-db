@@ -1,9 +1,11 @@
+use serde::{Deserialize, Serialize};
+
 use crate::{core::types::DataType, sql::ast::expression::Expression};
 
 /// Definition of a single column in a table schema.
 ///
 /// Specifies the column name, data type, and whether NULL values are allowed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ColumnDef {
     pub name: String,
     pub data_type: DataType,
@@ -17,6 +19,26 @@ impl ColumnDef {
             name: name.to_owned(),
             data_type,
             constraints: vec![ColumnConstraint::NotNull],
+        }
+    }
+
+    pub fn no_constraints(name: &str, data_type: DataType) -> Self {
+        Self {
+            name: name.to_owned(),
+            data_type,
+            constraints: vec![],
+        }
+    }
+
+    pub fn with_constraints(
+        name: &str,
+        data_type: DataType,
+        constraints: Vec<ColumnConstraint>,
+    ) -> Self {
+        Self {
+            name: name.to_owned(),
+            data_type,
+            constraints,
         }
     }
 
@@ -37,11 +59,11 @@ impl ColumnDef {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum ColumnConstraint {
     NotNull,
     Nullable,
     PrimaryKey,
     Unique,
-    Default(Expression),
+    Default(()),
 }

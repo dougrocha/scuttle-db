@@ -1,13 +1,9 @@
 use std::io::{BufRead, Write, stdin, stdout};
 
 use miette::{IntoDiagnostic, Result, miette};
-use scuttle_db::{ColumnConstraint, ColumnDef, DataType, Database, Row, Schema, Value};
+use scuttle_db::Database;
 
 fn main() -> Result<()> {
-    // Delete to start from fresh right now
-    std::fs::remove_dir_all("./db").ok();
-    println!("REMOVING BG!");
-
     miette::set_hook(Box::new(|_| {
         Box::new(
             miette::MietteHandlerOpts::new()
@@ -24,60 +20,6 @@ fn main() -> Result<()> {
 
     let mut db = Database::new("./db");
     db.initialize().expect("Failed to init catalog");
-
-    let schema = Schema::new(vec![
-        ColumnDef {
-            name: "id".to_string(),
-            data_type: DataType::Int64,
-            constraints: vec![ColumnConstraint::PrimaryKey],
-        },
-        ColumnDef {
-            name: "name".to_string(),
-            data_type: DataType::VarChar(255),
-            constraints: vec![],
-        },
-        ColumnDef {
-            name: "age".to_string(),
-            data_type: DataType::Int64,
-            constraints: vec![],
-        },
-        ColumnDef {
-            name: "is_active".to_string(),
-            data_type: DataType::Bool,
-            constraints: vec![ColumnConstraint::Nullable],
-        },
-    ]);
-
-    let _ = db.create_table("users", schema.clone());
-    let _ = db.create_table("customers", schema);
-
-    let _ = db.insert_row(
-        "users",
-        Row::new(vec![
-            Value::Int64(1),
-            Value::Text("Alice".to_string()),
-            Value::Int64(30),
-            Value::Null,
-        ]),
-    );
-    let _ = db.insert_row(
-        "users",
-        Row::new(vec![
-            Value::Int64(2),
-            Value::Text("Bob".to_string()),
-            Value::Int64(20),
-            Value::Bool(false),
-        ]),
-    );
-    let _ = db.insert_row(
-        "users",
-        Row::new(vec![
-            Value::Int64(3),
-            Value::Text("Charlie".to_string()),
-            Value::Int64(35),
-            Value::Bool(true),
-        ]),
-    );
 
     println!("Database created successfully!");
     println!("Tables: {:?}", db.tables.keys().collect::<Vec<_>>());

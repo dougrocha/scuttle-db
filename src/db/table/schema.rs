@@ -1,4 +1,5 @@
 use miette::{Result, miette};
+use serde::{Deserialize, Serialize};
 
 use super::{column_def::ColumnDef, row::Row};
 use crate::{Value, core::types::DataType, db::null_bitmap::NullBitmap};
@@ -7,7 +8,7 @@ use crate::{Value, core::types::DataType, db::null_bitmap::NullBitmap};
 ///
 /// A schema is an ordered list of column definitions. All rows in a table
 /// must conform to the table's schema.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Schema {
     /// The ordered list of column definitions.
     pub columns: Vec<ColumnDef>,
