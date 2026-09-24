@@ -103,8 +103,8 @@ pub struct Database {
     pub buffer_manager: BufferPool,
     pub catalog: SystemCatalog,
 
-    /// Directory where database files are stored.
-    data_directory: PathBuf,
+    /// Directory where database files are stored. `None` for an in-memory database.
+    data_directory: Option<PathBuf>,
 }
 
 impl Database {
@@ -122,7 +122,35 @@ impl Database {
             buffer_manager: BufferPool::new(&data_dir),
             catalog: SystemCatalog::new(),
 
-            data_directory: data_directory.as_ref().to_path_buf(),
+            data_directory: Some(data_dir),
+        }
+    }
+
+    /// Creates a database that keeps all data in memory and never touches the disk.
+    ///
+    /// Pages stay in the buffer pool and are never written out, so everything is
+    /// lost when the database is dropped. Used when running in the browser through
+    /// WebAssembly, where there is no file system.
+    ///
+    /// # Returns
+    ///
+    /// An empty database with no tables. [`Database::initialize`] is a no-op for it.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use scuttle_db::Database;
+    ///
+    /// let mut db = Database::in_memory();
+    /// db.execute_query("CREATE TABLE users (name TEXT)").unwrap();
+    /// ```
+    pub fn in_memory() -> Self {
+        Self {
+            tables: std::collections::BTreeMap::default(),
+            buffer_manager: BufferPool::in_memory(),
+            catalog: SystemCatalog::new(),
+
+            data_directory: None,
         }
     }
 
@@ -133,9 +161,10 @@ impl Database {
     /// - Setting up metadata tables
     /// - Recovering from crash (WAL replay)
     pub fn initialize(&mut self) -> Result<()> {
-        let path = self
-            .data_directory
-            .join(format!("{}.table", self.catalog.name()));
+        let Some(data_directory) = &self.data_directory else {
+            return Ok(());
+        };
+        let path = data_directory.join(format!("{}.table", self.catalog.name()));
 
         if Path::new(&path).exists() {
             let tables = self.catalog.load_all_tables(&mut self.buffer_manager)?;
@@ -157,8 +186,9 @@ impl Database {
         if self.tables.contains_key(name) {
             true
         } else {
-            let table_path = self.data_directory.join(format!("{name}.table"));
-            table_path.exists()
+            self.data_directory
+                .as_ref()
+                .is_some_and(|dir| dir.join(format!("{name}.table")).exists())
         }
     }
 
@@ -210,8 +240,11 @@ impl Database {
     /// - Deserialize table metadata
     /// - Load schemas into memory
     pub fn load_from_file(&mut self) -> Result<(), DatabaseError> {
-        std::fs::create_dir_all(&self.data_directory)?;
-        let entries = std::fs::read_dir(&self.data_directory)?;
+        let Some(data_directory) = &self.data_directory else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(data_directory)?;
+        let entries = std::fs::read_dir(data_directory)?;
 
         for entry in entries {
             let entry = entry?;
