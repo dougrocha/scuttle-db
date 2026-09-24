@@ -9,3 +9,6 @@ example_dbs/
 # Test databases (only at root, not src/db/*)
 /db
 *.db
+
+# local project instructions
+/CLAUDE.local.md
