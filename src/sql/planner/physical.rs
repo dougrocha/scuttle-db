@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use miette::Result;
 
 use crate::{
@@ -6,8 +8,11 @@ use crate::{
     sql::{
         analyzer::AnalyzedExpression,
         catalog_context::CatalogContext,
-        evaluator::{Evaluator, expression::ExpressionEvaluator, predicate::PredicateEvaluator},
-        planner::logical::LogicalPlan,
+        evaluator::{
+            Evaluator, aggregate::Accumulator, compare_values, expression::ExpressionEvaluator,
+            predicate::PredicateEvaluator,
+        },
+        planner::logical::{AggregateCall, LogicalPlan, SortKey},
     },
 };
 
@@ -38,12 +43,50 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                     expr: condition,
                 }))
             }
-            LogicalPlan::Projection { input, expressions } => {
+            LogicalPlan::Projection {
+                input, expressions, ..
+            } => {
                 let child_node = self.create_physical_plan(*input)?;
 
                 Ok(Box::new(ProjectionExec {
                     child: child_node,
                     exprs: expressions,
+                }))
+            }
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggregates,
+            } => {
+                let child_node = self.create_physical_plan(*input)?;
+
+                Ok(Box::new(AggregateExec {
+                    child: child_node,
+                    group_by,
+                    aggregates,
+                    done: false,
+                }))
+            }
+            LogicalPlan::Sort { input, keys } => {
+                let child_node = self.create_physical_plan(*input)?;
+
+                Ok(Box::new(SortExec {
+                    child: child_node,
+                    keys,
+                    done: false,
+                }))
+            }
+            LogicalPlan::Limit {
+                input,
+                limit,
+                offset,
+            } => {
+                let child_node = self.create_physical_plan(*input)?;
+
+                Ok(Box::new(LimitExec {
+                    child: child_node,
+                    remaining: limit,
+                    to_skip: offset,
                 }))
             }
             _ => todo!(),
@@ -140,5 +183,173 @@ impl ExecutionNode for FilterExec {
         }
 
         Ok(None)
+    }
+}
+
+/// Groups all input rows and emits one row per group.
+///
+/// Blocking: it has to see every input row before emitting anything.
+#[derive(Debug)]
+pub struct AggregateExec {
+    child: Box<dyn ExecutionNode>,
+    group_by: Vec<AnalyzedExpression>,
+    aggregates: Vec<AggregateCall>,
+    done: bool,
+}
+impl AggregateExec {
+    fn new_accumulators(&self) -> Vec<Accumulator> {
+        self.aggregates
+            .iter()
+            .map(|call| Accumulator::new(call.function))
+            .collect()
+    }
+}
+impl ExecutionNode for AggregateExec {
+    fn next(&mut self) -> Result<Option<RecordBatch>> {
+        if self.done {
+            return Ok(None);
+        }
+        self.done = true;
+
+        let evaluator = ExpressionEvaluator;
+
+        // Groups in first-seen order. `Value` can't be hashed (f64), so groups are
+        // found with a linear search, which is fine at this scale.
+        let mut groups: Vec<(Vec<Value>, Vec<Accumulator>)> = Vec::new();
+
+        while let Some(batch) = self.child.next()? {
+            for row in batch.rows {
+                let key = self
+                    .group_by
+                    .iter()
+                    .map(|expr| evaluator.evaluate(expr, &row))
+                    .collect::<Result<Vec<_>>>()?;
+
+                let index = match groups.iter().position(|(k, _)| *k == key) {
+                    Some(index) => index,
+                    None => {
+                        groups.push((key, self.new_accumulators()));
+                        groups.len() - 1
+                    }
+                };
+
+                for (acc, call) in groups[index].1.iter_mut().zip(&self.aggregates) {
+                    let value = call
+                        .arg
+                        .as_ref()
+                        .map(|arg| evaluator.evaluate(arg, &row))
+                        .transpose()?;
+                    acc.update(value)?;
+                }
+            }
+        }
+
+        // Without GROUP BY there is always exactly one group, even over zero rows
+        // (so `SELECT COUNT(*)` on an empty table returns 0, not nothing).
+        if groups.is_empty() && self.group_by.is_empty() {
+            groups.push((Vec::new(), self.new_accumulators()));
+        }
+
+        let rows = groups
+            .into_iter()
+            .map(|(mut values, accumulators)| {
+                values.extend(accumulators.into_iter().map(Accumulator::finish));
+                Row::new(values)
+            })
+            .collect();
+
+        Ok(Some(RecordBatch { rows }))
+    }
+}
+
+/// Sorts all input rows by the ORDER BY keys.
+///
+/// Blocking, and stable: rows with equal keys keep their input order.
+#[derive(Debug)]
+pub struct SortExec {
+    child: Box<dyn ExecutionNode>,
+    keys: Vec<SortKey>,
+    done: bool,
+}
+impl ExecutionNode for SortExec {
+    fn next(&mut self) -> Result<Option<RecordBatch>> {
+        if self.done {
+            return Ok(None);
+        }
+        self.done = true;
+
+        let evaluator = ExpressionEvaluator;
+
+        let mut keyed_rows = Vec::new();
+        while let Some(batch) = self.child.next()? {
+            for row in batch.rows {
+                let key = self
+                    .keys
+                    .iter()
+                    .map(|key| evaluator.evaluate(&key.expr, &row))
+                    .collect::<Result<Vec<_>>>()?;
+                keyed_rows.push((key, row));
+            }
+        }
+
+        keyed_rows.sort_by(|(a, _), (b, _)| {
+            for ((a, b), key) in a.iter().zip(b).zip(&self.keys) {
+                let ordering = compare_values(a, b);
+                let ordering = if key.descending {
+                    ordering.reverse()
+                } else {
+                    ordering
+                };
+
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+            Ordering::Equal
+        });
+
+        Ok(Some(RecordBatch {
+            rows: keyed_rows.into_iter().map(|(_, row)| row).collect(),
+        }))
+    }
+}
+
+/// Skips the first `to_skip` rows, then passes through at most `remaining` rows.
+#[derive(Debug)]
+pub struct LimitExec {
+    child: Box<dyn ExecutionNode>,
+
+    /// Rows still allowed through; `None` means no LIMIT
+    remaining: Option<u64>,
+
+    /// OFFSET rows not skipped yet
+    to_skip: u64,
+}
+impl ExecutionNode for LimitExec {
+    fn next(&mut self) -> Result<Option<RecordBatch>> {
+        loop {
+            if self.remaining == Some(0) {
+                return Ok(None);
+            }
+
+            let Some(mut batch) = self.child.next()? else {
+                return Ok(None);
+            };
+
+            let skip = self.to_skip.min(batch.rows.len() as u64);
+            batch.rows.drain(..skip as usize);
+            self.to_skip -= skip;
+
+            if let Some(remaining) = self.remaining {
+                batch
+                    .rows
+                    .truncate(remaining.min(batch.rows.len() as u64) as usize);
+                self.remaining = Some(remaining - batch.rows.len() as u64);
+            }
+
+            if !batch.rows.is_empty() {
+                return Ok(Some(batch));
+            }
+        }
     }
 }

@@ -32,6 +32,31 @@ pub enum Expression {
         predicate: IsPredicate,
         is_negated: bool,
     },
+
+    /// Function call (e.g., `COUNT(*)`, `SUM(price)`)
+    Function { name: String, args: FunctionArgs },
+}
+
+/// Arguments passed to a function call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FunctionArgs {
+    /// `(*)`, only meaningful for `COUNT(*)`
+    Star,
+
+    /// `(expr, expr, ...)`
+    List(Vec<Expression>),
+}
+
+impl fmt::Display for FunctionArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FunctionArgs::Star => write!(f, "*"),
+            FunctionArgs::List(args) => {
+                let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+                write!(f, "{}", args.join(", "))
+            }
+        }
+    }
 }
 
 impl fmt::Display for Expression {
@@ -59,15 +84,21 @@ impl fmt::Display for Expression {
                 "{expr} {} {predicate}",
                 if *is_negated { "IS NOT" } else { "IS" }
             ),
+            Expression::Function { name, args } => write!(f, "{name}({args})"),
         }
     }
 }
 
 impl Expression {
-    pub fn to_column_name(&self) -> &str {
+    /// Name of the output column when the expression has no alias.
+    ///
+    /// Follows PostgreSQL: columns keep their name, function calls use the
+    /// lowercased function name, and everything else becomes `?column?`.
+    pub fn to_column_name(&self) -> String {
         match self {
-            Expression::Identifier(name) => name,
-            _ => "?column?",
+            Expression::Identifier(name) => name.clone(),
+            Expression::Function { name, .. } => name.to_lowercase(),
+            _ => "?column?".to_string(),
         }
     }
 }

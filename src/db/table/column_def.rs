@@ -42,14 +42,19 @@ impl ColumnDef {
         }
     }
 
-    pub(crate) fn has_constraint(&self, constraint: ColumnConstraint) -> bool {
-        self.constraints.contains(&constraint)
+    /// Whether the column accepts NULL.
+    ///
+    /// As in SQL, columns are nullable unless declared `NOT NULL` or `PRIMARY KEY`.
+    pub(crate) fn is_nullable(&self) -> bool {
+        !self
+            .constraints
+            .iter()
+            .any(|c| matches!(c, ColumnConstraint::NotNull | ColumnConstraint::PrimaryKey))
     }
 
+    /// Whether an INSERT may leave this column out (it gets its default or NULL).
     pub(crate) fn can_be_omitted(&self) -> bool {
-        self.constraints
-            .iter()
-            .any(|c| matches!(c, ColumnConstraint::Default(_) | ColumnConstraint::Nullable))
+        self.has_default() || self.is_nullable()
     }
 
     pub(crate) fn has_default(&self) -> bool {

@@ -7,11 +7,14 @@ use crate::{
     db::table::column_def::ColumnConstraint,
     sql::{
         ast::{
-            expression::Expression,
+            expression::{Expression, FunctionArgs},
             keyword::Keyword,
             operator::Operator,
             predicate::IsPredicate,
-            statement::{CreateStatement, From, InsertStatement, SelectStatement, Statement},
+            statement::{
+                CreateStatement, DeleteStatement, From, InsertStatement, OrderByItem,
+                SelectStatement, Statement, UpdateStatement,
+            },
             target::{SelectList, SelectTarget},
         },
         lexer::{Lexer, Token},
@@ -43,10 +46,19 @@ impl<'src> SqlParser<'src> {
                 Keyword::Select => self.parse_select_statement()?,
                 Keyword::Create => self.parse_create_statement()?,
                 Keyword::Insert => self.parse_insert_statement()?,
+                Keyword::Update => self.parse_update_statement()?,
+                Keyword::Delete => self.parse_delete_statement()?,
                 _ => return Err(miette!("Unsupported keyword: {:?}", keyword)),
             },
             _ => return Err(miette!("Unexpected token: {:?}", token)),
         };
+
+        // Anything left over is a clause we don't understand. Reject it instead of
+        // silently running a different query than the one that was written.
+        self.consume_if(Token::SemiColon);
+        if let Some(token) = self.lexer.next() {
+            return Err(miette!("Unexpected {:?} after end of statement", token?));
+        }
 
         Ok(statement)
     }
@@ -60,11 +72,49 @@ impl<'src> SqlParser<'src> {
 
         let table_name = self.expect_identifier()?;
 
-        let where_clause = self
-            .expect_keyword(Keyword::Where)
-            .ok()
-            .map(|_| self.parse_expression(0))
-            .transpose()?;
+        let where_clause = self.parse_where_clause()?;
+
+        let mut group_by = Vec::new();
+        if self.consume_if(Token::Keyword(Keyword::Group)) {
+            self.expect_keyword(Keyword::By)?;
+            loop {
+                group_by.push(self.parse_expression(0)?);
+                if !self.consume_if(Token::Comma) {
+                    break;
+                }
+            }
+        }
+
+        let mut order_by = Vec::new();
+        if self.consume_if(Token::Keyword(Keyword::Order)) {
+            self.expect_keyword(Keyword::By)?;
+            loop {
+                let expr = self.parse_expression(0)?;
+                let descending = if self.consume_if(Token::Keyword(Keyword::Desc)) {
+                    true
+                } else {
+                    self.consume_if(Token::Keyword(Keyword::Asc));
+                    false
+                };
+                order_by.push(OrderByItem { expr, descending });
+
+                if !self.consume_if(Token::Comma) {
+                    break;
+                }
+            }
+        }
+
+        let limit = if self.consume_if(Token::Keyword(Keyword::Limit)) {
+            Some(self.expect_count("LIMIT")?)
+        } else {
+            None
+        };
+
+        let offset = if self.consume_if(Token::Keyword(Keyword::Offset)) {
+            Some(self.expect_count("OFFSET")?)
+        } else {
+            None
+        };
 
         Ok(Statement::Select(SelectStatement {
             select_list,
@@ -72,7 +122,62 @@ impl<'src> SqlParser<'src> {
                 table: table_name.to_string(),
             },
             where_clause,
+            group_by,
+            order_by,
+            limit,
+            offset,
         }))
+    }
+
+    fn parse_update_statement(&mut self) -> Result<Statement> {
+        self.expect_keyword(Keyword::Update)?;
+
+        let table_name = self.expect_identifier()?;
+
+        self.expect_keyword(Keyword::Set)?;
+
+        let mut assignments = Vec::new();
+        loop {
+            let column = self.expect_identifier()?.to_string();
+            self.expect_token(Token::Equal)?;
+            let value = self.parse_expression(0)?;
+            assignments.push((column, value));
+
+            if !self.consume_if(Token::Comma) {
+                break;
+            }
+        }
+
+        let where_clause = self.parse_where_clause()?;
+
+        Ok(Statement::Update(UpdateStatement {
+            table: table_name.to_string(),
+            assignments,
+            where_clause,
+        }))
+    }
+
+    fn parse_delete_statement(&mut self) -> Result<Statement> {
+        self.expect_keyword(Keyword::Delete)?;
+        self.expect_keyword(Keyword::From)?;
+
+        let table_name = self.expect_identifier()?;
+
+        let where_clause = self.parse_where_clause()?;
+
+        Ok(Statement::Delete(DeleteStatement {
+            table: table_name.to_string(),
+            where_clause,
+        }))
+    }
+
+    /// Parses an optional `WHERE <expr>`.
+    fn parse_where_clause(&mut self) -> Result<Option<Expression>> {
+        if self.consume_if(Token::Keyword(Keyword::Where)) {
+            Ok(Some(self.parse_expression(0)?))
+        } else {
+            Ok(None)
+        }
     }
 
     fn parse_create_statement(&mut self) -> Result<Statement> {
@@ -125,7 +230,7 @@ impl<'src> SqlParser<'src> {
                     while !self.consume_if(Token::RightParen) {
                         self.consume_if(Token::Comma);
 
-                        row_vals.push(self.parse_primary()?);
+                        row_vals.push(self.parse_expression(0)?);
                     }
                 }
 
@@ -159,6 +264,7 @@ impl<'src> SqlParser<'src> {
                 && col == "*"
             {
                 columns.push(SelectTarget::Star);
+                self.consume_if(Token::Comma);
                 continue;
             }
 
@@ -210,9 +316,13 @@ impl<'src> SqlParser<'src> {
             Token::Keyword(kw) if kw.is_bool_literal() => {
                 Expression::Literal(Value::from(matches!(kw, Keyword::True)))
             }
+            Token::Keyword(Keyword::Null) => Expression::Literal(Value::Null),
             Token::Integer(i) => Expression::Literal(Value::Int64(i)),
             Token::Float(f) => Expression::Literal(Value::Float64(f)),
             Token::String(s) => Expression::Literal(Value::Text(s.to_string())),
+            Token::Identifier(name) if self.peek_is(Token::LeftParen) => {
+                self.parse_function_call(name.to_string())?
+            }
             Token::Identifier(i) => Expression::Identifier(i.to_string()),
             Token::Asterisk => Expression::Identifier("*".to_string()),
             Token::LeftParen => {
@@ -228,6 +338,27 @@ impl<'src> SqlParser<'src> {
         };
 
         self.parse_is_postfix(expr)
+    }
+
+    /// Parses the `(...)` after a function name.
+    fn parse_function_call(&mut self, name: String) -> Result<Expression> {
+        self.expect_token(Token::LeftParen)?;
+
+        let args = if self.consume_if(Token::Asterisk) {
+            self.expect_token(Token::RightParen)?;
+            FunctionArgs::Star
+        } else {
+            let mut args = Vec::new();
+            while !self.consume_if(Token::RightParen) {
+                if !args.is_empty() {
+                    self.expect_token(Token::Comma)?;
+                }
+                args.push(self.parse_expression(0)?);
+            }
+            FunctionArgs::List(args)
+        };
+
+        Ok(Expression::Function { name, args })
     }
 
     // Potentially parse "IS" postfix
@@ -296,6 +427,7 @@ impl<'src> SqlParser<'src> {
                     }
                 }
                 Token::Keyword(Keyword::Unique) => ColumnConstraint::Unique,
+                Token::Keyword(Keyword::Null) => ColumnConstraint::Nullable,
                 t => {
                     return Err(miette!(
                         "Unexpected token '{:?}' while parsing constraints",
@@ -393,6 +525,13 @@ impl<'src> SqlParser<'src> {
         }
     }
 
+    /// Expects a non-negative integer, as used by LIMIT and OFFSET.
+    fn expect_count(&mut self, clause: &str) -> Result<u64> {
+        let n = self.expect_integer()?;
+        n.try_into()
+            .map_err(|_| miette!("{clause} must not be negative, got {n}"))
+    }
+
     fn expect_keyword(&mut self, expected: Keyword) -> Result<()> {
         match self.next_token()? {
             Token::Keyword(kw) if kw == expected => Ok(()),
@@ -429,6 +568,7 @@ mod tests {
                 select_list,
                 from_clause,
                 where_clause,
+                ..
             }) => {
                 assert_eq!(select_list.0, vec![SelectTarget::Star]);
                 assert_eq!(
@@ -803,5 +943,145 @@ mod tests {
             }
             _ => panic!("Expected Insert statement"),
         }
+    }
+
+    fn parse_select(query: &str) -> SelectStatement {
+        match parse(query) {
+            Statement::Select(select) => select,
+            _ => panic!("Expected Select statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_order_by_limit_offset() {
+        let select = parse_select("SELECT * FROM users ORDER BY age DESC, name LIMIT 10 OFFSET 5;");
+
+        assert_eq!(
+            select.order_by,
+            vec![
+                OrderByItem {
+                    expr: Expression::Identifier("age".to_string()),
+                    descending: true,
+                },
+                OrderByItem {
+                    expr: Expression::Identifier("name".to_string()),
+                    descending: false,
+                },
+            ]
+        );
+        assert_eq!(select.limit, Some(10));
+        assert_eq!(select.offset, Some(5));
+    }
+
+    #[test]
+    fn test_parse_where_then_order_by() {
+        let select = parse_select("SELECT * FROM users WHERE age > 18 ORDER BY age ASC");
+
+        assert!(select.where_clause.is_some());
+        assert_eq!(select.order_by.len(), 1);
+        assert!(!select.order_by[0].descending);
+    }
+
+    #[test]
+    fn test_parse_count_star_with_group_by() {
+        let select = parse_select("SELECT dept, COUNT(*) AS n FROM users GROUP BY dept");
+
+        assert_eq!(
+            select.select_list.0[1],
+            SelectTarget::Expression {
+                expr: Expression::Function {
+                    name: "COUNT".to_string(),
+                    args: FunctionArgs::Star,
+                },
+                alias: Some("n".to_string()),
+            }
+        );
+        assert_eq!(
+            select.group_by,
+            vec![Expression::Identifier("dept".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_parse_function_with_expression_arg() {
+        let select = parse_select("SELECT SUM(price * 2) FROM items");
+
+        assert!(matches!(
+            &select.select_list.0[0],
+            SelectTarget::Expression {
+                expr: Expression::Function { args: FunctionArgs::List(args), .. },
+                ..
+            } if args.len() == 1
+        ));
+    }
+
+    #[test]
+    fn test_parse_star_followed_by_column() {
+        let select = parse_select("SELECT *, id FROM users");
+        assert_eq!(select.select_list.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_update() {
+        match parse("UPDATE users SET name = 'Bob', age = age + 1 WHERE id = 1") {
+            Statement::Update(UpdateStatement {
+                table,
+                assignments,
+                where_clause,
+            }) => {
+                assert_eq!(table, "users");
+                assert_eq!(assignments.len(), 2);
+                assert_eq!(assignments[0].0, "name");
+                assert_eq!(assignments[1].0, "age");
+                assert!(where_clause.is_some());
+            }
+            _ => panic!("Expected Update statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_delete() {
+        match parse("DELETE FROM users WHERE id = 1") {
+            Statement::Delete(DeleteStatement {
+                table,
+                where_clause,
+            }) => {
+                assert_eq!(table, "users");
+                assert!(where_clause.is_some());
+            }
+            _ => panic!("Expected Delete statement"),
+        }
+
+        match parse("DELETE FROM users") {
+            Statement::Delete(DeleteStatement { where_clause, .. }) => {
+                assert!(where_clause.is_none());
+            }
+            _ => panic!("Expected Delete statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_rejects_trailing_tokens() {
+        for query in [
+            "SELECT * FROM users HAVING x",
+            "SELECT * FROM users u",
+            "SELECT * FROM users WHERE id = 1 extra",
+            "SELECT * FROM users; SELECT * FROM users",
+            "DELETE FROM users WHERE id = 1 LIMIT 1",
+        ] {
+            assert!(
+                SqlParser::new(query).parse().is_err(),
+                "{query} should not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_rejects_negative_limit() {
+        assert!(
+            SqlParser::new("SELECT * FROM users LIMIT -1")
+                .parse()
+                .is_err()
+        );
     }
 }

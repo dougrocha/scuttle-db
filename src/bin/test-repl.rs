@@ -54,34 +54,7 @@ fn main() -> Result<()> {
                 continue;
             }
         };
-        let rows = query_response.rows;
-
-        if rows.is_empty() {
-            println!("Empty set (0 rows)");
-            buf.clear();
-            continue;
-        }
-
-        let separator_len = 8 + (rows[0].values.len() * 15);
-        stdout
-            .write_all(&"-".repeat(separator_len).into_bytes())
-            .into_diagnostic()?;
-        stdout.write_all(b"\n").into_diagnostic()?;
-
-        for row in rows.iter() {
-            for value in &row.values {
-                stdout
-                    .write_all(format!(" | {: <12}", value.to_string()).as_bytes())
-                    .into_diagnostic()?;
-            }
-            stdout.write_all(b"\n").into_diagnostic()?;
-        }
-
-        stdout
-            .write_all(&"-".repeat(separator_len).into_bytes())
-            .into_diagnostic()?;
-        stdout.write_all(b"\n").into_diagnostic()?;
-
+        writeln!(stdout, "{query_response}").into_diagnostic()?;
         stdout.flush().into_diagnostic()?;
         buf.clear();
     }

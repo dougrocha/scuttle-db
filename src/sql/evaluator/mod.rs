@@ -1,7 +1,10 @@
+use std::cmp::Ordering;
+
 use miette::{Result, miette};
 
 use crate::{Row, core::types::Value, sql::analyzer::AnalyzedExpression};
 
+pub mod aggregate;
 pub mod expression;
 pub mod predicate;
 
@@ -124,9 +127,54 @@ pub fn values_less_than(left: &Value, right: &Value) -> Value {
     Value::Bool(result)
 }
 
+/// Total ordering used by ORDER BY, MIN and MAX.
+///
+/// NULL sorts after every other value, so it comes last in ascending order and
+/// first in descending order (PostgreSQL's default). Values of unrelated types
+/// compare as equal; the analyzer keeps them from meeting in practice.
+pub fn compare_values(left: &Value, right: &Value) -> Ordering {
+    match (left, right) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Greater,
+        (_, Value::Null) => Ordering::Less,
+        (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
+        (Value::Float64(a), Value::Float64(b)) => a.total_cmp(b),
+        (Value::Int64(a), Value::Float64(b)) => (*a as f64).total_cmp(b),
+        (Value::Float64(a), Value::Int64(b)) => a.total_cmp(&(*b as f64)),
+        (Value::Text(a), Value::Text(b)) => a.cmp(b),
+        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        _ => Ordering::Equal,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_compare_values_nulls_last() {
+        assert_eq!(
+            compare_values(&Value::Null, &Value::Int64(1)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_values(&Value::Int64(1), &Value::Null),
+            Ordering::Less
+        );
+        assert_eq!(compare_values(&Value::Null, &Value::Null), Ordering::Equal);
+    }
+
+    #[test]
+    fn test_compare_values_mixed_numbers() {
+        assert_eq!(
+            compare_values(&Value::Int64(2), &Value::Float64(1.5)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_values(&Value::Text("a".into()), &Value::Text("b".into())),
+            Ordering::Less
+        );
+    }
 
     #[test]
     fn test_values_add_integers() {

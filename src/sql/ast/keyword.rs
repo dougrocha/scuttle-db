@@ -27,6 +27,15 @@ pub enum Keyword {
     Into,
     Values,
     As,
+    Set,
+
+    Group,
+    Order,
+    By,
+    Asc,
+    Desc,
+    Limit,
+    Offset,
 
     Join,
     Inner,
