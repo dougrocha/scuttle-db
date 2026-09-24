@@ -79,7 +79,7 @@ impl Database {
 
         Self {
             tables: std::collections::BTreeMap::default(),
-            buffer_manager: BufferPool::new(),
+            buffer_manager: BufferPool::new(&data_dir),
             catalog: SystemCatalog::new(),
 
             data_directory: data_directory.as_ref().to_path_buf(),

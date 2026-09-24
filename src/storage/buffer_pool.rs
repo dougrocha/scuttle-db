@@ -23,13 +23,28 @@ pub struct TableFile {
 #[derive(Debug, Default)]
 pub struct BufferPool {
     pool: HashMap<String, HashMap<PageId, Page>>,
+
+    /// Directory holding the `.table` files. `None` keeps every page in memory,
+    /// which is how the database runs in the browser.
+    data_directory: Option<PathBuf>,
 }
 
 impl BufferPool {
-    pub fn new() -> Self {
+    pub fn new(data_directory: impl Into<PathBuf>) -> Self {
         Self {
             pool: HashMap::new(),
+            data_directory: Some(data_directory.into()),
         }
+    }
+
+    pub fn in_memory() -> Self {
+        Self::default()
+    }
+
+    fn table_path(&self, table_name: &str) -> Option<PathBuf> {
+        self.data_directory
+            .as_ref()
+            .map(|dir| dir.join(format!("{table_name}.table")))
     }
 
     pub fn get_page(&mut self, table_name: &str, page_id: PageId) -> Result<&mut Page> {
@@ -59,7 +74,10 @@ impl BufferPool {
     }
 
     fn load_page_from_file(&self, table_name: &str, page_id: PageId) -> Result<Page> {
-        let mut file = File::open(format!("./db/{table_name}.table")).into_diagnostic()?;
+        let path = self
+            .table_path(table_name)
+            .ok_or_else(|| miette!("Page {page_id} of {table_name} is not in memory."))?;
+        let mut file = File::open(path).into_diagnostic()?;
 
         let mut buffer: [u8; Page::SIZE] = [0; Page::SIZE];
         let offset = (page_id as usize) * Page::SIZE;
@@ -136,12 +154,17 @@ impl BufferPool {
     }
 
     pub(crate) fn save_page(&mut self, table_name: &str, page_id: PageId) -> Result<()> {
+        let Some(path) = self.table_path(table_name) else {
+            // In-memory pages already live in the pool, so there is nothing to write.
+            return Ok(());
+        };
+
         let page = self.get_page(table_name, page_id)?;
 
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
-            .open(format!("./db/{table_name}.table"))
+            .open(path)
             .into_diagnostic()?;
 
         let offset = (page_id as usize) * Page::SIZE;
