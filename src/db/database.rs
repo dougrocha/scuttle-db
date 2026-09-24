@@ -19,7 +19,7 @@ use crate::{
         },
         catalog_context::CatalogContext,
         evaluator::{Evaluator, expression::ExpressionEvaluator, predicate::PredicateEvaluator},
-        planner::{logical::LogicalPlan, physical::PhysicalPlanner},
+        planner::{explain, logical::LogicalPlan, physical::PhysicalPlanner},
     },
     storage::{
         buffer_pool::BufferPool,
@@ -377,6 +377,57 @@ impl Database {
             Statement::Update(update_stmt) => self.handle_update(update_stmt),
             Statement::Delete(delete_stmt) => self.handle_delete(delete_stmt),
         }
+    }
+
+    /// Describes how a SQL statement would run, without running it.
+    ///
+    /// Parses and analyzes the statement into a logical plan, then renders the plan
+    /// as an indented tree, one node per line, similar to Postgres' `EXPLAIN`.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - A single SQL statement
+    ///
+    /// # Returns
+    ///
+    /// The plan tree as text. The database is not modified.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the statement fails to parse or references a missing
+    /// table or column.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use scuttle_db::Database;
+    ///
+    /// let mut db = Database::in_memory();
+    /// db.execute_query("CREATE TABLE users (name TEXT, age INT)").unwrap();
+    ///
+    /// let plan = db.explain("SELECT name FROM users WHERE age > 30").unwrap();
+    /// assert_eq!(plan, "Projection: name\n  Filter: age > 30\n    Scan: users");
+    /// ```
+    pub fn explain(&mut self, query: &str) -> Result<String> {
+        let mut parser = SqlParser::new(query);
+        let statement = parser
+            .parse()
+            .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))?;
+
+        let context = CatalogContext::new(self);
+        let analyzer = Analyzer::new(&context);
+        let plan = match statement {
+            Statement::Create(create_stmt) => LogicalPlan::CreateTable {
+                table_name: create_stmt.table_name,
+                columns: create_stmt.columns,
+            },
+            Statement::Select(select_stmt) => analyzer.analyze_select(select_stmt)?,
+            Statement::Insert(insert_stmt) => analyzer.analyze_insert(insert_stmt)?,
+            Statement::Update(update_stmt) => analyzer.analyze_update(update_stmt)?,
+            Statement::Delete(delete_stmt) => analyzer.analyze_delete(delete_stmt)?,
+        };
+
+        explain::explain(&plan, &context)
     }
 
     fn handle_create(&mut self, create_stmt: statement::CreateStatement) -> Result<QueryResponse> {

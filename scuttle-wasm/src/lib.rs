@@ -84,6 +84,33 @@ impl Db {
         })
         .to_string())
     }
+
+    /// Describes how a SQL statement would run, without running it.
+    ///
+    /// # Arguments
+    ///
+    /// * `sql` - A single SQL statement, without a trailing semicolon
+    ///
+    /// # Returns
+    ///
+    /// The logical plan as an indented tree, one node per line.
+    ///
+    /// # Errors
+    ///
+    /// Throws a JavaScript `Error` when the statement fails to parse or references a
+    /// missing table or column.
+    ///
+    /// # Example
+    ///
+    /// ```js
+    /// db.explain("SELECT name FROM users WHERE age > 30");
+    /// // "Projection: name\n  Filter: age > 30\n    Scan: users"
+    /// ```
+    pub fn explain(&mut self, sql: &str) -> Result<String, JsError> {
+        self.inner
+            .explain(sql)
+            .map_err(|err| JsError::new(&err.to_string()))
+    }
 }
 
 impl Default for Db {
