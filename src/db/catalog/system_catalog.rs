@@ -38,14 +38,14 @@ impl SystemCatalog {
         schema: &Schema,
         page_count: u32,
     ) -> Result<()> {
-        let schema = Row::new(vec![
+        let catalog_row = Row::new(vec![
             Value::Text(name.to_string()),
             Value::Text(serde_json::to_string(schema).into_diagnostic()?),
             Value::Int64(page_count as i64),
             // Value::Int64(current_timestamp()),
         ]);
 
-        let encoded = self.schema.encode_row(&schema);
+        let encoded = self.schema.encode_row(&catalog_row);
 
         let page_header_id = {
             let page = buffer_pool.get_free_page(self.name(), encoded.len())?;
