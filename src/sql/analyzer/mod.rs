@@ -1,7 +1,7 @@
 use miette::{Result, miette};
 
 use crate::{
-    ColumnDef, DataType, Schema, Value,
+    ColumnDef, DataType, Value,
     db::table::Table,
     sql::{
         ast::{
@@ -16,12 +16,14 @@ use crate::{
     },
 };
 
+use scope::BindScope;
+
 mod scope;
 
+/// Position of a bound column in the row it is evaluated against.
 #[derive(Debug)]
 pub struct ColumnRef {
     pub index: usize,
-    pub relation: Option<String>, // 'u' in 'u.name'
 }
 
 #[derive(Debug)]
@@ -97,6 +99,7 @@ impl AggregateFunction {
 /// Binding state for expressions evaluated on top of an aggregate.
 ///
 /// The aggregate's output row is `[group_by values..., aggregate values...]`.
+/// Keys and aggregate ASTs are stored canonical (BindScope::canonicalize).
 struct GroupedScope {
     /// GROUP BY expressions (as written) and their types
     group_by: Vec<(Expression, DataType)>,
@@ -133,26 +136,6 @@ impl AnalyzedExpression {
             AnalyzedExpression::IsPredicate { .. } => DataType::Bool,
         }
     }
-
-    /// Determines whether this expression can produce NULL given the input schema.
-    pub fn is_nullable(&self, input_schema: &Schema) -> bool {
-        match self {
-            // Literals are never null (null literals are rejected during analysis)
-            AnalyzedExpression::Literal(_) => false,
-            // Column nullability comes from the source field
-            AnalyzedExpression::Column(col_ref, _) => input_schema
-                .columns
-                .get(col_ref.index)
-                .map(ColumnDef::is_nullable)
-                .unwrap_or(true),
-            // A binary expression is nullable if either operand is nullable
-            AnalyzedExpression::BinaryExpr { left, right, .. } => {
-                left.is_nullable(input_schema) || right.is_nullable(input_schema)
-            }
-            // IS TRUE / IS NULL / etc. always returns a definite bool, never null
-            AnalyzedExpression::IsPredicate { .. } => false,
-        }
-    }
 }
 
 pub struct Analyzer<'a, 'db> {
@@ -175,32 +158,27 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             limit,
             offset,
         } = statement;
-        if !from_clause.joins.is_empty() {
-            return Err(miette!("JOIN is not supported yet"));
-        }
-        let schema = self.context.get_table(&from_clause.table.name)?.schema();
-
-        let mut plan = self.analyze_from_clause(from_clause)?;
+        let (mut plan, scope) = self.analyze_from(&from_clause)?;
 
         if let Some(expr) = where_clause {
-            plan = self.analyze_where_clause(plan, &expr, schema)?;
+            plan = self.analyze_where_clause(plan, &expr, &scope)?;
         }
 
-        let targets = Self::expand_targets(&select_list, schema);
+        let targets = Self::expand_targets(&select_list, &scope)?;
 
         // GROUP BY prefers input columns over output aliases, ORDER BY the reverse (like PostgreSQL)
         let mut group_by_exprs = Vec::with_capacity(group_by.len());
         for expr in &group_by {
             let expr = match expr {
-                Expression::Identifier(name) if schema.get_column_index(name).is_some() => expr,
-                _ => Self::resolve_output_reference(expr, &targets)?,
+                Expression::Identifier(name) if scope.has_column(name) => expr,
+                _ => self.resolve_output_reference(expr, &targets, &scope)?,
             };
             group_by_exprs.push(expr.clone());
         }
 
         let mut order_by_exprs = Vec::with_capacity(order_by.len());
         for item in &order_by {
-            let expr = Self::resolve_output_reference(&item.expr, &targets)?;
+            let expr = self.resolve_output_reference(&item.expr, &targets, &scope)?;
             order_by_exprs.push((expr.clone(), item.descending));
         }
 
@@ -216,8 +194,8 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         let mut grouped = if is_aggregate {
             let mut keys = Vec::with_capacity(group_by_exprs.len());
             for expr in group_by_exprs {
-                let bound = self.bind_expression(&expr, schema)?;
-                keys.push((expr, bound.get_type()));
+                let bound = self.bind_expression(&expr, &scope)?;
+                keys.push((scope.canonicalize(&expr)?, bound.get_type()));
                 bound_group_by.push(bound);
             }
 
@@ -231,13 +209,13 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
         let mut projections = Vec::with_capacity(targets.len());
         for (expr, _) in &targets {
-            projections.push(self.bind(expr, schema, grouped.as_mut())?);
+            projections.push(self.bind(expr, &scope, grouped.as_mut())?);
         }
 
         let mut sort_keys = Vec::with_capacity(order_by_exprs.len());
         for (expr, descending) in &order_by_exprs {
             sort_keys.push(SortKey {
-                expr: self.bind(expr, schema, grouped.as_mut())?,
+                expr: self.bind(expr, &scope, grouped.as_mut())?,
                 descending: *descending,
             });
         }
@@ -285,6 +263,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             where_clause,
         } = statement;
         let schema = self.context.get_table(&table_name)?.schema();
+        let scope = BindScope::single(&table_name, schema);
 
         let mut bound_assignments: Vec<(usize, AnalyzedExpression)> = Vec::new();
         for (column, expr) in &assignments {
@@ -301,7 +280,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             let value = if *expr == Expression::Literal(Value::Null) {
                 AnalyzedExpression::Literal(Value::Null)
             } else {
-                let value = self.bind_expression(expr, schema)?;
+                let value = self.bind_expression(expr, &scope)?;
                 let column_type = schema.columns[index].data_type;
                 if !DataType::can_coerce(value.get_type(), column_type) {
                     return Err(miette!(
@@ -317,7 +296,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         }
 
         let filter = where_clause
-            .map(|expr| self.bind_expression(&expr, schema))
+            .map(|expr| self.bind_expression(&expr, &scope))
             .transpose()?;
 
         Ok(LogicalPlan::Update {
@@ -333,9 +312,10 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             where_clause,
         } = statement;
         let schema = self.context.get_table(&table_name)?.schema();
+        let scope = BindScope::single(&table_name, schema);
 
         let filter = where_clause
-            .map(|expr| self.bind_expression(&expr, schema))
+            .map(|expr| self.bind_expression(&expr, &scope))
             .transpose()?;
 
         Ok(LogicalPlan::Delete { table_name, filter })
@@ -383,7 +363,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         }
 
         // VALUES can't refer to columns, so bind them against an empty schema
-        let no_columns = Schema::new(Vec::new());
+        let no_columns = BindScope::empty();
 
         let mut analyzed_rows = Vec::with_capacity(source.len());
         for row in &source {
@@ -428,26 +408,40 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         })
     }
 
-    fn analyze_from_clause(&self, from_clause: statement::From) -> Result<LogicalPlan> {
+    /// Builds the Scan / Join tree for FROM and the scope describing its output row.
+    ///
+    /// Joins are not supported yet, so the plan is always a single Scan.
+    fn analyze_from(&self, from: &statement::From) -> Result<(LogicalPlan, BindScope)> {
+        if !from.joins.is_empty() {
+            return Err(miette!("JOIN is not supported yet"));
+        }
+
+        let mut scope = BindScope::empty();
+        let plan = self.scan(&from.table, &mut scope)?;
+        Ok((plan, scope))
+    }
+
+    /// Looks up the table, registers it in `scope` under its binding name, and builds its Scan.
+    fn scan(&self, table: &statement::TableRef, scope: &mut BindScope) -> Result<LogicalPlan> {
+        let def = self.context.get_table(&table.name)?;
+        scope.push_relation(table.binding_name(), def.schema())?;
+
         Ok(LogicalPlan::Scan {
-            table_name: from_clause.table.name.clone(),
+            table_name: table.name.clone(),
+            alias: table.alias.clone(),
         })
     }
 
     /// Expands `*` and pairs every output column with its name (alias or default name).
-    fn expand_targets(select_list: &SelectList, schema: &Schema) -> Vec<(Expression, String)> {
+    fn expand_targets(
+        select_list: &SelectList,
+        scope: &BindScope,
+    ) -> Result<Vec<(Expression, String)>> {
         let mut targets = Vec::new();
 
         for item in select_list.iter() {
             match item {
-                SelectTarget::Star => {
-                    for field in &schema.columns {
-                        targets.push((
-                            Expression::Identifier(field.name.clone()),
-                            field.name.clone(),
-                        ));
-                    }
-                }
+                SelectTarget::Star => targets.extend(scope.expand_star(None)?),
                 SelectTarget::Expression { expr, alias } => {
                     let name = alias.clone().unwrap_or_else(|| expr.to_column_name());
                     targets.push((expr.clone(), name));
@@ -455,16 +449,19 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             }
         }
 
-        targets
+        Ok(targets)
     }
 
     /// Resolves ORDER BY / GROUP BY items that point at the select list.
     ///
-    /// `2` means the second output column and a bare name may be an output alias.
-    /// Anything else is returned unchanged and bound against the input.
+    /// `2` means the second output column. A bare name may be an output alias: if several
+    /// outputs share that name they must be the same value, otherwise it is ambiguous
+    /// (like PostgreSQL). Anything else is returned unchanged and bound against the input.
     fn resolve_output_reference<'e>(
+        &self,
         expr: &'e Expression,
         targets: &'e [(Expression, String)],
+        scope: &BindScope,
     ) -> Result<&'e Expression> {
         match expr {
             Expression::Literal(Value::Int64(position)) => usize::try_from(*position)
@@ -473,10 +470,28 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 .and_then(|i| targets.get(i))
                 .map(|(target, _)| target)
                 .ok_or_else(|| miette!("Position {position} is not in select list")),
-            Expression::Identifier(name) => Ok(targets
-                .iter()
-                .find(|(_, output_name)| output_name == name)
-                .map_or(expr, |(target, _)| target)),
+            Expression::Identifier(name) => {
+                let hits: Vec<&Expression> = targets
+                    .iter()
+                    .filter(|(_, output_name)| output_name == name)
+                    .map(|(target, _)| target)
+                    .collect();
+                match hits.as_slice() {
+                    [] => Ok(expr),
+                    [only] => Ok(*only),
+                    [first, rest @ ..] => {
+                        // Same name on several outputs is fine only if they are the same value
+                        // (`SELECT *, id FROM users ORDER BY id`).
+                        let canonical = scope.canonicalize(first)?;
+                        for target in rest {
+                            if scope.canonicalize(target)? != canonical {
+                                return Err(miette!("ORDER BY \"{name}\" is ambiguous"));
+                            }
+                        }
+                        Ok(*first)
+                    }
+                }
+            }
             _ => Ok(expr),
         }
     }
@@ -485,9 +500,9 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         &self,
         input_plan: LogicalPlan,
         where_expr: &Expression,
-        schema: &Schema,
+        scope: &BindScope,
     ) -> Result<LogicalPlan> {
-        let analyzed_expr = self.bind_expression(where_expr, schema)?;
+        let analyzed_expr = self.bind_expression(where_expr, scope)?;
 
         Ok(LogicalPlan::Filter {
             input: Box::new(input_plan),
@@ -495,16 +510,16 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         })
     }
 
-    /// Binds an expression against the columns of `input_schema`.
+    /// Binds an expression against the columns visible in `scope`.
     ///
     /// Aggregate functions are rejected here; they only make sense in a grouped
     /// context (see [`Analyzer::analyze_select`]).
-    pub fn bind_expression(
+    pub(crate) fn bind_expression(
         &self,
         expr: &Expression,
-        input_schema: &Schema,
+        scope: &BindScope,
     ) -> Result<AnalyzedExpression> {
-        self.bind(expr, input_schema, None)
+        self.bind(expr, scope, None)
     }
 
     /// Binds an expression, optionally on top of an aggregate.
@@ -515,25 +530,23 @@ impl<'a, 'db> Analyzer<'a, 'db> {
     fn bind(
         &self,
         expr: &Expression,
-        input_schema: &Schema,
+        scope: &BindScope,
         mut grouped: Option<&mut GroupedScope>,
     ) -> Result<AnalyzedExpression> {
-        if let Some(scope) = grouped.as_deref()
-            && let Some(index) = scope.group_by.iter().position(|(key, _)| key == expr)
-        {
-            return Ok(AnalyzedExpression::Column(
-                ColumnRef {
-                    index,
-                    relation: None,
-                },
-                scope.group_by[index].1,
-            ));
+        if let Some(g) = grouped.as_deref() {
+            let canonical = scope.canonicalize(expr)?;
+            if let Some(index) = g.group_by.iter().position(|(key, _)| *key == canonical) {
+                return Ok(AnalyzedExpression::Column(
+                    ColumnRef { index },
+                    g.group_by[index].1,
+                ));
+            }
         }
 
         match expr {
             Expression::BinaryOp { left, op, right } => {
-                let left = self.bind(left, input_schema, grouped.as_deref_mut())?;
-                let right = self.bind(right, input_schema, grouped)?;
+                let left = self.bind(left, scope, grouped.as_deref_mut())?;
+                let right = self.bind(right, scope, grouped)?;
 
                 let return_type = self.resolve_binary_op(left.get_type(), *op, right.get_type())?;
 
@@ -544,25 +557,14 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     return_type,
                 })
             }
-            Expression::Identifier(name) if grouped.is_some() => Err(miette!(
-                "Column {name} must appear in the GROUP BY clause or be used in an aggregate function"
-            )),
-            Expression::Identifier(name) => {
-                let index = input_schema
-                    .get_column_index(name)
-                    .ok_or_else(|| miette!("Column {name} could not be found"))?;
-                let field = &input_schema.columns[index];
-
-                Ok(AnalyzedExpression::Column(
-                    ColumnRef {
-                        index,
-                        relation: None,
-                    },
-                    field.data_type,
+            Expression::Identifier(_) | Expression::Qualified { .. } if grouped.is_some() => {
+                Err(miette!(
+                    "Column {expr} must appear in the GROUP BY clause or be used in an aggregate function"
                 ))
             }
-            Expression::Qualified { .. } => {
-                Err(miette!("Qualified column references are not supported yet"))
+            Expression::Identifier(name) => self.bind_column(scope, None, name),
+            Expression::Qualified { relation, column } => {
+                self.bind_column(scope, Some(relation), column)
             }
             Expression::Literal(scalar_value) => match scalar_value {
                 Value::Null => Err(miette!(
@@ -575,7 +577,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 predicate,
                 is_negated,
             } => {
-                let inner_analyzed = self.bind(expr, input_schema, grouped)?;
+                let inner_analyzed = self.bind(expr, scope, grouped)?;
 
                 let inner_type = inner_analyzed.get_type();
                 match predicate {
@@ -601,7 +603,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 let function = AggregateFunction::from_name(name)
                     .ok_or_else(|| miette!("Function {name}() does not exist"))?;
 
-                let Some(scope) = grouped else {
+                let Some(group) = grouped else {
                     return Err(miette!(
                         "Aggregate function {name}() is not allowed in WHERE, GROUP BY, or inside another aggregate"
                     ));
@@ -612,7 +614,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     FunctionArgs::Star if function == AggregateFunction::Count => None,
                     FunctionArgs::Star => return Err(miette!("{name}(*) is not supported")),
                     FunctionArgs::List(args) if args.len() == 1 => {
-                        Some(self.bind_expression(&args[0], input_schema)?)
+                        Some(self.bind_expression(&args[0], scope)?)
                     }
                     FunctionArgs::List(_) => {
                         return Err(miette!("{name}() takes exactly one argument"));
@@ -622,23 +624,37 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 let return_type = function.return_type(arg.as_ref().map(|a| a.get_type()))?;
 
                 // Reuse the same aggregate if it appears twice (e.g. in SELECT and ORDER BY)
-                let position = scope.aggregates.iter().position(|(ast, _)| ast == expr);
+                let canonical = scope.canonicalize(expr)?;
+                let position = group
+                    .aggregates
+                    .iter()
+                    .position(|(ast, _)| *ast == canonical);
                 let index = position.unwrap_or_else(|| {
-                    scope
+                    group
                         .aggregates
-                        .push((expr.clone(), AggregateCall { function, arg }));
-                    scope.aggregates.len() - 1
+                        .push((canonical, AggregateCall { function, arg }));
+                    group.aggregates.len() - 1
                 });
 
                 Ok(AnalyzedExpression::Column(
                     ColumnRef {
-                        index: scope.group_by.len() + index,
-                        relation: None,
+                        index: group.group_by.len() + index,
                     },
                     return_type,
                 ))
             }
         }
+    }
+
+    /// Resolves a (possibly qualified) column name in `scope` to a column of the input row.
+    fn bind_column(
+        &self,
+        scope: &BindScope,
+        qualifier: Option<&str>,
+        name: &str,
+    ) -> Result<AnalyzedExpression> {
+        let (index, data_type) = scope.resolve(qualifier, name)?;
+        Ok(AnalyzedExpression::Column(ColumnRef { index }, data_type))
     }
 
     fn resolve_binary_op(&self, left: DataType, op: Operator, right: DataType) -> Result<DataType> {

@@ -782,6 +782,107 @@ mod tests {
     }
 
     #[test]
+    fn test_select_alias_and_qualified_columns() {
+        let mut db = TestDb::new("alias-qualified");
+
+        assert_eq!(
+            db.query("SELECT u.name FROM users u WHERE u.age > 30 ORDER BY u.id"),
+            vec![vec![text("Carol")], vec![text("Dan")]]
+        );
+        assert_eq!(
+            db.query("SELECT u.name FROM users AS u WHERE u.age > 30 ORDER BY u.id"),
+            vec![vec![text("Carol")], vec![text("Dan")]]
+        );
+    }
+
+    #[test]
+    fn test_select_qualified_with_table_name_when_not_aliased() {
+        let mut db = TestDb::new("qualified-table-name");
+
+        assert_eq!(
+            db.query("SELECT users.name FROM users WHERE users.id = 1"),
+            vec![vec![text("Alice")]]
+        );
+    }
+
+    #[test]
+    fn test_select_table_name_unusable_after_alias() {
+        let mut db = TestDb::new("table-name-after-alias");
+
+        assert!(db.fails("SELECT users.name FROM users u"));
+        assert!(db.fails("SELECT x.name FROM users u"));
+        assert!(db.fails("SELECT u.nope FROM users u"));
+    }
+
+    #[test]
+    fn test_group_by_bare_and_qualified_are_the_same_key() {
+        let mut db = TestDb::new("group-by-qualified");
+
+        assert_eq!(
+            db.query("SELECT u.dept, COUNT(*) FROM users u GROUP BY dept ORDER BY u.dept"),
+            vec![
+                vec![text("eng"), Value::Int64(2)],
+                vec![text("ops"), Value::Int64(2)]
+            ]
+        );
+        assert_eq!(
+            db.query("SELECT dept, SUM(u.age) FROM users u GROUP BY u.dept ORDER BY dept"),
+            vec![
+                vec![text("eng"), Value::Int64(55)],
+                vec![text("ops"), Value::Int64(76)]
+            ]
+        );
+        assert_eq!(
+            db.query("SELECT age + 1 FROM users u GROUP BY u.age + 1 ORDER BY 1"),
+            vec![
+                vec![Value::Int64(26)],
+                vec![Value::Int64(31)],
+                vec![Value::Int64(36)],
+                vec![Value::Int64(42)]
+            ]
+        );
+    }
+
+    #[test]
+    fn test_order_by_duplicate_output_names() {
+        let mut db = TestDb::new("order-by-duplicate-names");
+
+        assert!(db.fails("SELECT age AS x, name AS x FROM users ORDER BY x"));
+        assert!(db.fails("SELECT age AS id, id FROM users ORDER BY id"));
+        assert_eq!(db.query("SELECT age AS x FROM users ORDER BY x").len(), 4);
+        assert_eq!(db.query("SELECT *, id FROM users ORDER BY id").len(), 4);
+        assert_eq!(
+            db.query("SELECT id, id FROM users ORDER BY id DESC LIMIT 1"),
+            vec![vec![Value::Int64(4), Value::Int64(4)]]
+        );
+    }
+
+    #[test]
+    fn test_quoted_identifier_with_dot_is_split() {
+        let mut db = TestDb::new("quoted-dot");
+
+        // Documented limitation: "a.b" is split into relation `a` and column `b`.
+        assert!(db.fails(r#"SELECT "a.b" FROM users"#));
+    }
+
+    #[test]
+    fn test_update_delete_accept_table_qualified_columns() {
+        let mut db = TestDb::new("update-delete-qualified");
+
+        db.execute("UPDATE users SET age = users.age + 1 WHERE users.id = 1");
+        assert_eq!(
+            db.query("SELECT age FROM users WHERE id = 1"),
+            vec![vec![Value::Int64(31)]]
+        );
+
+        db.execute("DELETE FROM users WHERE users.id = 4");
+        assert_eq!(
+            db.query("SELECT COUNT(*) FROM users"),
+            vec![vec![Value::Int64(3)]]
+        );
+    }
+
+    #[test]
     fn test_count_star() {
         let mut db = TestDb::new("count");
 

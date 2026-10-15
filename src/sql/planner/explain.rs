@@ -30,7 +30,10 @@ fn write_node(
     let indent = "  ".repeat(depth);
 
     match plan {
-        LogicalPlan::Scan { table_name } => lines.push(format!("{indent}Scan: {table_name}")),
+        LogicalPlan::Scan { table_name, alias } => lines.push(match alias {
+            Some(alias) => format!("{indent}Scan: {table_name} {alias}"),
+            None => format!("{indent}Scan: {table_name}"),
+        }),
         LogicalPlan::Filter { input, condition } => {
             let columns = output_columns(input, catalog)?;
             lines.push(format!(
@@ -175,7 +178,7 @@ fn write_filtered_scan(
 /// Names of the columns `plan` produces, used to print expressions of the node above it.
 fn output_columns(plan: &LogicalPlan, catalog: &CatalogContext) -> Result<Vec<String>> {
     Ok(match plan {
-        LogicalPlan::Scan { table_name } => table_columns(table_name, catalog)?,
+        LogicalPlan::Scan { table_name, .. } => table_columns(table_name, catalog)?,
         LogicalPlan::Filter { input, .. }
         | LogicalPlan::Sort { input, .. }
         | LogicalPlan::Limit { input, .. } => output_columns(input, catalog)?,
@@ -292,6 +295,12 @@ mod tests {
     fn test_explain_select_star_without_filter() {
         let plan = users().explain("SELECT * FROM users").unwrap();
         assert_eq!(plan, "Projection: id, name, dept, age\n  Scan: users");
+    }
+
+    #[test]
+    fn test_explain_scan_shows_alias() {
+        let plan = users().explain("SELECT u.name FROM users u").unwrap();
+        assert_eq!(plan, "Projection: name\n  Scan: users u");
     }
 
     #[test]

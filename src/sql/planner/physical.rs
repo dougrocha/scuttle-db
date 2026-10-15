@@ -30,7 +30,7 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
         analyzed_plan: LogicalPlan,
     ) -> Result<Box<dyn ExecutionNode>> {
         match analyzed_plan {
-            LogicalPlan::Scan { table_name } => {
+            LogicalPlan::Scan { table_name, .. } => {
                 let data = self.context.database.get_rows(&table_name)?;
 
                 Ok(Box::new(ScanExec { data }))

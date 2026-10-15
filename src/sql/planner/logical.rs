@@ -7,6 +7,10 @@ use crate::{
 pub enum LogicalPlan {
     Scan {
         table_name: String,
+
+        /// Table alias from the FROM clause, if any. Display-only: EXPLAIN prints
+        /// `Scan: users u`. Physical planning ignores it.
+        alias: Option<String>,
     },
     Filter {
         input: Box<LogicalPlan>,
