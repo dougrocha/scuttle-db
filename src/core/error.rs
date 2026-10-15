@@ -15,6 +15,10 @@ pub enum DatabaseError {
     #[error("Table not found: {0}")]
     TableNotFound(String),
 
+    /// A table with this name already exists.
+    #[error("Table {0} already exists")]
+    TableAlreadyExists(String),
+
     /// The requested column does not exist in the schema.
     #[error("Column not found: {0}")]
     ColumnNotFound(String),

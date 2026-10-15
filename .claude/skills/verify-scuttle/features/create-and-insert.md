@@ -5,7 +5,7 @@ a named subset, and NULLs.
 
 ## Sub-features
 
-- `create-table`: `CREATE TABLE name (col TYPE, ...)`. Types: `INT`/`INTEGER`, `FLOAT`, `VARCHAR`, `TEXT`/`STRING`, `BOOL`/`BOOLEAN`, `DATE`, `TIMESTAMP`.
+- `create-table`: `CREATE TABLE name (col TYPE, ...)`. Types: `INT`/`INTEGER`, `FLOAT`, `VARCHAR(n)`, `TEXT`/`STRING`, `BOOL`/`BOOLEAN`, `TIMESTAMP`.
 - `insert-multi`: several `(...)` tuples in one INSERT.
 - `insert-columns`: an `INSERT INTO t (col, ...)` column list. Omitted columns become NULL.
 - `insert-type-check`: a value of the wrong type is rejected.
@@ -34,8 +34,10 @@ row was not written. `db_files.txt` lists `__catalog__.table` and `t.table`.
 
 ## Gotchas
 
-- Creating a table that already exists prints `Table t already exists` and then `OK`. It is not
-  reported as an error. Assert on the message text, not on the absence of `OK`.
+- Creating a table that already exists fails with `  x Table t already exists`, and the existing
+  table keeps its schema and rows. There is no `OK`.
+- `DATE` is not a column type: `CREATE TABLE d (x DATE)` fails with
+  `Parse error: Expected a column type.`
 - `DEFAULT` is not parsed: `CREATE TABLE d (id INT DEFAULT 5)` fails with
   `Unexpected token 'Keyword(Default)' while parsing constraints`.
 - A `TIMESTAMP` column can be created, but there is no timestamp literal. Inserting a string fails with

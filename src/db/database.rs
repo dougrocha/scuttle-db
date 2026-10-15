@@ -194,16 +194,15 @@ impl Database {
 
     /// Creates a new table with the given schema.
     ///
-    /// The table is created in-memory and ready for use immediately. Currently,
-    /// if a table with the same name already exists, it prints a warning and
-    /// continues (re-creating the table in memory).
+    /// The table is created in-memory and ready for use immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DatabaseError::TableAlreadyExists`] if a table with the same name already exists.
+    /// The existing table, its schema and its rows are left unchanged.
     pub fn create_table(&mut self, name: &str, schema: Schema) -> Result<(), DatabaseError> {
         if self.table_exists(name) {
-            // Eventually save table information in a catalog table,
-            // but for now just load the table with the schema normally
-            println!("Table {name} already exists");
-
-            return Ok(());
+            return Err(DatabaseError::TableAlreadyExists(name.to_string()));
         }
 
         let _ = self
@@ -1583,6 +1582,58 @@ mod tests {
         assert_eq!(
             db.query("SELECT 2 * 3 FROM users ORDER BY id"),
             vec![vec![Value::Int64(6)]; 4]
+        );
+    }
+
+    /// The error message from a statement that must fail.
+    fn error_message(db: &mut Database, sql: &str) -> String {
+        match db.execute_query(sql) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("expected `{sql}` to fail"),
+        }
+    }
+
+    #[test]
+    fn test_create_table_existing_table_fails() {
+        let mut db = TestDb::new("create-existing-fails");
+        assert_eq!(
+            error_message(&mut db.db, "CREATE TABLE users (id INT)"),
+            "Table users already exists"
+        );
+    }
+
+    #[test]
+    fn test_create_table_existing_table_keeps_schema_and_rows() {
+        let mut db = TestDb::new("create-existing-keeps");
+        assert!(db.fails("CREATE TABLE users (id INT)"));
+        assert_eq!(
+            db.columns("SELECT * FROM users"),
+            vec!["id", "name", "dept", "age"]
+        );
+        assert_eq!(
+            db.query("SELECT COUNT(*) FROM users"),
+            vec![vec![Value::Int64(4)]]
+        );
+    }
+
+    #[test]
+    fn test_create_table_existing_table_fails_after_reopen() {
+        let mut db = TestDb::new("create-existing-reopen");
+        db.reopen();
+        assert!(db.fails("CREATE TABLE users (id INT)"));
+        assert_eq!(
+            db.query("SELECT COUNT(*) FROM users"),
+            vec![vec![Value::Int64(4)]]
+        );
+    }
+
+    #[test]
+    fn test_create_table_new_name_then_duplicate_fails() {
+        let mut db = TestDb::new("create-new-then-dup");
+        db.execute("CREATE TABLE extra (id INT)");
+        assert_eq!(
+            error_message(&mut db.db, "CREATE TABLE extra (id INT)"),
+            "Table extra already exists"
         );
     }
 }
