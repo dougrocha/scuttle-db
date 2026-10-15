@@ -109,6 +109,24 @@ struct GroupedScope {
     aggregates: Vec<(Expression, AggregateCall)>,
 }
 
+impl GroupedScope {
+    /// Output position of GROUP BY key `key_pos`.
+    ///
+    /// The aggregate row is `[keys..., calls...]`. This must match the `Aggregate` arm of
+    /// `LogicalPlan::output_schema` and `AggregateExec`.
+    fn key_column(&self, key_pos: usize) -> usize {
+        key_pos
+    }
+
+    /// Output position of aggregate call `call_pos`.
+    ///
+    /// The calls follow every key. This must match the `Aggregate` arm of
+    /// `LogicalPlan::output_schema` and `AggregateExec`.
+    fn call_column(&self, call_pos: usize) -> usize {
+        self.group_by.len() + call_pos
+    }
+}
+
 /// Returns true if the expression calls an aggregate function anywhere.
 fn contains_aggregate(expr: &Expression) -> bool {
     match expr {
@@ -254,6 +272,8 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         }
 
         if let Some(grouped) = grouped {
+            let key_count = bound_group_by.len();
+            let call_count = grouped.aggregates.len();
             plan = LogicalPlan::Aggregate {
                 input: Box::new(plan),
                 group_by: bound_group_by,
@@ -263,6 +283,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     .map(|(_, call)| call)
                     .collect(),
             };
+            debug_assert_eq!(plan.output_schema().len(), key_count + call_count);
         }
 
         if !sort_keys.is_empty() {
@@ -584,7 +605,9 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             let canonical = scope.canonicalize(expr)?;
             if let Some(index) = g.group_by.iter().position(|(key, _)| *key == canonical) {
                 return Ok(AnalyzedExpression::Column(
-                    ColumnRef { index },
+                    ColumnRef {
+                        index: g.key_column(index),
+                    },
                     g.group_by[index].1,
                 ));
             }
@@ -699,7 +722,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
                 Ok(AnalyzedExpression::Column(
                     ColumnRef {
-                        index: group.group_by.len() + index,
+                        index: group.call_column(index),
                     },
                     return_type,
                 ))
