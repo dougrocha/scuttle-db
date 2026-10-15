@@ -24,6 +24,11 @@ pub enum Expression {
     /// Column reference (e.g., `age`, `name`)
     Identifier(String),
 
+    /// Qualified column reference (e.g., `u.id`, `orders.total`).
+    ///
+    /// `relation` is the table alias if one was given, otherwise the table name.
+    Qualified { relation: String, column: String },
+
     /// Literal value (e.g., `25`, `'Alice'`)
     Literal(Value),
 
@@ -66,6 +71,7 @@ impl fmt::Display for Expression {
                 write!(f, "({left} {op:?} {right})")
             }
             Expression::Identifier(name) => write!(f, "{name}"),
+            Expression::Qualified { relation, column } => write!(f, "{relation}.{column}"),
             Expression::Literal(value) => match value {
                 Value::Float64(num) => write!(f, "{num}"),
                 Value::Int64(num) => write!(f, "{num}"),
@@ -97,6 +103,7 @@ impl Expression {
     pub fn to_column_name(&self) -> String {
         match self {
             Expression::Identifier(name) => name.clone(),
+            Expression::Qualified { column, .. } => column.clone(),
             Expression::Function { name, .. } => name.to_lowercase(),
             _ => "?column?".to_string(),
         }

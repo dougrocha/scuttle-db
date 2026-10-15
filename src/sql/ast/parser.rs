@@ -379,7 +379,7 @@ impl<'src> SqlParser<'src> {
             Token::Identifier(name) if self.peek_is(Token::LeftParen) => {
                 self.parse_function_call(name.to_string())?
             }
-            Token::Identifier(i) => Expression::Identifier(i.to_string()),
+            Token::Identifier(i) => Self::column_from_word(&i)?,
             Token::Asterisk => Expression::Identifier("*".to_string()),
             Token::LeftParen => {
                 let expr = self.parse_expression(0)?;
@@ -394,6 +394,27 @@ impl<'src> SqlParser<'src> {
         };
 
         self.parse_is_postfix(expr)
+    }
+
+    /// Turns the lexer's word into a column reference.  The lexer does NOT stop at '.',
+    /// so `u.name` arrives as one word.  Splits on the first '.'.
+    ///
+    /// Known limitation: the lexer drops quote information, so a quoted identifier
+    /// that contains a dot (`"a.b"`) is also split.
+    ///
+    /// # Errors
+    /// `a.`, `.a`, `a.b.c` -> `Invalid column reference "<word>"`.
+    fn column_from_word(word: &str) -> Result<Expression> {
+        match word.split_once('.') {
+            None => Ok(Expression::Identifier(word.to_string())),
+            Some((rel, col)) if !rel.is_empty() && !col.is_empty() && !col.contains('.') => {
+                Ok(Expression::Qualified {
+                    relation: rel.to_string(),
+                    column: col.to_string(),
+                })
+            }
+            Some(_) => Err(miette!("Invalid column reference \"{word}\"")),
+        }
     }
 
     /// Parses the `(...)` after a function name.
@@ -1128,6 +1149,94 @@ mod tests {
             Statement::Select(select) => select,
             _ => panic!("Expected Select statement"),
         }
+    }
+
+    #[test]
+    fn test_parse_qualified_column() {
+        let expr = parse_where("SELECT * FROM t WHERE u.id = 1");
+
+        assert_eq!(
+            expr,
+            Expression::BinaryOp {
+                left: Box::new(Expression::Qualified {
+                    relation: "u".to_string(),
+                    column: "id".to_string(),
+                }),
+                op: Operator::Equal,
+                right: Box::new(Expression::Literal(Value::Int64(1))),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_qualified_in_select_group_order_and_aggregate() {
+        let select = parse_select("SELECT u.id, COUNT(u.id) FROM t GROUP BY u.dept ORDER BY u.id");
+        let qualified = |column: &str| Expression::Qualified {
+            relation: "u".to_string(),
+            column: column.to_string(),
+        };
+
+        match &select.select_list[0] {
+            SelectTarget::Expression { expr, .. } => assert_eq!(*expr, qualified("id")),
+            other => panic!("Expected expression target, got {other:?}"),
+        }
+        match &select.select_list[1] {
+            SelectTarget::Expression {
+                expr:
+                    Expression::Function {
+                        args: FunctionArgs::List(args),
+                        ..
+                    },
+                ..
+            } => assert_eq!(args, &vec![qualified("id")]),
+            other => panic!("Expected COUNT call, got {other:?}"),
+        }
+        assert_eq!(select.group_by[0], qualified("dept"));
+        assert_eq!(select.order_by[0].expr, qualified("id"));
+    }
+
+    #[test]
+    fn test_parse_qualified_column_default_name() {
+        let expr = Expression::Qualified {
+            relation: "u".to_string(),
+            column: "id".to_string(),
+        };
+
+        assert_eq!(expr.to_column_name(), "id");
+    }
+
+    #[test]
+    fn test_parse_invalid_column_reference() {
+        for query in [
+            "SELECT a. FROM t",
+            "SELECT .a FROM t",
+            "SELECT a.b.c FROM t",
+        ] {
+            assert!(
+                SqlParser::new(query).parse().is_err(),
+                "expected `{query}` to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_qualified_join_on() {
+        let select = parse_select("SELECT * FROM users u JOIN orders o ON u.id = o.user_id");
+
+        assert_eq!(
+            select.from_clause.joins[0].on,
+            Expression::BinaryOp {
+                left: Box::new(Expression::Qualified {
+                    relation: "u".to_string(),
+                    column: "id".to_string(),
+                }),
+                op: Operator::Equal,
+                right: Box::new(Expression::Qualified {
+                    relation: "o".to_string(),
+                    column: "user_id".to_string(),
+                }),
+            }
+        );
     }
 
     #[test]

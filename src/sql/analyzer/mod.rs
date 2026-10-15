@@ -111,7 +111,7 @@ fn contains_aggregate(expr: &Expression) -> bool {
             contains_aggregate(left) || contains_aggregate(right)
         }
         Expression::Is { expr, .. } => contains_aggregate(expr),
-        Expression::Identifier(_) | Expression::Literal(_) => false,
+        Expression::Identifier(_) | Expression::Qualified { .. } | Expression::Literal(_) => false,
     }
 }
 
@@ -558,6 +558,9 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     },
                     field.data_type,
                 ))
+            }
+            Expression::Qualified { .. } => {
+                Err(miette!("Qualified column references are not supported yet"))
             }
             Expression::Literal(scalar_value) => match scalar_value {
                 Value::Null => Err(miette!(
