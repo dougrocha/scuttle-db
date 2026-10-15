@@ -1262,6 +1262,27 @@ mod tests {
         );
     }
 
+    /// The NULL padding of an unmatched LEFT row must be exactly as wide as the right
+    /// table: a join chained after it reads its columns at fixed positions.
+    #[test]
+    fn test_join_after_left_join_on_empty_table_reads_shifted_columns() {
+        let mut db = TestDb::new("join-pad-width");
+        seed_orders(&mut db);
+        db.execute("CREATE TABLE empty_t (id INT, v INT)");
+
+        assert_eq!(
+            db.query(
+                "SELECT u.name, e.v, o.total FROM users u LEFT JOIN empty_t e ON u.id = e.id \
+                 JOIN orders o ON o.user_id = u.id ORDER BY o.id"
+            ),
+            vec![
+                vec![text("Alice"), Value::Null, Value::Int64(100)],
+                vec![text("Alice"), Value::Null, Value::Int64(50)],
+                vec![text("Carol"), Value::Null, Value::Int64(75)],
+            ]
+        );
+    }
+
     #[test]
     fn test_join_left_with_empty_right_table() {
         let mut db = TestDb::new("join-empty-right");

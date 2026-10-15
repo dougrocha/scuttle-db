@@ -446,6 +446,70 @@ mod tests {
     }
 
     #[test]
+    fn test_explain_column_names_follow_input_shape() {
+        let cases = [
+            (
+                "SELECT dept, COUNT(*) FROM users GROUP BY dept ORDER BY COUNT(*) DESC, dept",
+                "Projection: dept, count\n  Sort: COUNT(*) DESC, dept\n    Aggregate: group by dept; COUNT(*)\n      Scan: users",
+            ),
+            (
+                "SELECT age + 1, COUNT(*) FROM users GROUP BY age + 1 ORDER BY age + 1",
+                "Projection: ?column?, count\n  Sort: age + 1\n    Aggregate: group by age + 1; COUNT(*)\n      Scan: users",
+            ),
+            (
+                "SELECT u.name, COUNT(o.id) FROM users u LEFT JOIN orders o ON u.id = o.user_id GROUP BY u.name ORDER BY u.name, COUNT(o.id) DESC",
+                "Projection: name, count\n  Sort: u.name, COUNT(o.id) DESC\n    Aggregate: group by u.name; COUNT(o.id)\n      Join: left on u.id = o.user_id\n        Scan: users u\n        Scan: orders o",
+            ),
+            (
+                "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id ORDER BY o.total DESC LIMIT 2 OFFSET 1",
+                "Limit: 2 offset 1\n  Projection: name, total\n    Sort: o.total DESC\n      Join: inner on u.id = o.user_id\n        Scan: users u\n        Scan: orders o",
+            ),
+            (
+                "SELECT u.name FROM users u WHERE u.age > 20 ORDER BY u.age",
+                "Projection: name\n  Sort: age\n    Filter: age > 20\n      Scan: users u",
+            ),
+            (
+                "SELECT users.name FROM users users WHERE users.age > 20",
+                "Projection: name\n  Filter: age > 20\n    Scan: users users",
+            ),
+            (
+                "SELECT u.name, SUM(o.total) FROM users u JOIN orders o ON u.id = o.user_id WHERE o.total > 5 GROUP BY u.name",
+                "Projection: name, sum\n  Aggregate: group by u.name; SUM(o.total)\n    Filter: o.total > 5\n      Join: inner on u.id = o.user_id\n        Scan: users u\n        Scan: orders o",
+            ),
+            (
+                "SELECT COUNT(*) FROM users",
+                "Projection: count\n  Aggregate: COUNT(*)\n    Scan: users",
+            ),
+            (
+                "SELECT * FROM users u JOIN orders o ON u.id = o.user_id JOIN depts d ON u.dept = d.code WHERE d.title = 'x' AND u.id IS NOT NULL",
+                "Projection: id, name, dept, age, id, user_id, total, code, title\n  Filter: (d.title = 'x') AND u.id IS NOT NULL\n    Join: inner on u.dept = d.code\n      Join: inner on u.id = o.user_id\n        Scan: users u\n        Scan: orders o\n      Scan: depts d",
+            ),
+            (
+                "INSERT INTO users (id, name) VALUES (1, 'a'), (2, 'b')",
+                "Insert: users (id, name)\n  Values: 2 rows",
+            ),
+            (
+                "UPDATE users SET age = age + 1, name = 'x' WHERE id = 1",
+                "Update: users set age = age + 1, name = 'x'\n  Filter: id = 1\n    Scan: users",
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert_eq!(shop().explain(sql).unwrap(), expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn test_explain_join_with_zero_column_table_is_still_qualified() {
+        let mut db = shop();
+        db.execute_query("CREATE TABLE z ()").unwrap();
+        assert_eq!(
+            db.explain("SELECT u.id FROM z JOIN users u ON u.id = 1 WHERE u.id > 1")
+                .unwrap(),
+            "Projection: id\n  Filter: u.id > 1\n    Join: inner on u.id = 1\n      Scan: z\n      Scan: users u"
+        );
+    }
+
+    #[test]
     fn test_explain_join_errors() {
         let cases = [
             // Ambiguous unqualified column (`id` is in both tables).
