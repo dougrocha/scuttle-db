@@ -16,6 +16,8 @@ use crate::{
     },
 };
 
+mod scope;
+
 #[derive(Debug)]
 pub struct ColumnRef {
     pub index: usize,
