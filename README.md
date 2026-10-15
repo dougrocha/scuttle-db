@@ -77,7 +77,7 @@ Database
 - [ ] File persistence (save/load database)
 
 - [ ] B-tree indexes for fast lookups
-- [ ] JOIN operations (INNER, LEFT, RIGHT)
+- [ ] JOIN operations (INNER and LEFT done; RIGHT not yet)
 - [ ] Query optimization (index selection, join order)
 - [ ] Statistics collection (TableStats)
 

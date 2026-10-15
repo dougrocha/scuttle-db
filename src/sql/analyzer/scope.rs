@@ -35,16 +35,23 @@ impl ScopeColumn {
     }
 }
 
+/// Ordered list of the columns visible to an expression, one entry per relation column.
 #[derive(Debug, Default)]
 pub(crate) struct BindScope {
     columns: Vec<ScopeColumn>,
 }
 
 impl BindScope {
+    /// Creates a scope with no relations (used for expressions without a FROM clause).
     pub(crate) fn empty() -> Self {
         Self::default()
     }
 
+    /// Creates a scope containing the columns of a single relation.
+    ///
+    /// # Panics
+    ///
+    /// Never panics in practice: the scope starts empty, so no duplicate relation can exist.
     pub(crate) fn single(relation: &str, schema: &Schema) -> Self {
         let mut scope = Self::empty();
         scope
@@ -53,6 +60,11 @@ impl BindScope {
         scope
     }
 
+    /// Appends the columns of `relation` to the scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a relation with the same name is already in the scope.
     pub(crate) fn push_relation(&mut self, relation: &str, schema: &Schema) -> Result<()> {
         if self.columns.iter().any(|c| c.relation == relation) {
             return Err(miette!(
@@ -68,10 +80,19 @@ impl BindScope {
         Ok(())
     }
 
+    /// Returns the total number of columns across all relations in the scope.
     pub(crate) fn len(&self) -> usize {
         self.columns.len()
     }
 
+    /// Resolves a (possibly qualified) column reference to its position and type.
+    ///
+    /// An unqualified name must match exactly one column across all relations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the relation is missing, the column does not exist,
+    /// or an unqualified name is ambiguous.
     pub(crate) fn resolve(&self, qualifier: Option<&str>, name: &str) -> Result<(usize, DataType)> {
         let index = match qualifier {
             Some(relation) => {
@@ -102,10 +123,18 @@ impl BindScope {
         Ok((index, self.columns[index].data_type))
     }
 
+    /// Returns true if any relation in the scope has a column with this name.
     pub(crate) fn has_column(&self, name: &str) -> bool {
         self.columns.iter().any(|c| c.name == name)
     }
 
+    /// Expands `*` or `relation.*` into one expression per column, in column order.
+    ///
+    /// Each pair holds the column expression and its output name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `qualifier` names a relation that is not in the scope.
     pub(crate) fn expand_star(&self, qualifier: Option<&str>) -> Result<Vec<(Expression, String)>> {
         if let Some(relation) = qualifier
             && !self.columns.iter().any(|c| c.relation == relation)
@@ -120,6 +149,11 @@ impl BindScope {
             .collect())
     }
 
+    /// Rewrites every column reference in `expr` to its fully qualified form.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any column reference cannot be resolved in this scope.
     pub(crate) fn canonicalize(&self, expr: &Expression) -> Result<Expression> {
         match expr {
             Expression::Identifier(name) => {
@@ -162,6 +196,7 @@ impl BindScope {
         }
     }
 
+    /// Returns every column as a `relation.column` string, in scope order.
     pub(crate) fn qualified_names(&self) -> Vec<String> {
         self.columns
             .iter()
