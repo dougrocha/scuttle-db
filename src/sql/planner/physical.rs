@@ -95,9 +95,10 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                 right,
                 kind,
                 on,
-                right_width,
-                ..
             } => {
+                // Read before `right` is moved. The width comes from the schema, not from rows,
+                // because the right table may be empty.
+                let right_width = right.output_schema().len();
                 let left = self.create_physical_plan(*left)?;
                 let right = self.create_physical_plan(*right)?;
 

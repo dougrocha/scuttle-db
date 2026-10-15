@@ -447,9 +447,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         let mut scope = BindScope::empty();
         let mut plan = self.scan(&from.table, &mut scope)?;
         for join in &from.joins {
-            let left_width = scope.len();
             let right = self.scan(&join.table, &mut scope)?;
-            let right_width = scope.len() - left_width;
             let on = self.bind_expression(&join.on, &scope)?;
             if on.get_type() != DataType::Bool {
                 return Err(miette!("JOIN ... ON must be a boolean expression"));
@@ -459,7 +457,6 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 right: Box::new(right),
                 kind: join.kind,
                 on,
-                right_width,
             };
         }
         Ok((plan, scope))

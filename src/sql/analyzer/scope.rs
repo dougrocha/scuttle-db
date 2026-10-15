@@ -80,11 +80,6 @@ impl BindScope {
         Ok(())
     }
 
-    /// Returns the total number of columns across all relations in the scope.
-    pub(crate) fn len(&self) -> usize {
-        self.columns.len()
-    }
-
     /// Resolves a (possibly qualified) column reference to its position and type.
     ///
     /// An unqualified name must match exactly one column across all relations.
@@ -248,7 +243,6 @@ mod tests {
             scope.resolve(Some("u"), "name").unwrap(),
             (1, DataType::Text)
         );
-        assert_eq!(scope.len(), 7);
     }
 
     #[test]

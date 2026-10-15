@@ -32,10 +32,6 @@ pub enum LogicalPlan {
         /// Bound against `left ++ right`. Decides matching and, for LEFT, null-extension.
         /// Must stay on the join: a WHERE predicate is never merged into it.
         on: AnalyzedExpression,
-
-        /// Number of columns the right child produces. This is the LEFT padding width.
-        /// It cannot be read from rows, because the right table may be empty.
-        right_width: usize,
     },
     Filter {
         input: Box<LogicalPlan>,

@@ -106,6 +106,11 @@ impl RelationSchema {
         self.columns.iter().map(|col| col.name.clone()).collect()
     }
 
+    /// Number of columns in every row the node produces.
+    pub(crate) fn len(&self) -> usize {
+        self.columns.len()
+    }
+
     /// EXPLAIN label of column `index`, or `#index` if out of range.
     pub(crate) fn label(&self, index: usize) -> String {
         self.columns
