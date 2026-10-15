@@ -4,6 +4,7 @@ use miette::{Result, miette};
 
 use crate::{
     ColumnDef, DataType, Value,
+    core::timestamp::parse_timestamp,
     db::table::column_def::ColumnConstraint,
     sql::{
         ast::{
@@ -385,6 +386,9 @@ impl<'src> SqlParser<'src> {
             Token::Keyword(kw) if kw.is_bool_literal() => {
                 Expression::Literal(Value::from(matches!(kw, Keyword::True)))
             }
+            Token::Keyword(Keyword::Timestamp) => {
+                Expression::Literal(self.parse_timestamp_literal()?)
+            }
             Token::Keyword(Keyword::Null) => Expression::Literal(Value::Null),
             Token::Integer(i) => Expression::Literal(Value::Int64(i)),
             Token::Float(f) => Expression::Literal(Value::Float64(f)),
@@ -552,11 +556,25 @@ impl<'src> SqlParser<'src> {
     }
 
     /// Parses the literal after `DEFAULT` in a column definition.
+    /// Parses the quoted text after a `TIMESTAMP` keyword, such as `TIMESTAMP '2026-01-01'`.
+    fn parse_timestamp_literal(&mut self) -> Result<Value> {
+        match self.next_token()? {
+            Token::String(s) => parse_timestamp(&s)
+                .map(Value::Timestamp)
+                .map_err(|e| miette!("{e}")),
+            t => Err(miette!(
+                "TIMESTAMP must be followed by a quoted string, but found {:?}",
+                t
+            )),
+        }
+    }
+
     fn parse_default_value(&mut self) -> Result<Value> {
         match self.next_token()? {
             Token::Integer(i) => Ok(Value::Int64(i)),
             Token::Float(f) => Ok(Value::Float64(f)),
             Token::String(s) => Ok(Value::Text(s.to_string())),
+            Token::Keyword(Keyword::Timestamp) => self.parse_timestamp_literal(),
             Token::Keyword(Keyword::Null) => Ok(Value::Null),
             Token::Keyword(kw) if kw.is_bool_literal() => {
                 Ok(Value::from(matches!(kw, Keyword::True)))
@@ -1544,5 +1562,40 @@ mod tests {
                 "{column} should not parse"
             );
         }
+    }
+
+    #[test]
+    fn test_parse_timestamp_literal_in_expression() {
+        match parse_where("SELECT id FROM t WHERE at = TIMESTAMP '2026-03-01 12:00:00'") {
+            Expression::BinaryOp { right, .. } => {
+                assert_eq!(*right, Expression::Literal(Value::Timestamp(1_772_366_400)));
+            }
+            other => panic!("Expected binary comparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_timestamp_literal_rejects_bad_text() {
+        let error = SqlParser::new("SELECT TIMESTAMP '2026-02-30' FROM t")
+            .parse()
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("date/time field value out of range")
+        );
+        assert!(
+            SqlParser::new("SELECT TIMESTAMP 5 FROM t").parse().is_err(),
+            "TIMESTAMP must be followed by a string"
+        );
+    }
+
+    #[test]
+    fn test_parse_column_default_timestamp_literal() {
+        let def = parse_column("at TIMESTAMP DEFAULT TIMESTAMP '2026-01-01'");
+        assert!(def.constraints.iter().any(|c| matches!(
+            c,
+            ColumnConstraint::Default(Value::Timestamp(1_767_225_600))
+        )));
     }
 }

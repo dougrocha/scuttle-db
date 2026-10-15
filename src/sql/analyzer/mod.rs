@@ -2,6 +2,7 @@ use miette::{Result, miette};
 
 use crate::{
     ColumnDef, DataType, Value,
+    core::timestamp::parse_timestamp,
     db::table::Table,
     sql::{
         ast::{
@@ -129,6 +130,7 @@ impl AnalyzedExpression {
                 Value::Float64(_) => DataType::Float64,
                 Value::Text(_) => DataType::Text,
                 Value::Bool(_) => DataType::Bool,
+                Value::Timestamp(_) => DataType::Timestamp,
                 Value::Null => unreachable!("Null has no definite type."),
             },
             AnalyzedExpression::Column(_, column_type) => *column_type,
@@ -136,6 +138,34 @@ impl AnalyzedExpression {
             AnalyzedExpression::IsPredicate { .. } => DataType::Bool,
         }
     }
+}
+
+/// Converts a bare text literal to a TIMESTAMP when `target` is a timestamp type.
+///
+/// Only literals are converted. A computed text value keeps its type, so it never becomes a
+/// timestamp implicitly.
+///
+/// # Errors
+///
+/// Returns the timestamp parse error when the literal is not a valid timestamp.
+fn literal_as(value: AnalyzedExpression, target: DataType) -> Result<AnalyzedExpression> {
+    match value {
+        AnalyzedExpression::Literal(Value::Text(text)) if target == DataType::Timestamp => {
+            let seconds = parse_timestamp(&text).map_err(|e| miette!("{e}"))?;
+            Ok(AnalyzedExpression::Literal(Value::Timestamp(seconds)))
+        }
+        other => Ok(other),
+    }
+}
+
+/// Applies [`literal_as`] to both operands of a comparison, so `ts > '2026-01-01'` and
+/// `'2026-01-01' < ts` both compare as timestamps.
+fn coerce_timestamp_literals(
+    left: AnalyzedExpression,
+    right: AnalyzedExpression,
+) -> Result<(AnalyzedExpression, AnalyzedExpression)> {
+    let (left_type, right_type) = (left.get_type(), right.get_type());
+    Ok((literal_as(left, right_type)?, literal_as(right, left_type)?))
 }
 
 pub struct Analyzer<'a, 'db> {
@@ -280,8 +310,8 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             let value = if *expr == Expression::Literal(Value::Null) {
                 AnalyzedExpression::Literal(Value::Null)
             } else {
-                let value = self.bind_expression(expr, &scope)?;
                 let column_type = schema.columns[index].data_type;
+                let value = literal_as(self.bind_expression(expr, &scope)?, column_type)?;
                 if !DataType::can_coerce(value.get_type(), column_type) {
                     return Err(miette!(
                         "Cannot assign {:?} to column {column} of type {:?}",
@@ -383,7 +413,8 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     }
                     AnalyzedExpression::Literal(Value::Null)
                 } else {
-                    let value = self.bind_expression(expr, &no_columns)?;
+                    let value =
+                        literal_as(self.bind_expression(expr, &no_columns)?, column.data_type)?;
                     if !DataType::can_coerce(value.get_type(), column.data_type) {
                         return Err(miette!(
                             "Cannot insert {:?} into column {} of type {:?}",
@@ -564,6 +595,15 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             Expression::BinaryOp { left, op, right } => {
                 let left = self.bind(left, scope, grouped.as_deref_mut())?;
                 let right = self.bind(right, scope, grouped)?;
+                let (left, right) = match op {
+                    Operator::Equal
+                    | Operator::NotEqual
+                    | Operator::GreaterThan
+                    | Operator::GreaterThanEqual
+                    | Operator::LessThan
+                    | Operator::LessThanEqual => coerce_timestamp_literals(left, right)?,
+                    _ => (left, right),
+                };
 
                 let return_type = self.resolve_binary_op(left.get_type(), *op, right.get_type())?;
 
@@ -697,6 +737,12 @@ impl<'a, 'db> Analyzer<'a, 'db> {
     }
 
     fn resolve_arithmetic_type(left: DataType, right: DataType) -> Result<DataType> {
+        if left == DataType::Timestamp || right == DataType::Timestamp {
+            return Err(miette!(
+                "Cannot perform arithmetic between {left:?} and {right:?}"
+            ));
+        }
+
         if left == right {
             return Ok(left);
         }

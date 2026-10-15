@@ -32,6 +32,7 @@ impl Schema {
     /// - Integer/Float: 8 bytes (little-endian i64)
     /// - Text/VarChar: 4-byte length + UTF-8 bytes
     /// - Boolean: 1 Bit
+    /// - Timestamp: 8 bytes (little-endian i64 seconds since the epoch)
     pub(crate) fn encode_row(&self, row: &Row) -> Vec<u8> {
         let mut bytes = vec![];
 
@@ -74,6 +75,9 @@ impl Schema {
                 }
                 (DataType::Bool, Value::Bool(b)) => {
                     bytes.push(if *b { 1 } else { 0 });
+                }
+                (DataType::Timestamp, Value::Timestamp(seconds)) => {
+                    bytes.extend_from_slice(&seconds.to_le_bytes());
                 }
                 _ => panic!(
                     "Column type ({:?}) and value ({:?}) combination not implemented",
@@ -155,10 +159,76 @@ impl Schema {
                         }
                     }
                 }
-                DataType::Timestamp => todo!(),
+                DataType::Timestamp => {
+                    if offset + 8 > bytes.len() {
+                        return Err(miette!("Not enough bytes for timestamp value"));
+                    }
+                    let mut num_bytes = [0u8; 8];
+                    num_bytes.copy_from_slice(&bytes[offset..offset + 8]);
+                    values.push(Value::Timestamp(i64::from_le_bytes(num_bytes)));
+                    offset += 8;
+                }
             }
         }
 
         Ok(Row::new(values))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::timestamp::parse_timestamp;
+
+    fn timestamp_schema() -> Schema {
+        Schema::new(vec![
+            ColumnDef::no_constraints("id", DataType::Int64),
+            ColumnDef::no_constraints("at", DataType::Timestamp),
+        ])
+    }
+
+    #[test]
+    fn test_encode_row_round_trips_timestamp() {
+        let schema = timestamp_schema();
+        let at = parse_timestamp("2026-03-01 12:00:00").unwrap();
+        let row = Row::new(vec![Value::Int64(1), Value::Timestamp(at)]);
+
+        let bytes = schema.encode_row(&row);
+        assert_eq!(schema.decode_row(&bytes).unwrap().values, row.values);
+    }
+
+    #[test]
+    fn test_encode_row_round_trips_negative_timestamp() {
+        let schema = timestamp_schema();
+        let row = Row::new(vec![Value::Int64(1), Value::Timestamp(-1)]);
+
+        let bytes = schema.encode_row(&row);
+        assert_eq!(schema.decode_row(&bytes).unwrap().values, row.values);
+    }
+
+    #[test]
+    fn test_encode_row_null_timestamp_stores_no_payload() {
+        let schema = timestamp_schema();
+        let row = Row::new(vec![Value::Int64(1), Value::Null]);
+
+        let bytes = schema.encode_row(&row);
+        // One bitmap byte plus the 8-byte integer; the NULL timestamp adds nothing.
+        assert_eq!(bytes.len(), 1 + 8);
+        assert_eq!(schema.decode_row(&bytes).unwrap().values, row.values);
+    }
+
+    #[test]
+    fn test_decode_row_truncated_timestamp_fails() {
+        let schema = timestamp_schema();
+        let row = Row::new(vec![Value::Int64(1), Value::Timestamp(0)]);
+        let bytes = schema.encode_row(&row);
+
+        let truncated = &bytes[..bytes.len() - 1];
+        let error = schema.decode_row(truncated).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Not enough bytes for timestamp value")
+        );
     }
 }

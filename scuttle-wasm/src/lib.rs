@@ -126,6 +126,7 @@ fn to_json(value: &Value) -> Json {
         Value::Float64(n) => json!(n),
         Value::Text(s) => json!(s),
         Value::Bool(b) => json!(b),
+        Value::Timestamp(_) => json!(value.to_string()),
         Value::Null => Json::Null,
     }
 }

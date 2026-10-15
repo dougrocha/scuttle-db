@@ -92,6 +92,7 @@ pub fn values_equal(left: &Value, right: &Value) -> Value {
         (Value::Float64(a), Value::Int64(b)) => (a - *b as f64).abs() < f64::EPSILON,
         (Value::Text(a), Value::Text(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
         _ => false,
     };
     Value::Bool(result)
@@ -107,6 +108,7 @@ pub fn values_greater_than(left: &Value, right: &Value) -> Value {
         (Value::Float64(a), Value::Float64(b)) => a > b,
         (Value::Int64(a), Value::Float64(b)) => (*a as f64) > *b,
         (Value::Float64(a), Value::Int64(b)) => *a > (*b as f64),
+        (Value::Timestamp(a), Value::Timestamp(b)) => a > b,
         _ => false,
     };
     Value::Bool(result)
@@ -122,6 +124,7 @@ pub fn values_less_than(left: &Value, right: &Value) -> Value {
         (Value::Float64(a), Value::Float64(b)) => a < b,
         (Value::Int64(a), Value::Float64(b)) => (*a as f64) < *b,
         (Value::Float64(a), Value::Int64(b)) => *a < (*b as f64),
+        (Value::Timestamp(a), Value::Timestamp(b)) => a < b,
         _ => false,
     };
     Value::Bool(result)
@@ -143,6 +146,7 @@ pub fn compare_values(left: &Value, right: &Value) -> Ordering {
         (Value::Float64(a), Value::Int64(b)) => a.total_cmp(&(*b as f64)),
         (Value::Text(a), Value::Text(b)) => a.cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
         _ => Ordering::Equal,
     }
 }
@@ -358,5 +362,38 @@ mod tests {
     fn test_values_less_than_with_null() {
         let result = values_less_than(&Value::Null, &Value::Int64(10));
         assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_values_compare_timestamps() {
+        let earlier = Value::Timestamp(-1);
+        let later = Value::Timestamp(1_772_366_400);
+
+        assert_eq!(values_equal(&later, &later), Value::Bool(true));
+        assert_eq!(values_equal(&earlier, &later), Value::Bool(false));
+        assert_eq!(values_greater_than(&later, &earlier), Value::Bool(true));
+        assert_eq!(values_greater_than(&earlier, &later), Value::Bool(false));
+        assert_eq!(values_less_than(&earlier, &later), Value::Bool(true));
+        assert_eq!(values_less_than(&later, &earlier), Value::Bool(false));
+        assert_eq!(values_equal(&earlier, &Value::Null), Value::Null);
+    }
+
+    #[test]
+    fn test_compare_values_timestamps_order_before_and_after_epoch() {
+        let before_epoch = Value::Timestamp(-62_135_596_800);
+        let epoch = Value::Timestamp(0);
+        let after_epoch = Value::Timestamp(253_402_300_799);
+
+        assert_eq!(compare_values(&before_epoch, &epoch), Ordering::Less);
+        assert_eq!(compare_values(&epoch, &after_epoch), Ordering::Less);
+        assert_eq!(
+            compare_values(&after_epoch, &before_epoch),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_values(&epoch, &Value::Timestamp(0)),
+            Ordering::Equal
+        );
+        assert_eq!(compare_values(&epoch, &Value::Null), Ordering::Less);
     }
 }

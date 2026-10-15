@@ -79,6 +79,7 @@ impl fmt::Display for Expression {
                 Value::Bool(bool) => {
                     write!(f, "{}", bool.to_string().to_uppercase())
                 }
+                Value::Timestamp(_) => write!(f, "TIMESTAMP '{value}'"),
                 Value::Null => write!(f, "NULL"),
             },
             Expression::Is {

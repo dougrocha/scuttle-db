@@ -269,6 +269,7 @@ fn operand(expr: &AnalyzedExpression, columns: &[String]) -> String {
 fn literal(value: &Value) -> String {
     match value {
         Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
+        other @ Value::Timestamp(_) => format!("TIMESTAMP '{other}'"),
         other => other.to_string(),
     }
 }

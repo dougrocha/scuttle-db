@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::core::timestamp::{format_timestamp, parse_timestamp};
+
 /// SQL data types supported by Scuttle DB.
 ///
 /// These types define the kind of data a column can hold and how
@@ -28,6 +30,11 @@ pub enum DataType {
     /// 64-bit floating point number.
     Float64,
 
+    /// Date and time with no time zone.
+    ///
+    /// Stored as an 8-byte little-endian count of seconds since 1970-01-01 00:00:00
+    /// (negative before the epoch). Text literals such as `'2026-03-01 12:00:00'` are
+    /// accepted for it.
     Timestamp,
 }
 
@@ -80,6 +87,9 @@ pub enum Value {
     /// A boolean value (true/false).
     Bool(bool),
 
+    /// A timestamp: whole seconds since 1970-01-01 00:00:00, with no time zone.
+    Timestamp(i64),
+
     /// Represents a NULL value (absence of data).
     ///
     /// Only allowed in nullable columns.
@@ -93,6 +103,7 @@ impl std::fmt::Display for Value {
             Value::Text(s) => write!(f, "{}", s),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Float64(fl) => write!(f, "{}", fl),
+            Value::Timestamp(seconds) => write!(f, "{}", format_timestamp(*seconds)),
             Value::Null => write!(f, "NULL"),
         }
     }
@@ -110,6 +121,7 @@ impl Value {
     pub(crate) fn coerce_to(self, data_type: &DataType) -> Result<Value, String> {
         let value = match (self, data_type) {
             (Value::Int64(n), DataType::Float64) => Value::Float64(n as f64),
+            (Value::Text(text), DataType::Timestamp) => Value::Timestamp(parse_timestamp(&text)?),
             (value, _) => value,
         };
 
@@ -136,6 +148,7 @@ impl Value {
             (Value::Int64(_), DataType::Int64)
             | (Value::Bool(_), DataType::Bool)
             | (Value::Float64(_), DataType::Float64)
+            | (Value::Timestamp(_), DataType::Timestamp)
             | (Value::Null, _)
             | (Value::Text(_), DataType::Text) => Ok(()),
 
