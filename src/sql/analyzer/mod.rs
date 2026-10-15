@@ -173,7 +173,10 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             limit,
             offset,
         } = statement;
-        let schema = self.context.get_table(&from_clause.table)?.schema();
+        if !from_clause.joins.is_empty() {
+            return Err(miette!("JOIN is not supported yet"));
+        }
+        let schema = self.context.get_table(&from_clause.table.name)?.schema();
 
         let mut plan = self.analyze_from_clause(from_clause)?;
 
@@ -425,7 +428,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
     fn analyze_from_clause(&self, from_clause: statement::From) -> Result<LogicalPlan> {
         Ok(LogicalPlan::Scan {
-            table_name: from_clause.table.to_string(),
+            table_name: from_clause.table.name.clone(),
         })
     }
 

@@ -772,6 +772,16 @@ mod tests {
     }
 
     #[test]
+    fn test_select_from_alias_is_accepted() {
+        let mut db = TestDb::new("from-alias");
+
+        assert_eq!(
+            db.query("SELECT name FROM users u WHERE age > 30 ORDER BY id"),
+            vec![vec![text("Carol")], vec![text("Dan")]]
+        );
+    }
+
+    #[test]
     fn test_count_star() {
         let mut db = TestDb::new("count");
 

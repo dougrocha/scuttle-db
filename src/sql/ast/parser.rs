@@ -12,8 +12,8 @@ use crate::{
             operator::Operator,
             predicate::IsPredicate,
             statement::{
-                CreateStatement, DeleteStatement, From, InsertStatement, OrderByItem,
-                SelectStatement, Statement, UpdateStatement,
+                CreateStatement, DeleteStatement, From, InsertStatement, JoinClause, JoinKind,
+                OrderByItem, SelectStatement, Statement, TableRef, UpdateStatement,
             },
             target::{SelectList, SelectTarget},
         },
@@ -70,7 +70,7 @@ impl<'src> SqlParser<'src> {
 
         self.expect_keyword(Keyword::From)?;
 
-        let table_name = self.expect_identifier()?;
+        let from_clause = self.parse_from_clause()?;
 
         let where_clause = self.parse_where_clause()?;
 
@@ -118,15 +118,71 @@ impl<'src> SqlParser<'src> {
 
         Ok(Statement::Select(SelectStatement {
             select_list,
-            from_clause: From {
-                table: table_name.to_string(),
-            },
+            from_clause,
             where_clause,
             group_by,
             order_by,
             limit,
             offset,
         }))
+    }
+
+    /// FROM <table_ref> { [INNER] JOIN | LEFT [OUTER] JOIN } <table_ref> ON <expr> ...
+    ///
+    /// # Errors
+    /// RIGHT, FULL and CROSS joins are rejected. A join without ON is an error.
+    fn parse_from_clause(&mut self) -> Result<From> {
+        let table = self.parse_table_ref()?;
+        let mut joins = Vec::new();
+
+        loop {
+            let kind = if self.consume_if(Token::Keyword(Keyword::Join)) {
+                JoinKind::Inner
+            } else if self.consume_if(Token::Keyword(Keyword::Inner)) {
+                self.expect_keyword(Keyword::Join)?;
+                JoinKind::Inner
+            } else if self.consume_if(Token::Keyword(Keyword::Left)) {
+                self.consume_if(Token::Keyword(Keyword::Outer));
+                self.expect_keyword(Keyword::Join)?;
+                JoinKind::Left
+            } else if self.peek_keyword(Keyword::Right) {
+                return Err(miette!("RIGHT JOIN is not supported"));
+            } else if self.peek_keyword(Keyword::Full) {
+                return Err(miette!("FULL JOIN is not supported"));
+            } else if self.peek_keyword(Keyword::Cross) {
+                return Err(miette!("CROSS JOIN is not supported"));
+            } else {
+                // FULL and CROSS are reserved keywords ONLY so they can be rejected here:
+                // as identifiers, `users FULL JOIN orders` would parse as alias `full` plus
+                // an INNER JOIN and silently return wrong rows.
+                break;
+            };
+
+            let table = self.parse_table_ref()?;
+            self.expect_keyword(Keyword::On)?;
+            // parse_expression(0) stops at JOIN / INNER / LEFT / WHERE / GROUP, because
+            // peek_binary_op() fails on them and the loop in parse_expression ends.
+            let on = self.parse_expression(0)?;
+            joins.push(JoinClause { kind, table, on });
+        }
+
+        Ok(From { table, joins })
+    }
+
+    /// `name`, `name alias` or `name AS alias`.
+    ///
+    /// The bare-alias form is taken when the next token is an Identifier. Keywords
+    /// (WHERE, JOIN, LEFT, ...) are never identifiers, so they end the table ref.
+    fn parse_table_ref(&mut self) -> Result<TableRef> {
+        let name = self.expect_identifier()?.to_string();
+        let alias = if self.consume_if(Token::Keyword(Keyword::As)) {
+            Some(self.expect_identifier()?.to_string())
+        } else if let Ok(Token::Identifier(_)) = self.peek_token() {
+            Some(self.expect_identifier()?.to_string())
+        } else {
+            None
+        };
+        Ok(TableRef { name, alias })
     }
 
     fn parse_update_statement(&mut self) -> Result<Statement> {
@@ -561,6 +617,127 @@ mod tests {
         }
     }
 
+    /// Helper to build `left = right` with bare column names
+    fn column_eq(left: &str, right: &str) -> Expression {
+        Expression::BinaryOp {
+            left: Box::new(Expression::Identifier(left.to_string())),
+            op: Operator::Equal,
+            right: Box::new(Expression::Identifier(right.to_string())),
+        }
+    }
+
+    #[test]
+    fn test_parse_from_alias_without_as() {
+        assert_eq!(
+            parse_select("SELECT * FROM users u").from_clause,
+            From {
+                table: TableRef {
+                    name: "users".to_string(),
+                    alias: Some("u".to_string()),
+                },
+                joins: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_from_alias_with_as() {
+        assert_eq!(
+            parse_select("SELECT * FROM users AS u").from_clause,
+            From {
+                table: TableRef {
+                    name: "users".to_string(),
+                    alias: Some("u".to_string()),
+                },
+                joins: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_inner_join() {
+        assert_eq!(
+            parse_select("SELECT * FROM a JOIN b ON x = y").from_clause,
+            From {
+                table: TableRef::new("a"),
+                joins: vec![JoinClause {
+                    kind: JoinKind::Inner,
+                    table: TableRef::new("b"),
+                    on: column_eq("x", "y"),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_inner_keyword_join() {
+        assert_eq!(
+            parse_select("SELECT * FROM a INNER JOIN b ON x = y").from_clause,
+            parse_select("SELECT * FROM a JOIN b ON x = y").from_clause
+        );
+    }
+
+    #[test]
+    fn test_parse_left_and_left_outer_join() {
+        let expected = vec![JoinClause {
+            kind: JoinKind::Left,
+            table: TableRef::new("b"),
+            on: column_eq("x", "y"),
+        }];
+        assert_eq!(
+            parse_select("SELECT * FROM a LEFT JOIN b ON x = y")
+                .from_clause
+                .joins,
+            expected
+        );
+        assert_eq!(
+            parse_select("SELECT * FROM a LEFT OUTER JOIN b ON x = y")
+                .from_clause
+                .joins,
+            expected
+        );
+    }
+
+    #[test]
+    fn test_parse_join_chain_is_left_deep_in_order() {
+        let select =
+            parse_select("SELECT * FROM a JOIN b ON x = y LEFT JOIN c ON y = z WHERE z = 1");
+
+        let joins = &select.from_clause.joins;
+        assert_eq!(joins.len(), 2);
+        assert_eq!(joins[0].kind, JoinKind::Inner);
+        assert_eq!(joins[0].table, TableRef::new("b"));
+        assert_eq!(joins[1].kind, JoinKind::Left);
+        assert_eq!(joins[1].table, TableRef::new("c"));
+        assert_eq!(joins[1].on, column_eq("y", "z"));
+        // ON stops at LEFT and WHERE is not swallowed by the last ON expression
+        assert!(select.where_clause.is_some());
+    }
+
+    #[test]
+    fn test_parse_join_with_aliases() {
+        let from = parse_select("SELECT * FROM users u JOIN users AS v ON x = y").from_clause;
+        assert_eq!(from.table.alias.as_deref(), Some("u"));
+        assert_eq!(from.joins[0].table.alias.as_deref(), Some("v"));
+    }
+
+    #[test]
+    fn test_parse_join_errors() {
+        for query in [
+            "SELECT * FROM a JOIN b",
+            "SELECT * FROM a LEFT b ON x = y",
+            "SELECT * FROM a RIGHT JOIN b ON x = y",
+            "SELECT * FROM a FULL JOIN b ON x = y",
+            "SELECT * FROM a u FULL JOIN b ON x = y",
+            "SELECT * FROM a CROSS JOIN b",
+        ] {
+            assert!(
+                SqlParser::new(query).parse().is_err(),
+                "{query} should not parse"
+            );
+        }
+    }
+
     #[test]
     fn test_parse_select_all() {
         match parse("SELECT * FROM users") {
@@ -574,7 +751,8 @@ mod tests {
                 assert_eq!(
                     from_clause,
                     From {
-                        table: "users".to_string(),
+                        table: TableRef::new("users"),
+                        joins: vec![],
                     }
                 );
                 assert!(where_clause.is_none());
@@ -1064,7 +1242,8 @@ mod tests {
     fn test_parse_rejects_trailing_tokens() {
         for query in [
             "SELECT * FROM users HAVING x",
-            "SELECT * FROM users u",
+            "SELECT * FROM users u v",
+            "SELECT * FROM users, orders",
             "SELECT * FROM users WHERE id = 1 extra",
             "SELECT * FROM users; SELECT * FROM users",
             "DELETE FROM users WHERE id = 1 LIMIT 1",

@@ -42,6 +42,9 @@ pub enum Keyword {
     Left,
     Right,
     On,
+    Outer,
+    Full,
+    Cross,
 
     // Data Types
     #[strum(serialize = "Int", serialize = "Integer")]
