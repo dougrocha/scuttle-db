@@ -1,12 +1,13 @@
 use std::cmp::Ordering;
 
-use miette::{Result, miette};
+use miette::Result;
 
 use crate::{
     Value,
     db::table::row::Row,
     sql::{
         analyzer::AnalyzedExpression,
+        ast::statement::JoinKind,
         catalog_context::CatalogContext,
         evaluator::{
             Evaluator, aggregate::Accumulator, compare_values, expression::ExpressionEvaluator,
@@ -89,8 +90,26 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                     to_skip: offset,
                 }))
             }
-            // TEMPORARY: replaced by the JoinExec arm in the execution step.
-            LogicalPlan::Join { .. } => Err(miette!("JOIN execution is not implemented yet")),
+            LogicalPlan::Join {
+                left,
+                right,
+                kind,
+                on,
+                right_width,
+                ..
+            } => {
+                let left = self.create_physical_plan(*left)?;
+                let right = self.create_physical_plan(*right)?;
+
+                Ok(Box::new(JoinExec {
+                    left,
+                    right,
+                    kind,
+                    on,
+                    right_width,
+                    right_rows: None,
+                }))
+            }
             _ => todo!(),
         }
     }
@@ -185,6 +204,69 @@ impl ExecutionNode for FilterExec {
         }
 
         Ok(None)
+    }
+}
+
+/// Nested-loop join. The right side is drained ONCE (first call to `next`) and kept
+/// in memory; the left side streams batch by batch (same precedent as
+/// AggregateExec/SortExec draining their child).
+#[derive(Debug)]
+pub struct JoinExec {
+    left: Box<dyn ExecutionNode>,
+    right: Box<dyn ExecutionNode>,
+    kind: JoinKind,
+    on: AnalyzedExpression,
+    right_width: usize,
+    /// `None` until the right child has been drained.
+    right_rows: Option<Vec<Row>>,
+}
+impl ExecutionNode for JoinExec {
+    fn next(&mut self) -> Result<Option<RecordBatch>> {
+        // 1. Drain the right side exactly once.
+        if self.right_rows.is_none() {
+            let mut rows = Vec::new();
+            while let Some(batch) = self.right.next()? {
+                rows.extend(batch.rows);
+            }
+            self.right_rows = Some(rows);
+        }
+        let right_rows = self.right_rows.as_ref().expect("drained above");
+        let evaluator = PredicateEvaluator; // Null -> false: right for ON
+
+        loop {
+            let Some(batch) = self.left.next()? else {
+                return Ok(None);
+            };
+            let mut out = Vec::new();
+            for left_row in batch.rows {
+                let mut matched = false;
+                for right_row in right_rows {
+                    let joined = Row::new(
+                        left_row
+                            .values
+                            .iter()
+                            .chain(&right_row.values)
+                            .cloned()
+                            .collect(),
+                    );
+                    if evaluator.evaluate(&self.on, &joined)? {
+                        out.push(joined);
+                        matched = true;
+                    }
+                }
+                if !matched && self.kind == JoinKind::Left {
+                    // Pad with `right_width` NULLs, NOT right_rows[0].len():
+                    // the right table may be empty.
+                    let mut values = left_row.values;
+                    values.extend(std::iter::repeat_n(Value::Null, self.right_width));
+                    out.push(Row::new(values));
+                }
+            }
+            // Like FilterExec: a left batch that produced nothing must not end the stream.
+            if !out.is_empty() {
+                return Ok(Some(RecordBatch { rows: out }));
+            }
+        }
     }
 }
 
