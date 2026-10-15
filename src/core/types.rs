@@ -66,7 +66,7 @@ impl DataType {
 ///
 /// Values are strongly typed and correspond to [`DataType`] definitions.
 /// Each variant can be compared, ordered, and checked for type compatibility.
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Deserialize, Serialize)]
 pub enum Value {
     /// A 64-bit signed integer value.
     Int64(i64),
@@ -99,6 +99,24 @@ impl std::fmt::Display for Value {
 }
 
 impl Value {
+    /// Converts this value to the given column type, then checks it fits.
+    ///
+    /// An INT is widened to FLOAT; every other value is left as it is. The result is
+    /// checked with [`Value::is_compatible_with`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the type-mismatch message when the value cannot be stored in `data_type`.
+    pub(crate) fn coerce_to(self, data_type: &DataType) -> Result<Value, String> {
+        let value = match (self, data_type) {
+            (Value::Int64(n), DataType::Float64) => Value::Float64(n as f64),
+            (value, _) => value,
+        };
+
+        value.is_compatible_with(data_type)?;
+        Ok(value)
+    }
+
     /// Checks if this value can be stored in a column of the given type.
     ///
     /// Performs type checking and, for VARCHAR, length validation.

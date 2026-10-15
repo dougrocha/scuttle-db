@@ -7,8 +7,9 @@ a named subset, and NULLs.
 
 - `create-table`: `CREATE TABLE name (col TYPE, ...)`. Types: `INT`/`INTEGER`, `FLOAT`, `VARCHAR(n)`, `TEXT`/`STRING`, `BOOL`/`BOOLEAN`, `TIMESTAMP`.
 - `insert-multi`: several `(...)` tuples in one INSERT.
-- `insert-columns`: an `INSERT INTO t (col, ...)` column list. Omitted columns become NULL.
+- `insert-columns`: an `INSERT INTO t (col, ...)` column list. Omitted columns get their DEFAULT, or NULL when they have none.
 - `insert-type-check`: a value of the wrong type is rejected.
+- `column-default`: `col TYPE DEFAULT literal`. An INSERT that omits the column gets the default. An explicit NULL stays NULL.
 
 ## How to get to it (user POV)
 
@@ -32,13 +33,29 @@ Expected, in order: `OK`, `1 row(s) affected`, `2 row(s) affected`, then a table
 `  x Cannot insert Text into column id of type Int64`, then a count of `3`, which shows the bad
 row was not written. `db_files.txt` lists `__catalog__.table` and `t.table`.
 
+## Column defaults
+
+```bash
+.claude/skills/verify-scuttle/scripts/drive.sh col-default <<'SQL'
+CREATE TABLE d (id INT, n INT DEFAULT 5, f FLOAT DEFAULT 2, s TEXT DEFAULT 'hi', b BOOL DEFAULT TRUE, z TEXT DEFAULT NULL);
+INSERT INTO d (id) VALUES (1);
+INSERT INTO d (id, n) VALUES (2, NULL);
+SELECT * FROM d ORDER BY id;
+CREATE TABLE e (id INT DEFAULT 'x');
+SQL
+```
+
+Expected: `OK`, then two `1 row(s) affected`. The table has rows `1 | 5 | 2 | hi | true | NULL` and
+`2 | NULL | 2 | hi | true | NULL`, then `(2 rows)`. The explicit NULL in row 2 stays NULL. The last
+statement fails with `Type mismatch: Column id has an invalid DEFAULT: ...`.
+
 ## Gotchas
 
 - Creating a table that already exists fails with `  x Table t already exists`, and the existing
   table keeps its schema and rows. There is no `OK`.
 - `DATE` is not a column type: `CREATE TABLE d (x DATE)` fails with
   `Parse error: Expected a column type.`
-- `DEFAULT` is not parsed: `CREATE TABLE d (id INT DEFAULT 5)` fails with
-  `Unexpected token 'Keyword(Default)' while parsing constraints`.
+- A second `DEFAULT` on one column fails with `Parse error: Multiple DEFAULT values specified for column id`.
+  `DEFAULT` takes only a literal: `DEFAULT now()` or `DEFAULT other_col` fails to parse.
 - A `TIMESTAMP` column can be created, but there is no timestamp literal. Inserting a string fails with
   `Cannot insert Text into column at of type Timestamp`, so TIMESTAMP values can't be written from the REPL yet.

@@ -518,6 +518,18 @@ impl<'src> SqlParser<'src> {
                 }
                 Token::Keyword(Keyword::Unique) => ColumnConstraint::Unique,
                 Token::Keyword(Keyword::Null) => ColumnConstraint::Nullable,
+                Token::Keyword(Keyword::Default) => {
+                    if constraints
+                        .iter()
+                        .any(|c| matches!(c, ColumnConstraint::Default(_)))
+                    {
+                        return Err(miette!(
+                            "Multiple DEFAULT values specified for column {}",
+                            name
+                        ));
+                    }
+                    ColumnConstraint::Default(self.parse_default_value()?)
+                }
                 t => {
                     return Err(miette!(
                         "Unexpected token '{:?}' while parsing constraints",
@@ -537,6 +549,23 @@ impl<'src> SqlParser<'src> {
             data_type,
             constraints,
         })
+    }
+
+    /// Parses the literal after `DEFAULT` in a column definition.
+    fn parse_default_value(&mut self) -> Result<Value> {
+        match self.next_token()? {
+            Token::Integer(i) => Ok(Value::Int64(i)),
+            Token::Float(f) => Ok(Value::Float64(f)),
+            Token::String(s) => Ok(Value::Text(s.to_string())),
+            Token::Keyword(Keyword::Null) => Ok(Value::Null),
+            Token::Keyword(kw) if kw.is_bool_literal() => {
+                Ok(Value::from(matches!(kw, Keyword::True)))
+            }
+            t => Err(miette!(
+                "DEFAULT must be followed by a literal value, but found {:?}",
+                t
+            )),
+        }
     }
 
     fn peek_binary_op(&mut self) -> Result<Operator> {
@@ -1429,5 +1458,91 @@ mod tests {
                 .parse()
                 .is_err()
         );
+    }
+
+    /// Helper to parse `CREATE TABLE t (<column>)` and return the single column definition
+    fn parse_column(column: &str) -> ColumnDef {
+        match parse(&format!("CREATE TABLE t ({column})")) {
+            Statement::Create(CreateStatement { mut columns, .. }) => {
+                assert_eq!(columns.len(), 1, "expected exactly one column");
+                columns.remove(0)
+            }
+            _ => panic!("Expected CREATE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_column_default_literals() {
+        let cases = [
+            ("n INT DEFAULT 5", Value::Int64(5)),
+            ("f FLOAT DEFAULT 2.5", Value::Float64(2.5)),
+            ("s TEXT DEFAULT 'hi'", Value::Text("hi".to_string())),
+            ("b BOOL DEFAULT TRUE", Value::Bool(true)),
+            ("b BOOL DEFAULT FALSE", Value::Bool(false)),
+            ("s TEXT DEFAULT NULL", Value::Null),
+        ];
+        for (column, expected) in cases {
+            let def = parse_column(column);
+            assert_eq!(
+                def.constraints,
+                vec![ColumnConstraint::Default(expected)],
+                "{column}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_column_default_with_other_constraints() {
+        let def = parse_column("n INT NOT NULL DEFAULT 7");
+        assert_eq!(
+            def.constraints,
+            vec![
+                ColumnConstraint::NotNull,
+                ColumnConstraint::Default(Value::Int64(7)),
+            ]
+        );
+
+        let def = parse_column("n INT DEFAULT 7 UNIQUE");
+        assert_eq!(
+            def.constraints,
+            vec![
+                ColumnConstraint::Default(Value::Int64(7)),
+                ColumnConstraint::Unique,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_column_default_in_column_list() {
+        match parse("CREATE TABLE t (id INT PRIMARY KEY, n INT DEFAULT 3, s TEXT)") {
+            Statement::Create(CreateStatement { columns, .. }) => {
+                assert_eq!(columns.len(), 3);
+                assert_eq!(columns[0].constraints, vec![ColumnConstraint::PrimaryKey]);
+                assert_eq!(
+                    columns[1].constraints,
+                    vec![ColumnConstraint::Default(Value::Int64(3))]
+                );
+                assert!(columns[2].constraints.is_empty());
+            }
+            _ => panic!("Expected CREATE statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_column_default_rejects_non_literals() {
+        for column in [
+            "n INT DEFAULT",
+            "n INT DEFAULT other_column",
+            "n INT DEFAULT NOW()",
+            "n INT DEFAULT 1 DEFAULT 2",
+            "n INT DEFAULT (1)",
+        ] {
+            assert!(
+                SqlParser::new(&format!("CREATE TABLE t ({column})"))
+                    .parse()
+                    .is_err(),
+                "{column} should not parse"
+            );
+        }
     }
 }

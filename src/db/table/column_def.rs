@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{core::types::DataType, sql::ast::expression::Expression};
+use crate::core::types::{DataType, Value};
 
 /// Definition of a single column in a table schema.
 ///
@@ -62,6 +62,14 @@ impl ColumnDef {
             .iter()
             .any(|c| matches!(c, ColumnConstraint::Default(_)))
     }
+
+    /// The `DEFAULT` value of this column, if it has one.
+    pub(crate) fn default_value(&self) -> Option<&Value> {
+        self.constraints.iter().find_map(|c| match c {
+            ColumnConstraint::Default(value) => Some(value),
+            _ => None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -70,5 +78,6 @@ pub enum ColumnConstraint {
     Nullable,
     PrimaryKey,
     Unique,
-    Default(()),
+    /// `DEFAULT <literal>`: the value used when an INSERT leaves the column out.
+    Default(Value),
 }

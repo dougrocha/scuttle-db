@@ -6,7 +6,7 @@ use std::{
 use miette::Result;
 
 use crate::{
-    ColumnDef, DataType, DatabaseError, Value,
+    ColumnConstraint, ColumnDef, DatabaseError, Value,
     db::{
         catalog::system_catalog::SystemCatalog,
         table::{Table, row::Row, schema::Schema, table_def::TableDef},
@@ -430,11 +430,32 @@ impl Database {
     }
 
     fn handle_create(&mut self, create_stmt: statement::CreateStatement) -> Result<QueryResponse> {
-        let schema = Schema::new(create_stmt.columns);
+        let mut columns = create_stmt.columns;
+        for column in &mut columns {
+            Self::check_default(column)?;
+        }
+        let schema = Schema::new(columns);
 
         self.create_table(&create_stmt.table_name, schema)?;
 
         Ok(QueryResponse::default())
+    }
+
+    /// Converts a column's `DEFAULT` to the column type, so INSERT can use it as is.
+    fn check_default(column: &mut ColumnDef) -> Result<()> {
+        let data_type = column.data_type;
+        for constraint in &mut column.constraints {
+            if let ColumnConstraint::Default(value) = constraint {
+                let converted = value.clone().coerce_to(&data_type).map_err(|reason| {
+                    DatabaseError::TypeMismatch(format!(
+                        "Column {} has an invalid DEFAULT: {}",
+                        column.name, reason
+                    ))
+                })?;
+                *value = converted;
+            }
+        }
+        Ok(())
     }
 
     fn handle_select(&mut self, select_stmt: statement::SelectStatement) -> Result<QueryResponse> {
@@ -522,11 +543,6 @@ impl Database {
 
     /// Converts a value for storage in `column`, checking type and NOT NULL.
     fn coerce_for_column(value: Value, column: &ColumnDef) -> Result<Value> {
-        let value = match (value, column.data_type) {
-            (Value::Int64(n), DataType::Float64) => Value::Float64(n as f64),
-            (value, _) => value,
-        };
-
         if value == Value::Null && !column.is_nullable() {
             return Err(DatabaseError::TypeMismatch(format!(
                 "Column {} cannot be null",
@@ -535,11 +551,9 @@ impl Database {
             .into());
         }
 
-        value
-            .is_compatible_with(&column.data_type)
-            .map_err(DatabaseError::TypeMismatch)?;
-
-        Ok(value)
+        Ok(value
+            .coerce_to(&column.data_type)
+            .map_err(DatabaseError::TypeMismatch)?)
     }
 
     fn handle_delete(&mut self, delete_stmt: statement::DeleteStatement) -> Result<QueryResponse> {
@@ -598,10 +612,7 @@ impl Database {
                         let value =
                             match insert_columns.iter().position(|name| *name == col_def.name) {
                                 Some(idx) => evaluator.evaluate(&exprs[idx], &empty_row)?,
-                                None if col_def.has_default() => {
-                                    todo!("Enable values to have default")
-                                }
-                                None => Value::Null,
+                                None => col_def.default_value().cloned().unwrap_or(Value::Null),
                             };
 
                         values.push(Self::coerce_for_column(value, col_def)?);
@@ -1634,6 +1645,106 @@ mod tests {
         assert_eq!(
             error_message(&mut db.db, "CREATE TABLE extra (id INT)"),
             "Table extra already exists"
+        );
+    }
+
+    #[test]
+    fn test_default_applies_when_insert_omits_column() {
+        let mut db = TestDb::new("default-omitted");
+        db.execute("CREATE TABLE t (id INT, n INT DEFAULT 5)");
+        db.execute("INSERT INTO t (id) VALUES (1)");
+        assert_eq!(
+            db.query("SELECT * FROM t"),
+            vec![vec![Value::Int64(1), Value::Int64(5)]]
+        );
+    }
+
+    #[test]
+    fn test_default_literal_kinds() {
+        let mut db = TestDb::new("default-kinds");
+        db.execute(
+            "CREATE TABLE t (id INT, f FLOAT DEFAULT 2, s TEXT DEFAULT 'hi', \
+             b BOOL DEFAULT TRUE, z TEXT DEFAULT NULL)",
+        );
+        db.execute("INSERT INTO t (id) VALUES (1)");
+        assert_eq!(
+            db.query("SELECT * FROM t"),
+            vec![vec![
+                Value::Int64(1),
+                Value::Float64(2.0),
+                text("hi"),
+                Value::Bool(true),
+                Value::Null,
+            ]]
+        );
+    }
+
+    #[test]
+    fn test_default_not_used_when_value_given() {
+        let mut db = TestDb::new("default-given");
+        db.execute("CREATE TABLE t (id INT, n INT DEFAULT 5)");
+        db.execute("INSERT INTO t (id, n) VALUES (1, 9)");
+        db.execute("INSERT INTO t (id, n) VALUES (2, NULL)");
+        assert_eq!(
+            db.query("SELECT * FROM t"),
+            vec![
+                vec![Value::Int64(1), Value::Int64(9)],
+                vec![Value::Int64(2), Value::Null],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_default_lets_not_null_column_be_omitted() {
+        let mut db = TestDb::new("default-not-null");
+        db.execute("CREATE TABLE t (id INT, n INT NOT NULL DEFAULT 4)");
+        db.execute("INSERT INTO t (id) VALUES (1)");
+        assert_eq!(
+            db.query("SELECT * FROM t"),
+            vec![vec![Value::Int64(1), Value::Int64(4)]]
+        );
+    }
+
+    #[test]
+    fn test_default_null_on_not_null_column_fails_at_insert() {
+        let mut db = TestDb::new("default-null-not-null");
+        db.execute("CREATE TABLE t (id INT, n INT NOT NULL DEFAULT NULL)");
+        let message = error_message(&mut db.db, "INSERT INTO t (id) VALUES (1)");
+        assert!(message.contains("Column n cannot be null"), "{message}");
+        assert!(db.query("SELECT * FROM t").is_empty());
+    }
+
+    #[test]
+    fn test_default_rejects_wrong_type_at_create() {
+        let mut db = TestDb::new("default-wrong-type");
+        let message = error_message(&mut db.db, "CREATE TABLE t (id INT DEFAULT 'x')");
+        assert!(
+            message.contains("Column id has an invalid DEFAULT"),
+            "{message}"
+        );
+        assert!(db.fails("SELECT * FROM t"));
+    }
+
+    #[test]
+    fn test_default_survives_restart() {
+        let mut db = TestDb::new("default-restart");
+        db.execute("CREATE TABLE t (id INT, n INT DEFAULT 5)");
+        db.reopen();
+        db.execute("INSERT INTO t (id) VALUES (1)");
+        assert_eq!(
+            db.query("SELECT * FROM t"),
+            vec![vec![Value::Int64(1), Value::Int64(5)]]
+        );
+    }
+
+    #[test]
+    fn test_column_without_default_still_gets_null() {
+        let mut db = TestDb::new("default-none");
+        db.execute("CREATE TABLE t (id INT, n INT)");
+        db.execute("INSERT INTO t (id) VALUES (1)");
+        assert_eq!(
+            db.query("SELECT * FROM t"),
+            vec![vec![Value::Int64(1), Value::Null]]
         );
     }
 }
