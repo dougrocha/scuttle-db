@@ -195,14 +195,6 @@ impl BindScope {
             }
         }
     }
-
-    /// Returns every column as a `relation.column` string, in scope order.
-    pub(crate) fn qualified_names(&self) -> Vec<String> {
-        self.columns
-            .iter()
-            .map(|c| format!("{}.{}", c.relation, c.name))
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -349,22 +341,6 @@ mod tests {
         assert_eq!(
             canon(&count(Expression::Identifier("id".to_string()))),
             canon(&count(qualified("u", "id")))
-        );
-    }
-
-    #[test]
-    fn test_scope_qualified_names() {
-        assert_eq!(
-            joined_scope().qualified_names(),
-            vec![
-                "u.id",
-                "u.name",
-                "u.dept",
-                "u.age",
-                "o.id",
-                "o.user_id",
-                "o.total"
-            ]
         );
     }
 }

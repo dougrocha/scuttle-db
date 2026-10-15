@@ -460,7 +460,6 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 kind: join.kind,
                 on,
                 right_width,
-                column_names: scope.qualified_names(),
             };
         }
         Ok((plan, scope))
@@ -474,6 +473,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         Ok(LogicalPlan::Scan {
             table_name: table.name.clone(),
             alias: table.alias.clone(),
+            schema: def.schema().clone(),
         })
     }
 

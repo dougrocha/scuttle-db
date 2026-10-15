@@ -1,19 +1,25 @@
 use crate::{
-    ColumnDef,
+    ColumnDef, Schema,
     sql::{
         analyzer::{AggregateFunction, AnalyzedExpression},
         ast::statement::JoinKind,
     },
 };
 
+use super::relation_schema::RelationSchema;
+
 #[derive(Debug)]
 pub enum LogicalPlan {
     Scan {
         table_name: String,
 
-        /// Table alias from the FROM clause, if any. Display-only: EXPLAIN prints
-        /// `Scan: users u`. Physical planning ignores it.
+        /// Table alias from the FROM clause, if any. When present it replaces `table_name`
+        /// as the relation of every output column. EXPLAIN prints `Scan: users u`.
         alias: Option<String>,
+
+        /// The table's schema as the analyzer saw it, so the node can state its output
+        /// without a catalog. Physical planning reads rows by `table_name` and ignores it.
+        schema: Schema,
     },
     /// Nested-loop join. Output row is the left row followed by the right row.
     ///
@@ -30,10 +36,6 @@ pub enum LogicalPlan {
         /// Number of columns the right child produces. This is the LEFT padding width.
         /// It cannot be read from rows, because the right table may be empty.
         right_width: usize,
-
-        /// `"alias.column"` for every column of `left ++ right`. Display only: EXPLAIN
-        /// reads it, execution ignores it.
-        column_names: Vec<String>,
     },
     Filter {
         input: Box<LogicalPlan>,
@@ -89,6 +91,55 @@ pub enum LogicalPlan {
 }
 
 impl LogicalPlan {
+    /// The columns of every row this node produces, in row order.
+    ///
+    /// Derived on every call, one arm per variant, NO `_` arm: a new node does not compile
+    /// until it states its output. Each arm mirrors the node's executor:
+    ///
+    /// - Scan: table columns; relation = alias, else table name.
+    /// - Join: left then right (`JoinExec` concatenates the same way).
+    /// - Filter / Sort / Limit: input unchanged.
+    /// - Aggregate: keys, then calls. Named AND labelled by text rendered against the
+    ///   INPUT's labels, which is why a Sort over an Aggregate over a Join prints `u.name`.
+    /// - Projection: one column per select-list output.
+    /// - Values, Insert, Update, Delete, CreateTable: empty. They return no rows to a parent.
+    pub(crate) fn output_schema(&self) -> RelationSchema {
+        match self {
+            LogicalPlan::Scan {
+                table_name,
+                alias,
+                schema,
+            } => RelationSchema::table(alias.as_deref().unwrap_or(table_name), schema),
+            LogicalPlan::Join { left, right, .. } => {
+                RelationSchema::join(&left.output_schema(), &right.output_schema())
+            }
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. } => input.output_schema(),
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggregates,
+            } => {
+                let columns = input.output_schema();
+                RelationSchema::computed(
+                    group_by
+                        .iter()
+                        .map(|key| columns.render(key))
+                        .chain(aggregates.iter().map(|call| columns.render_aggregate(call))),
+                )
+            }
+            LogicalPlan::Projection { column_names, .. } => {
+                RelationSchema::computed(column_names.iter().cloned())
+            }
+            LogicalPlan::Values { .. }
+            | LogicalPlan::Insert { .. }
+            | LogicalPlan::Update { .. }
+            | LogicalPlan::Delete { .. }
+            | LogicalPlan::CreateTable { .. } => RelationSchema::empty(),
+        }
+    }
+
     /// Names of the columns this plan produces, if it produces rows.
     pub fn column_names(&self) -> Vec<String> {
         match self {

@@ -1,14 +1,15 @@
 //! Renders a [`LogicalPlan`] as an indented tree, like Postgres' `EXPLAIN`.
 //!
-//! Expressions refer to columns by index, so each node is printed with the column
-//! names of its input: a scan's table columns, a projection's output names, and so on.
+//! Expressions refer to columns by index, so each node is printed with the labels of the
+//! schema it reads: a scan's table columns, a join's qualified columns, a projection's
+//! output names, and so on.
 
 use miette::Result;
 
-use crate::Value;
-use crate::sql::analyzer::{AggregateFunction, AnalyzedExpression, IsPredicateTarget};
+use crate::sql::analyzer::AnalyzedExpression;
 use crate::sql::catalog_context::CatalogContext;
-use crate::sql::planner::logical::{AggregateCall, LogicalPlan};
+use crate::sql::planner::logical::LogicalPlan;
+use crate::sql::planner::relation_schema::RelationSchema;
 
 /// Formats `plan` as one line per node, children indented under their parent.
 ///
@@ -30,7 +31,9 @@ fn write_node(
     let indent = "  ".repeat(depth);
 
     match plan {
-        LogicalPlan::Scan { table_name, alias } => lines.push(match alias {
+        LogicalPlan::Scan {
+            table_name, alias, ..
+        } => lines.push(match alias {
             Some(alias) => format!("{indent}Scan: {table_name} {alias}"),
             None => format!("{indent}Scan: {table_name}"),
         }),
@@ -39,30 +42,25 @@ fn write_node(
             right,
             kind,
             on,
-            column_names,
             ..
         } => {
             lines.push(format!(
                 "{indent}Join: {kind} on {}",
-                expression(on, column_names)
+                plan.output_schema().render(on)
             ));
             write_node(left, catalog, depth + 1, lines)?;
             write_node(right, catalog, depth + 1, lines)?;
         }
         LogicalPlan::Filter { input, condition } => {
-            let columns = output_columns(input, catalog)?;
-            lines.push(format!(
-                "{indent}Filter: {}",
-                expression(condition, &columns)
-            ));
+            let columns = input.output_schema();
+            lines.push(format!("{indent}Filter: {}", columns.render(condition)));
             write_node(input, catalog, depth + 1, lines)?;
         }
-        LogicalPlan::Projection {
-            input,
-            column_names,
-            ..
-        } => {
-            lines.push(format!("{indent}Projection: {}", column_names.join(", ")));
+        LogicalPlan::Projection { input, .. } => {
+            lines.push(format!(
+                "{indent}Projection: {}",
+                plan.output_schema().names().join(", ")
+            ));
             write_node(input, catalog, depth + 1, lines)?;
         }
         LogicalPlan::Aggregate {
@@ -70,23 +68,26 @@ fn write_node(
             group_by,
             aggregates,
         } => {
-            let columns = output_columns(input, catalog)?;
+            let columns = input.output_schema();
             let mut line = format!("{indent}Aggregate: ");
             if !group_by.is_empty() {
-                let keys: Vec<String> = group_by.iter().map(|e| expression(e, &columns)).collect();
+                let keys: Vec<String> = group_by.iter().map(|e| columns.render(e)).collect();
                 line.push_str(&format!("group by {}; ", keys.join(", ")));
             }
-            let calls: Vec<String> = aggregates.iter().map(|a| aggregate(a, &columns)).collect();
+            let calls: Vec<String> = aggregates
+                .iter()
+                .map(|a| columns.render_aggregate(a))
+                .collect();
             line.push_str(&calls.join(", "));
             lines.push(line);
             write_node(input, catalog, depth + 1, lines)?;
         }
         LogicalPlan::Sort { input, keys } => {
-            let columns = output_columns(input, catalog)?;
+            let columns = input.output_schema();
             let keys: Vec<String> = keys
                 .iter()
                 .map(|key| {
-                    let expr = expression(&key.expr, &columns);
+                    let expr = columns.render(&key.expr);
                     if key.descending {
                         format!("{expr} DESC")
                     } else {
@@ -133,15 +134,11 @@ fn write_node(
             assignments,
             filter,
         } => {
-            let columns = table_columns(table_name, catalog)?;
+            let columns = RelationSchema::table(table_name, &catalog.get_table(table_name)?.schema);
             let sets: Vec<String> = assignments
                 .iter()
                 .map(|(index, value)| {
-                    format!(
-                        "{} = {}",
-                        column_name(*index, &columns),
-                        expression(value, &columns)
-                    )
+                    format!("{} = {}", columns.label(*index), columns.render(value))
                 })
                 .collect();
             lines.push(format!(
@@ -151,7 +148,7 @@ fn write_node(
             write_filtered_scan(table_name, filter.as_ref(), &columns, depth + 1, lines);
         }
         LogicalPlan::Delete { table_name, filter } => {
-            let columns = table_columns(table_name, catalog)?;
+            let columns = RelationSchema::table(table_name, &catalog.get_table(table_name)?.schema);
             lines.push(format!("{indent}Delete: {table_name}"));
             write_filtered_scan(table_name, filter.as_ref(), &columns, depth + 1, lines);
         }
@@ -177,115 +174,17 @@ fn write_node(
 fn write_filtered_scan(
     table_name: &str,
     filter: Option<&AnalyzedExpression>,
-    columns: &[String],
+    columns: &RelationSchema,
     depth: usize,
     lines: &mut Vec<String>,
 ) {
     let mut depth = depth;
     if let Some(filter) = filter {
         let indent = "  ".repeat(depth);
-        lines.push(format!("{indent}Filter: {}", expression(filter, columns)));
+        lines.push(format!("{indent}Filter: {}", columns.render(filter)));
         depth += 1;
     }
     lines.push(format!("{}Scan: {table_name}", "  ".repeat(depth)));
-}
-
-/// Names of the columns `plan` produces, used to print expressions of the node above it.
-fn output_columns(plan: &LogicalPlan, catalog: &CatalogContext) -> Result<Vec<String>> {
-    Ok(match plan {
-        LogicalPlan::Scan { table_name, .. } => table_columns(table_name, catalog)?,
-        LogicalPlan::Filter { input, .. }
-        | LogicalPlan::Sort { input, .. }
-        | LogicalPlan::Limit { input, .. } => output_columns(input, catalog)?,
-        LogicalPlan::Projection { column_names, .. } => column_names.clone(),
-        LogicalPlan::Join { column_names, .. } => column_names.clone(),
-        LogicalPlan::Aggregate {
-            input,
-            group_by,
-            aggregates,
-        } => {
-            let columns = output_columns(input, catalog)?;
-            group_by
-                .iter()
-                .map(|e| expression(e, &columns))
-                .chain(aggregates.iter().map(|a| aggregate(a, &columns)))
-                .collect()
-        }
-        LogicalPlan::Values { .. }
-        | LogicalPlan::Insert { .. }
-        | LogicalPlan::Update { .. }
-        | LogicalPlan::Delete { .. }
-        | LogicalPlan::CreateTable { .. } => Vec::new(),
-    })
-}
-
-fn table_columns(table_name: &str, catalog: &CatalogContext) -> Result<Vec<String>> {
-    let schema = &catalog.get_table(table_name)?.schema;
-    Ok(schema.columns.iter().map(|col| col.name.clone()).collect())
-}
-
-fn column_name(index: usize, columns: &[String]) -> String {
-    columns
-        .get(index)
-        .cloned()
-        .unwrap_or_else(|| format!("#{index}"))
-}
-
-fn expression(expr: &AnalyzedExpression, columns: &[String]) -> String {
-    match expr {
-        AnalyzedExpression::Literal(value) => literal(value),
-        AnalyzedExpression::Column(column, _) => column_name(column.index, columns),
-        AnalyzedExpression::BinaryExpr {
-            left, op, right, ..
-        } => format!(
-            "{} {op} {}",
-            operand(left, columns),
-            operand(right, columns)
-        ),
-        AnalyzedExpression::IsPredicate {
-            expr,
-            predicate,
-            negated,
-        } => {
-            let target = match predicate {
-                IsPredicateTarget::True => "TRUE",
-                IsPredicateTarget::False => "FALSE",
-                IsPredicateTarget::Null => "NULL",
-            };
-            let not = if *negated { "NOT " } else { "" };
-            format!("{} IS {not}{target}", operand(expr, columns))
-        }
-    }
-}
-
-/// Like [`expression`], but parenthesizes nested binary expressions so precedence stays visible.
-fn operand(expr: &AnalyzedExpression, columns: &[String]) -> String {
-    match expr {
-        AnalyzedExpression::BinaryExpr { .. } => format!("({})", expression(expr, columns)),
-        _ => expression(expr, columns),
-    }
-}
-
-fn literal(value: &Value) -> String {
-    match value {
-        Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
-        other @ Value::Timestamp(_) => format!("TIMESTAMP '{other}'"),
-        other => other.to_string(),
-    }
-}
-
-fn aggregate(call: &AggregateCall, columns: &[String]) -> String {
-    let name = match call.function {
-        AggregateFunction::Count => "COUNT",
-        AggregateFunction::Sum => "SUM",
-        AggregateFunction::Avg => "AVG",
-        AggregateFunction::Min => "MIN",
-        AggregateFunction::Max => "MAX",
-    };
-    match &call.arg {
-        Some(arg) => format!("{name}({})", expression(arg, columns)),
-        None => format!("{name}(*)"),
-    }
 }
 
 #[cfg(test)]
