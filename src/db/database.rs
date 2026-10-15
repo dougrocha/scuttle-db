@@ -462,7 +462,7 @@ impl Database {
         let mut context = CatalogContext::new(self);
         let analyzer = Analyzer::new(&context);
         let anayzed_plan = analyzer.analyze_select(select_stmt)?;
-        let columns = anayzed_plan.column_names();
+        let columns = anayzed_plan.output_schema().names();
 
         // TODO: Eventually add a optimizer here for logical_plan.
         // Will do a series of "pushdowns".

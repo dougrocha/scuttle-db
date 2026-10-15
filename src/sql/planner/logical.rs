@@ -139,17 +139,6 @@ impl LogicalPlan {
             | LogicalPlan::CreateTable { .. } => RelationSchema::empty(),
         }
     }
-
-    /// Names of the columns this plan produces, if it produces rows.
-    pub fn column_names(&self) -> Vec<String> {
-        match self {
-            LogicalPlan::Projection { column_names, .. } => column_names.clone(),
-            LogicalPlan::Limit { input, .. }
-            | LogicalPlan::Sort { input, .. }
-            | LogicalPlan::Filter { input, .. } => input.column_names(),
-            _ => Vec::new(),
-        }
-    }
 }
 
 /// A single aggregate computed by [`LogicalPlan::Aggregate`].
