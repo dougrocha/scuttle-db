@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use miette::Result;
+use miette::{Result, miette};
 
 use crate::{
     Value,
@@ -111,7 +111,13 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                     right_rows: None,
                 }))
             }
-            _ => todo!(),
+            LogicalPlan::Values { .. }
+            | LogicalPlan::Insert { .. }
+            | LogicalPlan::Update { .. }
+            | LogicalPlan::Delete { .. }
+            | LogicalPlan::CreateTable { .. } => Err(miette!(
+                "VALUES and statement plans are executed by Database, not the physical planner"
+            )),
         }
     }
 }
