@@ -33,7 +33,8 @@ Expected, one `  x` line per bad statement:
 
 ## Gotchas
 
-- Errors go to stdout, and the exit code is still 0.
+- Errors go to stderr. A piped run whose statements failed exits 1, so the `exit_code` file is 1
+  for the `errors` journey by design. The session still ran every statement after the failure.
 - A blank line is ignored: no output, just another `DB: ` prompt. (Before the fix it was a parse
   error, `Unexpected end of input`.)
 - EOF ends the session like `exit`. (Before the fix it looped forever on `Unexpected end of input`.)

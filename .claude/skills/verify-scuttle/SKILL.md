@@ -69,9 +69,10 @@ How the REPL behaves (all observed):
 - Prompt `DB: ` comes before each result, so result N follows the Nth `DB: `.
 - Success outputs: `OK` (CREATE), `N row(s) affected` (INSERT/UPDATE/DELETE), and a dashed table
   ending `(N rows)` (SELECT). NULL prints as `NULL`.
-- Errors print to **stdout** as a miette report starting `  x `, e.g.
-  `  x Table not found: nope`. The process keeps going and exits 0. A failed statement is
-  visible only in the transcript, never in the exit code.
+- Errors print to **stderr** as a miette report starting `  x `, e.g.
+  `  x Table not found: nope`. The process keeps going. When stdin is piped (as in `drive.sh`), the
+  exit code is 1 if any statement failed, and 0 otherwise. On a terminal it is always 0.
+  `drive.sh` merges stderr into the transcript, so the `  x` line is still there to read.
 - `exit` or `:q` ends the session and prints `Exiting Scuttle`. End of input (EOF) does the same,
   so a script without `exit` also ends cleanly. `drive.sh` still appends `exit` and wraps the run
   in `timeout 20`. Exit code 124 means it hung.

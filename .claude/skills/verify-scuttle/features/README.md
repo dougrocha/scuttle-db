@@ -30,8 +30,8 @@ lands, add a feature file for it.
   appends `exit`.
 - Treat SQL in the recipes as literal. The expected output is copied from real runs.
 - Read results positionally: the Nth `DB: ` prompt comes before the Nth statement's output.
-- Errors print `  x <message>` to stdout and the exit code stays 0, so check the transcript, not
-  the exit code.
+- Errors print `  x <message>` to stderr. Piped runs exit 1 if any statement failed, so a non-zero
+  `exit_code` in the evidence means a statement failed. Read the transcript for which one.
 
 ## Proof and skip reporting
 
