@@ -27,7 +27,8 @@ data="$(cd "$data" && pwd)"
 ev="$root/evidence/$(date +%Y%m%d-%H%M%S)-$name"
 mkdir -p "$ev"
 # The REPL treats a blank line as an empty statement and errors, so drop blank lines.
-# It loops forever on EOF, so always append an explicit exit and cap runtime.
+# EOF also ends the REPL now; the explicit exit stays so the transcript shows a clean end,
+# and the timeout still catches a hang.
 { rg -v '^\s*$' "$sql" || true; echo exit; } > "$ev/input.sql"
 
 set +e

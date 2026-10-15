@@ -1,7 +1,7 @@
-use std::io::{BufRead, Write, stdin, stdout};
+use std::io::{IsTerminal, stdin, stdout};
 
-use miette::{IntoDiagnostic, Result, miette};
-use scuttle_db::Database;
+use miette::{IntoDiagnostic, Result};
+use scuttle_db::{Database, run_repl};
 
 fn main() -> Result<()> {
     miette::set_hook(Box::new(|_| {
@@ -21,42 +21,7 @@ fn main() -> Result<()> {
     let mut db = Database::new("./db");
     db.initialize().expect("Failed to init catalog");
 
-    let mut buf = String::new();
-
-    let mut stdin = stdin().lock();
-    let mut stdout = stdout().lock();
-
-    loop {
-        if buf.is_empty() {
-            stdout.write_all("DB: ".as_bytes()).into_diagnostic()?;
-        } else {
-            stdout.write_all("*  ".as_bytes()).into_diagnostic()?;
-        }
-        stdout.flush().into_diagnostic()?;
-
-        let Ok(_) = stdin.read_line(&mut buf) else {
-            return Err(miette!("Input reading failed"));
-        };
-
-        let input = buf.trim();
-        if input == "exit" || input == ":q" {
-            break;
-        }
-
-        let query_response = match db.execute_query(input) {
-            Ok(res) => res,
-            Err(err) => {
-                println!("{:?}", err.with_source_code(input.to_string()));
-                buf.clear();
-                continue;
-            }
-        };
-        writeln!(stdout, "{query_response}").into_diagnostic()?;
-        stdout.flush().into_diagnostic()?;
-        buf.clear();
-    }
-
-    println!("Exiting Scuttle");
-
-    Ok(())
+    let stdin = stdin();
+    let interactive = stdin.is_terminal();
+    run_repl(&mut db, stdin.lock(), stdout().lock(), interactive).into_diagnostic()
 }

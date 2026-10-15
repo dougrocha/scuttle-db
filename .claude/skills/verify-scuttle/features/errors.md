@@ -36,5 +36,5 @@ Expected, one `  x` line per bad statement:
 - Errors go to stdout, and the exit code is still 0.
 - An empty line is a parse error (`Unexpected end of input`). `drive.sh` strips blank lines for that
   reason. Driving the binary by hand doesn't.
-- At EOF without `exit`, the REPL loops forever on that same error. Always end input with `exit` or `:q`.
+- EOF ends the session like `exit`. (Before the fix it looped forever on `Unexpected end of input`.)
 - miette wraps long messages, so match on a substring, not a whole line.

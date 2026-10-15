@@ -71,9 +71,9 @@ How the REPL behaves (all observed):
 - Errors print to **stdout** as a miette report starting `  x `, e.g.
   `  x Table not found: nope`. The process keeps going and exits 0. A failed statement is
   visible only in the transcript, never in the exit code.
-- `exit` or `:q` ends the session and prints `Exiting Scuttle`. **At EOF without `exit`, the REPL
-  loops forever printing `Unexpected end of input`.** `drive.sh` always appends `exit` and wraps
-  the run in `timeout 20`. Exit code 124 means it hung.
+- `exit` or `:q` ends the session and prints `Exiting Scuttle`. End of input (EOF) does the same,
+  so a script without `exit` also ends cleanly. `drive.sh` still appends `exit` and wraps the run
+  in `timeout 20`. Exit code 124 means it hung.
 
 Never run the binary from the repo root. It would read and write the user's own `./db/`.
 `drive.sh` refuses to.

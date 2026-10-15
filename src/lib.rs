@@ -1,5 +1,6 @@
 pub(crate) mod core;
 pub(crate) mod db;
+pub(crate) mod repl;
 pub(crate) mod sql;
 pub(crate) mod storage;
 
@@ -15,3 +16,4 @@ pub use db::{
         schema::Schema,
     },
 };
+pub use repl::run_repl;
