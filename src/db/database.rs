@@ -1432,4 +1432,90 @@ mod tests {
         // Table name is hidden once it has an alias.
         assert!(db.fails("SELECT users.name FROM users u JOIN orders o ON u.id = o.user_id"));
     }
+
+    #[test]
+    fn test_join_select_star_columns_and_values() {
+        let mut db = TestDb::new("join-star");
+        seed_orders(&mut db);
+        let sql = "SELECT * FROM users u JOIN orders o ON u.id = o.user_id WHERE o.id = 10";
+
+        assert_eq!(
+            db.columns(sql),
+            vec!["id", "name", "dept", "age", "id", "user_id", "total"]
+        );
+        assert_eq!(
+            db.query(sql),
+            vec![vec![
+                Value::Int64(1),
+                text("Alice"),
+                text("eng"),
+                Value::Int64(30),
+                Value::Int64(10),
+                Value::Int64(1),
+                Value::Int64(100),
+            ]]
+        );
+    }
+
+    #[test]
+    fn test_join_select_star_self_join_is_not_ambiguous() {
+        let mut db = TestDb::new("join-star-self");
+
+        let rows = db.query("SELECT * FROM users a JOIN users b ON a.id = b.id ORDER BY a.id");
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|row| row.len() == 8));
+        assert_eq!(
+            rows[0],
+            vec![
+                Value::Int64(1),
+                text("Alice"),
+                text("eng"),
+                Value::Int64(30),
+                Value::Int64(1),
+                text("Alice"),
+                text("eng"),
+                Value::Int64(30),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_join_order_by_duplicated_output_name_is_ambiguous() {
+        let mut db = TestDb::new("join-order-ambiguous");
+        seed_orders(&mut db);
+        let select = "SELECT u.id, o.id FROM users u JOIN orders o ON u.id = o.user_id";
+
+        assert!(db.fails(&format!("{select} ORDER BY id")));
+        assert_eq!(
+            db.query(&format!("{select} ORDER BY 2")).len(),
+            3,
+            "ORDER BY 2 should work"
+        );
+        assert_eq!(
+            db.query(&format!("{select} ORDER BY o.id")),
+            vec![
+                vec![Value::Int64(1), Value::Int64(10)],
+                vec![Value::Int64(1), Value::Int64(11)],
+                vec![Value::Int64(3), Value::Int64(12)],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_join_unqualified_unique_name_still_works() {
+        let mut db = TestDb::new("join-unqualified-unique");
+        seed_orders(&mut db);
+
+        assert_eq!(
+            db.query(
+                "SELECT name, total FROM users u JOIN orders o ON u.id = o.user_id ORDER BY total"
+            ),
+            vec![
+                vec![text("Alice"), Value::Int64(50)],
+                vec![text("Carol"), Value::Int64(75)],
+                vec![text("Alice"), Value::Int64(100)],
+            ]
+        );
+        assert!(db.fails("SELECT id FROM users u JOIN orders o ON u.id = o.user_id"));
+    }
 }
