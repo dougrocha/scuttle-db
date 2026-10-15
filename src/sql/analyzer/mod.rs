@@ -456,6 +456,9 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         for item in select_list.iter() {
             match item {
                 SelectTarget::Star => targets.extend(scope.expand_star(None)?),
+                SelectTarget::QualifiedStar(relation) => {
+                    targets.extend(scope.expand_star(Some(relation))?)
+                }
                 SelectTarget::Expression { expr, alias } => {
                     let name = alias.clone().unwrap_or_else(|| expr.to_column_name());
                     targets.push((expr.clone(), name));

@@ -1518,4 +1518,71 @@ mod tests {
         );
         assert!(db.fails("SELECT id FROM users u JOIN orders o ON u.id = o.user_id"));
     }
+
+    #[test]
+    fn test_join_qualified_star_expands_one_relation() {
+        let mut db = TestDb::new("join-qualified-star");
+        seed_orders(&mut db);
+
+        let sql = "SELECT u.* FROM users u JOIN orders o ON u.id = o.user_id ORDER BY o.id";
+        assert_eq!(db.columns(sql), vec!["id", "name", "dept", "age"]);
+        assert_eq!(
+            db.query(sql),
+            vec![
+                vec![
+                    Value::Int64(1),
+                    text("Alice"),
+                    text("eng"),
+                    Value::Int64(30)
+                ],
+                vec![
+                    Value::Int64(1),
+                    text("Alice"),
+                    text("eng"),
+                    Value::Int64(30)
+                ],
+                vec![
+                    Value::Int64(3),
+                    text("Carol"),
+                    text("ops"),
+                    Value::Int64(41)
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_join_qualified_star_mixed_with_column() {
+        let mut db = TestDb::new("join-qualified-star-mixed");
+        seed_orders(&mut db);
+
+        let sql = "SELECT o.*, u.name FROM users u JOIN orders o ON u.id = o.user_id ORDER BY o.id";
+        assert_eq!(db.columns(sql), vec!["id", "user_id", "total", "name"]);
+        assert_eq!(
+            db.query(sql)[0],
+            vec![
+                Value::Int64(10),
+                Value::Int64(1),
+                Value::Int64(100),
+                text("Alice"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_join_qualified_star_unknown_relation_fails() {
+        let mut db = TestDb::new("join-qualified-star-unknown");
+
+        assert!(db.fails("SELECT x.* FROM users u"));
+    }
+
+    #[test]
+    fn test_join_multiplication_still_works_in_select_list() {
+        let mut db = TestDb::new("join-multiply-regression");
+
+        assert_eq!(
+            db.query("SELECT 2 * 3 FROM users ORDER BY id"),
+            vec![vec![Value::Int64(6)]; 4]
+        );
+    }
 }

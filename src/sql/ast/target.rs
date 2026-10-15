@@ -6,6 +6,9 @@ pub enum SelectTarget {
     /// SELECT * (all columns)
     Star,
 
+    /// SELECT t.* (all columns of one relation, in column order)
+    QualifiedStar(String),
+
     /// SELECT col1, col2, ... (specific columns)
     Expression {
         expr: Expression,

@@ -314,6 +314,19 @@ impl<'src> SqlParser<'src> {
         let mut columns = Vec::new();
 
         while !self.peek_keyword(Keyword::From) {
+            // `a.*` lexes as Identifier("a.") followed by Asterisk. Handle it before
+            // parse_expression, which would read it as a multiplication.
+            if let Some(Ok(Token::Identifier(word))) = self.lexer.peek()
+                && let Some(relation) = word.strip_suffix('.')
+            {
+                let relation = relation.to_string();
+                self.lexer.next(); // the "a." word
+                self.expect_token(Token::Asterisk)?;
+                columns.push(SelectTarget::QualifiedStar(relation));
+                self.consume_if(Token::Comma);
+                continue;
+            }
+
             let expr = self.parse_expression(0)?;
 
             if let Expression::Identifier(col) = &expr
@@ -1203,6 +1216,51 @@ mod tests {
         };
 
         assert_eq!(expr.to_column_name(), "id");
+    }
+
+    #[test]
+    fn test_parse_qualified_star() {
+        let select = parse_select("SELECT u.*, o.total FROM t");
+
+        assert_eq!(
+            select.select_list.0,
+            vec![
+                SelectTarget::QualifiedStar("u".to_string()),
+                SelectTarget::Expression {
+                    expr: Expression::Qualified {
+                        relation: "o".to_string(),
+                        column: "total".to_string(),
+                    },
+                    alias: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_qualified_star_alone() {
+        let select = parse_select("SELECT a.* FROM t");
+
+        assert_eq!(
+            select.select_list.0,
+            vec![SelectTarget::QualifiedStar("a".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_parse_multiplication_is_not_qualified_star() {
+        let select = parse_select("SELECT 2 * 3 FROM t");
+
+        assert!(matches!(
+            select.select_list.0.as_slice(),
+            [SelectTarget::Expression {
+                expr: Expression::BinaryOp {
+                    op: Operator::Multiply,
+                    ..
+                },
+                ..
+            }]
+        ));
     }
 
     #[test]
