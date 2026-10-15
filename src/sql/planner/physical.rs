@@ -44,14 +44,12 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                     expr: condition,
                 }))
             }
-            LogicalPlan::Projection {
-                input, expressions, ..
-            } => {
+            LogicalPlan::Projection { input, columns } => {
                 let child_node = self.create_physical_plan(*input)?;
 
                 Ok(Box::new(ProjectionExec {
                     child: child_node,
-                    exprs: expressions,
+                    exprs: columns.into_iter().map(|column| column.expr).collect(),
                 }))
             }
             LogicalPlan::Aggregate {

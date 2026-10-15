@@ -13,7 +13,7 @@ use crate::{
             target::{SelectList, SelectTarget},
         },
         catalog_context::CatalogContext,
-        planner::logical::{AggregateCall, LogicalPlan, SortKey},
+        planner::logical::{AggregateCall, LogicalPlan, ProjectionColumn, SortKey},
     },
 };
 
@@ -238,8 +238,11 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         };
 
         let mut projections = Vec::with_capacity(targets.len());
-        for (expr, _) in &targets {
-            projections.push(self.bind(expr, &scope, grouped.as_mut())?);
+        for (expr, name) in &targets {
+            projections.push(ProjectionColumn {
+                name: name.clone(),
+                expr: self.bind(expr, &scope, grouped.as_mut())?,
+            });
         }
 
         let mut sort_keys = Vec::with_capacity(order_by_exprs.len());
@@ -271,8 +274,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
         plan = LogicalPlan::Projection {
             input: Box::new(plan),
-            expressions: projections,
-            column_names: targets.into_iter().map(|(_, name)| name).collect(),
+            columns: projections,
         };
 
         if limit.is_some() || offset.is_some() {

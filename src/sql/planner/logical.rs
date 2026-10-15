@@ -8,6 +8,15 @@ use crate::{
 
 use super::relation_schema::RelationSchema;
 
+/// One output column of a `LogicalPlan::Projection`.
+#[derive(Debug)]
+pub struct ProjectionColumn {
+    /// Output name: the alias, else the default name (`name`, `count`, `?column?`).
+    pub name: String,
+    /// Evaluated against the Projection's input row.
+    pub expr: AnalyzedExpression,
+}
+
 #[derive(Debug)]
 pub enum LogicalPlan {
     Scan {
@@ -39,10 +48,9 @@ pub enum LogicalPlan {
     },
     Projection {
         input: Box<LogicalPlan>,
-        expressions: Vec<AnalyzedExpression>,
 
-        /// Output column names (aliases already applied)
-        column_names: Vec<String>,
+        /// One entry per output column, each pairing its name with its expression.
+        columns: Vec<ProjectionColumn>,
     },
     /// Collapses input rows into one row per group.
     ///
@@ -132,15 +140,8 @@ impl LogicalPlan {
                         ),
                 )
             }
-            LogicalPlan::Projection {
-                expressions,
-                column_names,
-                ..
-            } => RelationSchema::computed(
-                column_names
-                    .iter()
-                    .cloned()
-                    .zip(expressions.iter().map(AnalyzedExpression::get_type)),
+            LogicalPlan::Projection { columns, .. } => RelationSchema::computed(
+                columns.iter().map(|c| (c.name.clone(), c.expr.get_type())),
             ),
             LogicalPlan::Values { .. }
             | LogicalPlan::Insert { .. }
