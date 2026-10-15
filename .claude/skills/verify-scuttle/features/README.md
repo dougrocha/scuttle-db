@@ -26,7 +26,8 @@ lands, add a feature file for it.
 
 ## Driving conventions
 
-- One SQL statement per line. `drive.sh` drops blank lines and appends `exit`.
+- One SQL statement per line. Blank lines are ignored by the REPL. `drive.sh` still drops them and
+  appends `exit`.
 - Treat SQL in the recipes as literal. The expected output is copied from real runs.
 - Read results positionally: the Nth `DB: ` prompt comes before the Nth statement's output.
 - Errors print `  x <message>` to stdout and the exit code stays 0, so check the transcript, not

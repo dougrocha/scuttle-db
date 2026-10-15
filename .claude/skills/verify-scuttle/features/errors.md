@@ -34,7 +34,7 @@ Expected, one `  x` line per bad statement:
 ## Gotchas
 
 - Errors go to stdout, and the exit code is still 0.
-- An empty line is a parse error (`Unexpected end of input`). `drive.sh` strips blank lines for that
-  reason. Driving the binary by hand doesn't.
+- A blank line is ignored: no output, just another `DB: ` prompt. (Before the fix it was a parse
+  error, `Unexpected end of input`.)
 - EOF ends the session like `exit`. (Before the fix it looped forever on `Unexpected end of input`.)
 - miette wraps long messages, so match on a substring, not a whole line.

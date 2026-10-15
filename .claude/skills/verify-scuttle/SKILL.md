@@ -63,8 +63,9 @@ SQL
 ```
 
 How the REPL behaves (all observed):
-- One statement per line. A trailing `;` is optional. A blank line is an empty statement and
-  errors, so `drive.sh` strips blank lines from the input.
+- One statement per line. A trailing `;` is optional. Blank lines are ignored (the prompt is just
+  printed again). `drive.sh` still strips blank lines from the input, so when you pipe to the
+  binary by hand, blank lines are harmless.
 - Prompt `DB: ` comes before each result, so result N follows the Nth `DB: `.
 - Success outputs: `OK` (CREATE), `N row(s) affected` (INSERT/UPDATE/DELETE), and a dashed table
   ending `(N rows)` (SELECT). NULL prints as `NULL`.

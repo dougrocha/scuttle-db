@@ -60,6 +60,10 @@ pub fn run_repl<R: BufRead, W: Write>(
         }
 
         let statement = line.trim();
+        // A blank line is not a statement. Prompt again without output (like psql).
+        if statement.is_empty() {
+            continue;
+        }
         if statement == "exit" || statement == ":q" {
             break;
         }
@@ -121,6 +125,26 @@ mod tests {
         assert!(out.contains("Table not found: nope"));
         assert!(out.contains("DB: OK\n"));
         assert!(db.get_table("t").is_ok());
+    }
+
+    #[test]
+    fn test_run_repl_ignores_blank_lines() {
+        let (db, out) = run("CREATE TABLE t (id INT);\n\n   \nSELECT * FROM t;\n\nexit\n");
+        assert!(!out.contains("Unexpected"));
+        assert!(!out.contains("  x "));
+        assert!(db.get_table("t").is_ok());
+    }
+
+    #[test]
+    fn test_run_repl_blank_line_reprompts_silently() {
+        let (_, out) = run("\n\nexit\n");
+        assert_eq!(out, "DB: DB: DB: Exiting Scuttle\n");
+    }
+
+    #[test]
+    fn test_run_repl_blank_lines_then_end_of_input_terminates() {
+        let (_, out) = run("\n\n");
+        assert_eq!(out, "DB: DB: DB: Exiting Scuttle\n");
     }
 
     #[test]
