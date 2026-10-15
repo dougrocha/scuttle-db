@@ -4,30 +4,18 @@
 //! schema it reads: a scan's table columns, a join's qualified columns, a projection's
 //! output names, and so on.
 
-use miette::Result;
-
 use crate::sql::analyzer::AnalyzedExpression;
-use crate::sql::catalog_context::CatalogContext;
 use crate::sql::planner::logical::LogicalPlan;
 use crate::sql::planner::relation_schema::RelationSchema;
 
 /// Formats `plan` as one line per node, children indented under their parent.
-///
-/// # Errors
-///
-/// Returns an error if a scanned table no longer exists in the catalog.
-pub(crate) fn explain(plan: &LogicalPlan, catalog: &CatalogContext) -> Result<String> {
+pub(crate) fn explain(plan: &LogicalPlan) -> String {
     let mut lines = Vec::new();
-    write_node(plan, catalog, 0, &mut lines)?;
-    Ok(lines.join("\n"))
+    write_node(plan, 0, &mut lines);
+    lines.join("\n")
 }
 
-fn write_node(
-    plan: &LogicalPlan,
-    catalog: &CatalogContext,
-    depth: usize,
-    lines: &mut Vec<String>,
-) -> Result<()> {
+fn write_node(plan: &LogicalPlan, depth: usize, lines: &mut Vec<String>) {
     let indent = "  ".repeat(depth);
 
     match plan {
@@ -48,20 +36,20 @@ fn write_node(
                 "{indent}Join: {kind} on {}",
                 plan.output_schema().render(on)
             ));
-            write_node(left, catalog, depth + 1, lines)?;
-            write_node(right, catalog, depth + 1, lines)?;
+            write_node(left, depth + 1, lines);
+            write_node(right, depth + 1, lines);
         }
         LogicalPlan::Filter { input, condition } => {
             let columns = input.output_schema();
             lines.push(format!("{indent}Filter: {}", columns.render(condition)));
-            write_node(input, catalog, depth + 1, lines)?;
+            write_node(input, depth + 1, lines);
         }
         LogicalPlan::Projection { input, .. } => {
             lines.push(format!(
                 "{indent}Projection: {}",
                 plan.output_schema().names().join(", ")
             ));
-            write_node(input, catalog, depth + 1, lines)?;
+            write_node(input, depth + 1, lines);
         }
         LogicalPlan::Aggregate {
             input,
@@ -80,7 +68,7 @@ fn write_node(
                 .collect();
             line.push_str(&calls.join(", "));
             lines.push(line);
-            write_node(input, catalog, depth + 1, lines)?;
+            write_node(input, depth + 1, lines);
         }
         LogicalPlan::Sort { input, keys } => {
             let columns = input.output_schema();
@@ -96,7 +84,7 @@ fn write_node(
                 })
                 .collect();
             lines.push(format!("{indent}Sort: {}", keys.join(", ")));
-            write_node(input, catalog, depth + 1, lines)?;
+            write_node(input, depth + 1, lines);
         }
         LogicalPlan::Limit {
             input,
@@ -111,7 +99,7 @@ fn write_node(
                 line.push_str(&format!(" offset {offset}"));
             }
             lines.push(line);
-            write_node(input, catalog, depth + 1, lines)?;
+            write_node(input, depth + 1, lines);
         }
         LogicalPlan::Values { expressions } => {
             let rows = expressions.len();
@@ -127,14 +115,15 @@ fn write_node(
                 "{indent}Insert: {table_name} ({})",
                 column_names.join(", ")
             ));
-            write_node(source, catalog, depth + 1, lines)?;
+            write_node(source, depth + 1, lines);
         }
         LogicalPlan::Update {
             table_name,
             assignments,
             filter,
+            schema,
         } => {
-            let columns = RelationSchema::table(table_name, &catalog.get_table(table_name)?.schema);
+            let columns = RelationSchema::table(table_name, schema);
             let sets: Vec<String> = assignments
                 .iter()
                 .map(|(index, value)| {
@@ -147,8 +136,12 @@ fn write_node(
             ));
             write_filtered_scan(table_name, filter.as_ref(), &columns, depth + 1, lines);
         }
-        LogicalPlan::Delete { table_name, filter } => {
-            let columns = RelationSchema::table(table_name, &catalog.get_table(table_name)?.schema);
+        LogicalPlan::Delete {
+            table_name,
+            filter,
+            schema,
+        } => {
+            let columns = RelationSchema::table(table_name, schema);
             lines.push(format!("{indent}Delete: {table_name}"));
             write_filtered_scan(table_name, filter.as_ref(), &columns, depth + 1, lines);
         }
@@ -166,8 +159,6 @@ fn write_node(
             ));
         }
     }
-
-    Ok(())
 }
 
 /// Writes the scan (and optional filter) that UPDATE and DELETE read their rows from.

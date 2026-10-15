@@ -356,6 +356,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             table_name,
             assignments: bound_assignments,
             filter,
+            schema: schema.clone(),
         })
     }
 
@@ -371,7 +372,11 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             .map(|expr| self.bind_expression(&expr, &scope))
             .transpose()?;
 
-        Ok(LogicalPlan::Delete { table_name, filter })
+        Ok(LogicalPlan::Delete {
+            table_name,
+            filter,
+            schema: schema.clone(),
+        })
     }
 
     pub fn analyze_insert(&self, statement: InsertStatement) -> Result<LogicalPlan> {

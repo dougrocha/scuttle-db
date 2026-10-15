@@ -426,7 +426,7 @@ impl Database {
             Statement::Delete(delete_stmt) => analyzer.analyze_delete(delete_stmt)?,
         };
 
-        explain::explain(&plan, &context)
+        Ok(explain::explain(&plan))
     }
 
     fn handle_create(&mut self, create_stmt: statement::CreateStatement) -> Result<QueryResponse> {
@@ -496,12 +496,11 @@ impl Database {
             table_name,
             assignments,
             filter,
+            schema,
         } = analyzer.analyze_update(update_stmt)?
         else {
             unreachable!("analyze_update always returns LogicalPlan::Update")
         };
-
-        let schema = self.get_table(&table_name)?.schema().clone();
 
         // Compute and validate every new row before writing anything, so a bad value
         // doesn't leave the table half-updated. Scanning everything up front also keeps
@@ -559,7 +558,9 @@ impl Database {
     fn handle_delete(&mut self, delete_stmt: statement::DeleteStatement) -> Result<QueryResponse> {
         let context = CatalogContext::new(self);
         let analyzer = Analyzer::new(&context);
-        let LogicalPlan::Delete { table_name, filter } = analyzer.analyze_delete(delete_stmt)?
+        let LogicalPlan::Delete {
+            table_name, filter, ..
+        } = analyzer.analyze_delete(delete_stmt)?
         else {
             unreachable!("analyze_delete always returns LogicalPlan::Delete")
         };

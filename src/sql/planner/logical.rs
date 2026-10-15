@@ -83,10 +83,17 @@ pub enum LogicalPlan {
         /// `(column index, new value)` pairs; expressions are evaluated against the old row
         assignments: Vec<(usize, AnalyzedExpression)>,
         filter: Option<AnalyzedExpression>,
+
+        /// What `assignments` and `filter` index. Lets EXPLAIN drop the catalog and
+        /// `handle_update` drop its second `get_table`.
+        schema: Schema,
     },
     Delete {
         table_name: String,
         filter: Option<AnalyzedExpression>,
+
+        /// What `filter` indexes.
+        schema: Schema,
     },
     CreateTable {
         table_name: String,
