@@ -444,11 +444,11 @@ impl<'a, 'db> Analyzer<'a, 'db> {
     /// Joins are left-deep: each JOIN wraps the plan built so far. An ON clause sees
     /// only the relations to its left, so it can refer to earlier tables only.
     fn analyze_from(&self, from: &statement::From) -> Result<(LogicalPlan, BindScope)> {
-        let mut scope = BindScope::empty();
-        let mut plan = self.scan(&from.table, &mut scope)?;
+        let mut plan = self.scan(&from.table)?;
         for join in &from.joins {
-            let right = self.scan(&join.table, &mut scope)?;
-            let on = self.bind_expression(&join.on, &scope)?;
+            let right = self.scan(&join.table)?;
+            let on_scope = BindScope::of_join(&plan, &right, join.table.binding_name())?;
+            let on = self.bind_expression(&join.on, &on_scope)?;
             if on.get_type() != DataType::Bool {
                 return Err(miette!("JOIN ... ON must be a boolean expression"));
             }
@@ -459,13 +459,13 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 on,
             };
         }
+        let scope = BindScope::of(&plan);
         Ok((plan, scope))
     }
 
-    /// Looks up the table, registers it in `scope` under its binding name, and builds its Scan.
-    fn scan(&self, table: &statement::TableRef, scope: &mut BindScope) -> Result<LogicalPlan> {
+    /// Looks up the table and builds its Scan.
+    fn scan(&self, table: &statement::TableRef) -> Result<LogicalPlan> {
         let def = self.context.get_table(&table.name)?;
-        scope.push_relation(table.binding_name(), def.schema())?;
 
         Ok(LogicalPlan::Scan {
             table_name: table.name.clone(),
@@ -684,9 +684,14 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                     .iter()
                     .position(|(ast, _)| *ast == canonical);
                 let index = position.unwrap_or_else(|| {
-                    group
-                        .aggregates
-                        .push((canonical, AggregateCall { function, arg }));
+                    group.aggregates.push((
+                        canonical,
+                        AggregateCall {
+                            function,
+                            arg,
+                            return_type,
+                        },
+                    ));
                     group.aggregates.len() - 1
                 });
 

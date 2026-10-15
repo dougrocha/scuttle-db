@@ -9,36 +9,42 @@
 //!        u.id  u.name  u.dept  u.age  o.id  o.user_id  o.total
 //! ```
 //!
-//! Relations are pushed one at a time, so indexes are correct by construction.
+//! The layout comes from the plan: the scope is built from `LogicalPlan::output_schema()`
+//! (or `RelationSchema::table` / `join` for the two places that bind before a plan exists),
+//! so the indexes it returns are the indexes the executor reads. `BindScope` adds only the
+//! SQL naming policy on top: qualifiers, ambiguity, duplicate relations, `*` expansion and
+//! canonical forms.
+//!
 //! Lookups are exact and case-sensitive, like `Schema::get_column_index`.
 
 use miette::{Result, miette};
 
 use crate::{
     DataType, Schema,
-    sql::ast::expression::{Expression, FunctionArgs},
+    sql::{
+        ast::expression::{Expression, FunctionArgs},
+        planner::{
+            logical::LogicalPlan,
+            relation_schema::{OutputColumn, RelationSchema},
+        },
+    },
 };
 
-#[derive(Debug, Clone)]
-struct ScopeColumn {
-    relation: String,
-    name: String,
-    data_type: DataType,
-}
-
-impl ScopeColumn {
-    fn to_expression(&self) -> Expression {
-        Expression::Qualified {
-            relation: self.relation.clone(),
-            column: self.name.clone(),
-        }
+/// The column as an expression: `relation.name` for a table column, else `name`.
+fn to_expression(column: &OutputColumn) -> Expression {
+    match &column.relation {
+        Some(relation) => Expression::Qualified {
+            relation: relation.clone(),
+            column: column.name.clone(),
+        },
+        None => Expression::Identifier(column.name.clone()),
     }
 }
 
 /// Ordered list of the columns visible to an expression, one entry per relation column.
 #[derive(Debug, Default)]
 pub(crate) struct BindScope {
-    columns: Vec<ScopeColumn>,
+    schema: RelationSchema,
 }
 
 impl BindScope {
@@ -47,37 +53,66 @@ impl BindScope {
         Self::default()
     }
 
-    /// Creates a scope containing the columns of a single relation.
-    ///
-    /// # Panics
-    ///
-    /// Never panics in practice: the scope starts empty, so no duplicate relation can exist.
+    /// Creates a scope containing the columns of a single relation (UPDATE and DELETE).
     pub(crate) fn single(relation: &str, schema: &Schema) -> Self {
-        let mut scope = Self::empty();
-        scope
-            .push_relation(relation, schema)
-            .expect("an empty scope has no duplicate relation");
-        scope
+        Self {
+            schema: RelationSchema::table(relation, schema),
+        }
     }
 
-    /// Appends the columns of `relation` to the scope.
+    /// The scope of the row `plan` produces (the final FROM scope).
+    pub(crate) fn of(plan: &LogicalPlan) -> Self {
+        Self {
+            schema: plan.output_schema(),
+        }
+    }
+
+    /// The scope a JOIN's ON clause is bound against: the row of `left JOIN right`.
+    ///
+    /// `right_name` is the binding name (alias, else table name) of the right-hand table.
+    /// It is passed in because a zero-column table contributes no columns to `right`, so
+    /// the duplicate check could not find its name there. `CREATE TABLE z ()` is valid, and
+    /// `FROM users u JOIN z u` must still fail.
     ///
     /// # Errors
     ///
-    /// Returns an error if a relation with the same name is already in the scope.
-    pub(crate) fn push_relation(&mut self, relation: &str, schema: &Schema) -> Result<()> {
-        if self.columns.iter().any(|c| c.relation == relation) {
-            return Err(miette!(
-                "Table name \"{relation}\" specified more than once; give one of them an alias"
-            ));
+    /// Returns an error if `right_name` already appears in `left`, or if a relation of
+    /// `right` already appears in `left`.
+    pub(crate) fn of_join(
+        left: &LogicalPlan,
+        right: &LogicalPlan,
+        right_name: &str,
+    ) -> Result<Self> {
+        let left = Self::of(left);
+        let right_schema = right.output_schema();
+        let duplicate = |relation: &str| {
+            miette!("Table name \"{relation}\" specified more than once; give one of them an alias")
+        };
+        if left.has_relation(right_name) {
+            return Err(duplicate(right_name));
         }
-        self.columns
-            .extend(schema.columns.iter().map(|col| ScopeColumn {
-                relation: relation.to_string(),
-                name: col.name.clone(),
-                data_type: col.data_type,
-            }));
-        Ok(())
+        for relation in right_schema
+            .columns()
+            .iter()
+            .filter_map(|c| c.relation.as_deref())
+        {
+            if left.has_relation(relation) {
+                return Err(duplicate(relation));
+            }
+        }
+        Ok(Self {
+            schema: RelationSchema::join(&left.schema, &right_schema),
+        })
+    }
+
+    fn columns(&self) -> &[OutputColumn] {
+        self.schema.columns()
+    }
+
+    fn has_relation(&self, relation: &str) -> bool {
+        self.columns()
+            .iter()
+            .any(|c| c.relation.as_deref() == Some(relation))
     }
 
     /// Resolves a (possibly qualified) column reference to its position and type.
@@ -91,17 +126,17 @@ impl BindScope {
     pub(crate) fn resolve(&self, qualifier: Option<&str>, name: &str) -> Result<(usize, DataType)> {
         let index = match qualifier {
             Some(relation) => {
-                if !self.columns.iter().any(|c| c.relation == relation) {
+                if !self.has_relation(relation) {
                     return Err(miette!("Missing FROM-clause entry for table {relation}"));
                 }
-                self.columns
+                self.columns()
                     .iter()
-                    .position(|c| c.relation == relation && c.name == name)
+                    .position(|c| c.relation.as_deref() == Some(relation) && c.name == name)
                     .ok_or_else(|| miette!("Column {relation}.{name} could not be found"))?
             }
             None => {
                 let mut hits = self
-                    .columns
+                    .columns()
                     .iter()
                     .enumerate()
                     .filter(|(_, c)| c.name == name)
@@ -115,12 +150,12 @@ impl BindScope {
                 first
             }
         };
-        Ok((index, self.columns[index].data_type))
+        Ok((index, self.columns()[index].data_type))
     }
 
     /// Returns true if any relation in the scope has a column with this name.
     pub(crate) fn has_column(&self, name: &str) -> bool {
-        self.columns.iter().any(|c| c.name == name)
+        self.columns().iter().any(|c| c.name == name)
     }
 
     /// Expands `*` or `relation.*` into one expression per column, in column order.
@@ -132,15 +167,15 @@ impl BindScope {
     /// Returns an error if `qualifier` names a relation that is not in the scope.
     pub(crate) fn expand_star(&self, qualifier: Option<&str>) -> Result<Vec<(Expression, String)>> {
         if let Some(relation) = qualifier
-            && !self.columns.iter().any(|c| c.relation == relation)
+            && !self.has_relation(relation)
         {
             return Err(miette!("Missing FROM-clause entry for table {relation}"));
         }
         Ok(self
-            .columns
+            .columns()
             .iter()
-            .filter(|c| qualifier.is_none_or(|q| c.relation == q))
-            .map(|c| (c.to_expression(), c.name.clone()))
+            .filter(|c| qualifier.is_none_or(|q| c.relation.as_deref() == Some(q)))
+            .map(|c| (to_expression(c), c.name.clone()))
             .collect())
     }
 
@@ -153,11 +188,11 @@ impl BindScope {
         match expr {
             Expression::Identifier(name) => {
                 let (i, _) = self.resolve(None, name)?;
-                Ok(self.columns[i].to_expression())
+                Ok(to_expression(&self.columns()[i]))
             }
             Expression::Qualified { relation, column } => {
                 let (i, _) = self.resolve(Some(relation), column)?;
-                Ok(self.columns[i].to_expression())
+                Ok(to_expression(&self.columns()[i]))
             }
             Expression::Literal(_) => Ok(expr.clone()),
             Expression::BinaryOp { left, op, right } => Ok(Expression::BinaryOp {
@@ -216,12 +251,23 @@ mod tests {
         ])
     }
 
+    /// A Scan of `table` read through `alias`.
+    fn scan(table: &str, alias: &str, schema: Schema) -> LogicalPlan {
+        LogicalPlan::Scan {
+            table_name: table.to_string(),
+            alias: Some(alias.to_string()),
+            schema,
+        }
+    }
+
     /// `u JOIN o` as FROM order: u.id, u.name, u.dept, u.age, o.id, o.user_id, o.total
     fn joined_scope() -> BindScope {
-        let mut scope = BindScope::empty();
-        scope.push_relation("u", &users_schema()).unwrap();
-        scope.push_relation("o", &orders_schema()).unwrap();
-        scope
+        BindScope::of_join(
+            &scan("users", "u", users_schema()),
+            &scan("orders", "o", orders_schema()),
+            "o",
+        )
+        .unwrap()
     }
 
     fn qualified(relation: &str, column: &str) -> Expression {
@@ -272,10 +318,17 @@ mod tests {
 
     #[test]
     fn test_scope_duplicate_relation_errors() {
-        let mut scope = BindScope::empty();
-        scope.push_relation("u", &users_schema()).unwrap();
+        let err = BindScope::of_join(
+            &scan("users", "u", users_schema()),
+            &scan("orders", "u", orders_schema()),
+            "u",
+        )
+        .unwrap_err();
 
-        assert!(scope.push_relation("u", &users_schema()).is_err());
+        assert!(
+            err.to_string().contains("specified more than once"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -284,9 +337,12 @@ mod tests {
             ColumnDef::new("id", DataType::Int64),
             ColumnDef::new("name", DataType::Text),
         ]);
-        let mut scope = BindScope::empty();
-        scope.push_relation("a", &pair).unwrap();
-        scope.push_relation("b", &pair).unwrap();
+        let scope = BindScope::of_join(
+            &scan("t", "a", pair.clone()),
+            &scan("t", "b", pair.clone()),
+            "b",
+        )
+        .unwrap();
 
         assert_eq!(
             scope.resolve(Some("b"), "id").unwrap().0,
@@ -309,8 +365,7 @@ mod tests {
 
     #[test]
     fn test_scope_canonicalize_makes_bare_and_qualified_equal() {
-        let mut scope = BindScope::empty();
-        scope.push_relation("u", &users_schema()).unwrap();
+        let scope = BindScope::single("u", &users_schema());
         let canon = |expr: &Expression| scope.canonicalize(expr).unwrap();
 
         assert_eq!(

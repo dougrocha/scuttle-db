@@ -1,5 +1,5 @@
 use crate::{
-    ColumnDef, Schema,
+    ColumnDef, DataType, Schema,
     sql::{
         analyzer::{AggregateFunction, AnalyzedExpression},
         ast::statement::JoinKind,
@@ -98,6 +98,9 @@ impl LogicalPlan {
     /// - Aggregate: keys, then calls. Named AND labelled by text rendered against the
     ///   INPUT's labels, which is why a Sort over an Aggregate over a Join prints `u.name`.
     /// - Projection: one column per select-list output.
+    ///
+    /// Relies on: the binder rejects a bare `Literal(Null)` outside INSERT VALUES and
+    /// UPDATE SET, so `get_type` never sees one in a SELECT plan (it panics on it).
     /// - Values, Insert, Update, Delete, CreateTable: empty. They return no rows to a parent.
     pub(crate) fn output_schema(&self) -> RelationSchema {
         match self {
@@ -121,13 +124,24 @@ impl LogicalPlan {
                 RelationSchema::computed(
                     group_by
                         .iter()
-                        .map(|key| columns.render(key))
-                        .chain(aggregates.iter().map(|call| columns.render_aggregate(call))),
+                        .map(|key| (columns.render(key), key.get_type()))
+                        .chain(
+                            aggregates
+                                .iter()
+                                .map(|call| (columns.render_aggregate(call), call.return_type)),
+                        ),
                 )
             }
-            LogicalPlan::Projection { column_names, .. } => {
-                RelationSchema::computed(column_names.iter().cloned())
-            }
+            LogicalPlan::Projection {
+                expressions,
+                column_names,
+                ..
+            } => RelationSchema::computed(
+                column_names
+                    .iter()
+                    .cloned()
+                    .zip(expressions.iter().map(AnalyzedExpression::get_type)),
+            ),
             LogicalPlan::Values { .. }
             | LogicalPlan::Insert { .. }
             | LogicalPlan::Update { .. }
@@ -144,6 +158,9 @@ pub struct AggregateCall {
 
     /// `None` for `COUNT(*)`
     pub arg: Option<AnalyzedExpression>,
+
+    /// Type of the aggregate's result, as the analyzer resolved it.
+    pub return_type: DataType,
 }
 
 /// One ORDER BY key, evaluated against the sort's input row.

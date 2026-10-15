@@ -13,7 +13,7 @@
 //! | Projection  | `n` / `count` / `?column?`   | same as `name`                        |
 
 use crate::{
-    Schema, Value,
+    DataType, Schema, Value,
     sql::{
         analyzer::{AggregateFunction, AnalyzedExpression, IsPredicateTarget},
         planner::logical::AggregateCall,
@@ -32,6 +32,10 @@ pub(crate) struct OutputColumn {
 
     /// How EXPLAIN prints a reference to this column from the node above.
     pub(crate) label: String,
+
+    /// Type of the values in this column. Read by `BindScope::resolve` (type of a bound
+    /// column). Computed columns carry the expression's or aggregate's type.
+    pub(crate) data_type: DataType,
 }
 
 /// Ordered output columns of one plan node.
@@ -61,6 +65,7 @@ impl RelationSchema {
                     relation: Some(relation.to_string()),
                     name: col.name.clone(),
                     label: col.name.clone(),
+                    data_type: col.data_type,
                 })
                 .collect(),
         }
@@ -88,27 +93,34 @@ impl RelationSchema {
     }
 
     /// Computed columns, in output order, with `relation = None` and `label == name`.
-    pub(crate) fn computed(names: impl IntoIterator<Item = String>) -> Self {
+    /// Each item is the column's name and type.
+    pub(crate) fn computed(columns: impl IntoIterator<Item = (String, DataType)>) -> Self {
         Self {
-            columns: names
+            columns: columns
                 .into_iter()
-                .map(|name| OutputColumn {
+                .map(|(name, data_type)| OutputColumn {
                     relation: None,
                     label: name.clone(),
                     name,
+                    data_type,
                 })
                 .collect(),
         }
     }
 
-    /// Client-facing names in row order; duplicates kept (`name`, `name`).
-    pub(crate) fn names(&self) -> Vec<String> {
-        self.columns.iter().map(|col| col.name.clone()).collect()
-    }
-
     /// Number of columns in every row the node produces.
     pub(crate) fn len(&self) -> usize {
         self.columns.len()
+    }
+
+    /// The columns in row order.
+    pub(crate) fn columns(&self) -> &[OutputColumn] {
+        &self.columns
+    }
+
+    /// Client-facing names in row order; duplicates kept (`name`, `name`).
+    pub(crate) fn names(&self) -> Vec<String> {
+        self.columns.iter().map(|col| col.name.clone()).collect()
     }
 
     /// EXPLAIN label of column `index`, or `#index` if out of range.
@@ -179,7 +191,7 @@ fn literal(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ColumnDef, DataType, sql::planner::logical::LogicalPlan};
+    use crate::{ColumnDef, sql::planner::logical::LogicalPlan};
 
     /// `users(id, name)`
     fn users_schema() -> Schema {
@@ -222,6 +234,7 @@ mod tests {
         let labels: Vec<String> = (0..4).map(|i| joined.label(i)).collect();
         assert_eq!(labels, vec!["u.id", "u.name", "o.id", "o.total"]);
         assert_eq!(joined.names(), vec!["id", "name", "id", "total"]);
+        assert_eq!(joined.columns()[3].data_type, DataType::Float64);
     }
 
     #[test]

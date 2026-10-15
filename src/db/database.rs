@@ -825,6 +825,21 @@ mod tests {
     }
 
     #[test]
+    fn test_join_duplicate_alias_with_zero_column_table_fails() {
+        let mut db = TestDb::new("zero-column-duplicate-alias");
+        db.execute("CREATE TABLE z ()");
+
+        let err = db
+            .db
+            .execute_query("SELECT * FROM users u JOIN z u ON 1 = 1")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("specified more than once"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn test_group_by_bare_and_qualified_are_the_same_key() {
         let mut db = TestDb::new("group-by-qualified");
 
