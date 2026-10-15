@@ -34,6 +34,21 @@ fn write_node(
             Some(alias) => format!("{indent}Scan: {table_name} {alias}"),
             None => format!("{indent}Scan: {table_name}"),
         }),
+        LogicalPlan::Join {
+            left,
+            right,
+            kind,
+            on,
+            column_names,
+            ..
+        } => {
+            lines.push(format!(
+                "{indent}Join: {kind} on {}",
+                expression(on, column_names)
+            ));
+            write_node(left, catalog, depth + 1, lines)?;
+            write_node(right, catalog, depth + 1, lines)?;
+        }
         LogicalPlan::Filter { input, condition } => {
             let columns = output_columns(input, catalog)?;
             lines.push(format!(
@@ -183,6 +198,7 @@ fn output_columns(plan: &LogicalPlan, catalog: &CatalogContext) -> Result<Vec<St
         | LogicalPlan::Sort { input, .. }
         | LogicalPlan::Limit { input, .. } => output_columns(input, catalog)?,
         LogicalPlan::Projection { column_names, .. } => column_names.clone(),
+        LogicalPlan::Join { column_names, .. } => column_names.clone(),
         LogicalPlan::Aggregate {
             input,
             group_by,
@@ -195,7 +211,11 @@ fn output_columns(plan: &LogicalPlan, catalog: &CatalogContext) -> Result<Vec<St
                 .chain(aggregates.iter().map(|a| aggregate(a, &columns)))
                 .collect()
         }
-        _ => Vec::new(),
+        LogicalPlan::Values { .. }
+        | LogicalPlan::Insert { .. }
+        | LogicalPlan::Update { .. }
+        | LogicalPlan::Delete { .. }
+        | LogicalPlan::CreateTable { .. } => Vec::new(),
     })
 }
 
@@ -353,5 +373,97 @@ mod tests {
     #[test]
     fn test_explain_missing_table_fails() {
         assert!(users().explain("SELECT * FROM nope").is_err());
+    }
+
+    /// `users` plus `orders(id, user_id, total)` and `depts(code, title)`.
+    fn shop() -> Database {
+        let mut db = users();
+        db.execute_query("CREATE TABLE orders (id INT, user_id INT, total INT)")
+            .unwrap();
+        db.execute_query("CREATE TABLE depts (code TEXT, title TEXT)")
+            .unwrap();
+        db
+    }
+
+    #[test]
+    fn test_explain_inner_join() {
+        let plan = shop()
+            .explain("SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id")
+            .unwrap();
+        assert_eq!(
+            plan,
+            "Projection: name, total\n  Join: inner on u.id = o.user_id\n    Scan: users u\n    Scan: orders o"
+        );
+    }
+
+    #[test]
+    fn test_explain_left_join_with_filter_uses_qualified_names() {
+        let plan = shop()
+            .explain(
+                "SELECT u.name, o.total FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE o.total > 10",
+            )
+            .unwrap();
+        assert_eq!(
+            plan,
+            "Projection: name, total\n  Filter: o.total > 10\n    Join: left on u.id = o.user_id\n      Scan: users u\n      Scan: orders o"
+        );
+    }
+
+    #[test]
+    fn test_explain_self_join_names_both_sides() {
+        let plan = shop()
+            .explain("SELECT a.name FROM users a JOIN users b ON a.id = b.id")
+            .unwrap();
+        assert!(plan.contains("Join: inner on a.id = b.id"), "{plan}");
+    }
+
+    #[test]
+    fn test_explain_join_chain_is_left_deep() {
+        let plan = shop()
+            .explain(
+                "SELECT u.name, o.total, d.title FROM users u JOIN orders o ON u.id = o.user_id LEFT JOIN depts d ON u.dept = d.code",
+            )
+            .unwrap();
+        let (_, tree) = plan.split_once('\n').unwrap();
+        assert_eq!(
+            tree,
+            "  Join: left on u.dept = d.code\n    Join: inner on u.id = o.user_id\n      Scan: users u\n      Scan: orders o\n    Scan: depts d"
+        );
+    }
+
+    #[test]
+    fn test_explain_aggregate_over_join() {
+        let plan = shop()
+            .explain(
+                "SELECT u.name, COUNT(o.id) FROM users u LEFT JOIN orders o ON u.id = o.user_id GROUP BY u.name",
+            )
+            .unwrap();
+        assert!(
+            plan.contains("Aggregate: group by u.name; COUNT(o.id)"),
+            "{plan}"
+        );
+    }
+
+    #[test]
+    fn test_explain_join_errors() {
+        let cases = [
+            // Ambiguous unqualified column (`id` is in both tables).
+            "SELECT id FROM users u JOIN orders o ON u.id = o.user_id",
+            // Same unaliased table twice.
+            "SELECT * FROM users JOIN users ON users.id = users.id",
+            // Same alias twice.
+            "SELECT * FROM users a JOIN orders a ON a.id = a.id",
+            // Unknown alias in ON.
+            "SELECT * FROM users u JOIN orders o ON u.id = x.user_id",
+            // ON refers to a table that is joined later.
+            "SELECT * FROM users u JOIN orders o ON u.id = d.code JOIN depts d ON u.dept = d.code",
+            // ON is not boolean.
+            "SELECT * FROM users u JOIN orders o ON u.id",
+            // Table name is hidden once it has an alias.
+            "SELECT users.name FROM users u JOIN orders o ON u.id = o.user_id",
+        ];
+        for sql in cases {
+            assert!(shop().explain(sql).is_err(), "should fail: {sql}");
+        }
     }
 }

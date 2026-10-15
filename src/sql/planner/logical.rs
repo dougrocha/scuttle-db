@@ -1,6 +1,9 @@
 use crate::{
     ColumnDef,
-    sql::analyzer::{AggregateFunction, AnalyzedExpression},
+    sql::{
+        analyzer::{AggregateFunction, AnalyzedExpression},
+        ast::statement::JoinKind,
+    },
 };
 
 #[derive(Debug)]
@@ -11,6 +14,26 @@ pub enum LogicalPlan {
         /// Table alias from the FROM clause, if any. Display-only: EXPLAIN prints
         /// `Scan: users u`. Physical planning ignores it.
         alias: Option<String>,
+    },
+    /// Nested-loop join. Output row is the left row followed by the right row.
+    ///
+    /// Children are `Scan` or `Join` (left-deep, one join per FROM clause entry).
+    Join {
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
+        kind: JoinKind,
+
+        /// Bound against `left ++ right`. Decides matching and, for LEFT, null-extension.
+        /// Must stay on the join: a WHERE predicate is never merged into it.
+        on: AnalyzedExpression,
+
+        /// Number of columns the right child produces. This is the LEFT padding width.
+        /// It cannot be read from rows, because the right table may be empty.
+        right_width: usize,
+
+        /// `"alias.column"` for every column of `left ++ right`. Display only: EXPLAIN
+        /// reads it, execution ignores it.
+        column_names: Vec<String>,
     },
     Filter {
         input: Box<LogicalPlan>,

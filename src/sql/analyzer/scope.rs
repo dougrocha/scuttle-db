@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! `BindScope`: the only place column names are resolved in the analyzer.
 //!
 //! A scope describes the row an expression is evaluated against: every column of

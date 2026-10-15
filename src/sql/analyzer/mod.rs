@@ -410,14 +410,28 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
     /// Builds the Scan / Join tree for FROM and the scope describing its output row.
     ///
-    /// Joins are not supported yet, so the plan is always a single Scan.
+    /// Joins are left-deep: each JOIN wraps the plan built so far. An ON clause sees
+    /// only the relations to its left, so it can refer to earlier tables only.
     fn analyze_from(&self, from: &statement::From) -> Result<(LogicalPlan, BindScope)> {
-        if !from.joins.is_empty() {
-            return Err(miette!("JOIN is not supported yet"));
-        }
-
         let mut scope = BindScope::empty();
-        let plan = self.scan(&from.table, &mut scope)?;
+        let mut plan = self.scan(&from.table, &mut scope)?;
+        for join in &from.joins {
+            let left_width = scope.len();
+            let right = self.scan(&join.table, &mut scope)?;
+            let right_width = scope.len() - left_width;
+            let on = self.bind_expression(&join.on, &scope)?;
+            if on.get_type() != DataType::Bool {
+                return Err(miette!("JOIN ... ON must be a boolean expression"));
+            }
+            plan = LogicalPlan::Join {
+                left: Box::new(plan),
+                right: Box::new(right),
+                kind: join.kind,
+                on,
+                right_width,
+                column_names: scope.qualified_names(),
+            };
+        }
         Ok((plan, scope))
     }
 

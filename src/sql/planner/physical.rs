@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use miette::Result;
+use miette::{Result, miette};
 
 use crate::{
     Value,
@@ -89,6 +89,8 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                     to_skip: offset,
                 }))
             }
+            // TEMPORARY: replaced by the JoinExec arm in the execution step.
+            LogicalPlan::Join { .. } => Err(miette!("JOIN execution is not implemented yet")),
             _ => todo!(),
         }
     }
