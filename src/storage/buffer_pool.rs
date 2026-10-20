@@ -24,6 +24,9 @@ pub struct TableFile {
 pub struct BufferPool {
     pool: HashMap<String, HashMap<PageId, Page>>,
 
+    /// Pages per table, see [`BufferPool::page_count`].
+    page_counts: HashMap<String, PageId>,
+
     /// Directory holding the `.table` files. `None` keeps every page in memory,
     /// which is how the database runs in the browser.
     data_directory: Option<PathBuf>,
@@ -33,6 +36,7 @@ impl BufferPool {
     pub fn new(data_directory: impl Into<PathBuf>) -> Self {
         Self {
             pool: HashMap::new(),
+            page_counts: HashMap::new(),
             data_directory: Some(data_directory.into()),
         }
     }
@@ -88,69 +92,49 @@ impl BufferPool {
         Ok(Page::from_bytes(buffer))
     }
 
+    /// Number of pages the table has, counting pages created but not yet written to disk.
+    ///
+    /// Seeded from the size of the table file the first time it is asked for, then kept
+    /// up to date by [`BufferPool::get_free_page`], which is the only place pages are created.
+    pub fn page_count(&mut self, table_name: &str) -> PageId {
+        if let Some(&count) = self.page_counts.get(table_name) {
+            return count;
+        }
+
+        let on_disk = self
+            .table_path(table_name)
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map_or(0, |meta| (meta.len() / Page::SIZE as u64) as PageId);
+        self.page_counts.insert(table_name.to_string(), on_disk);
+        on_disk
+    }
+
+    /// Returns a page with room for a tuple of `size` bytes.
+    ///
+    /// Tables are append-only: only the last page is considered, and a new page is
+    /// added when it is full. Space freed by DELETE is never reused.
     pub(crate) fn get_free_page(&mut self, table_name: &str, size: usize) -> Result<&mut Page> {
-        let max_pages = 1000;
+        let page_count = self.page_count(table_name);
 
-        // Find a page ID that has space or does not exist
-        let mut target_page_id = None;
-
-        for page_id in 0..max_pages {
-            let page_exists = self
-                .pool
-                .get(table_name)
-                .is_some_and(|pages| pages.contains_key(&page_id));
-
-            if page_exists {
-                // Check if existing page has space
-                let has_space = self
-                    .pool
-                    .get(table_name)
-                    .unwrap()
-                    .get(&page_id)
-                    .unwrap()
-                    .free_space()
-                    > size;
-
-                if has_space {
-                    target_page_id = Some(page_id);
-                    break;
-                }
-            } else {
-                // Page does not exist so we use the last page ID
-                target_page_id = Some(page_id);
-                break;
-            }
+        if let Some(last_page_id) = page_count.checked_sub(1)
+            && self.get_page(table_name, last_page_id)?.has_room_for(size)
+        {
+            return self.get_page(table_name, last_page_id);
         }
 
-        let page_id = target_page_id.ok_or_else(|| miette!("No free page available."))?;
-
-        let page_exists = self
-            .pool
-            .get(table_name)
-            .is_some_and(|pages| pages.contains_key(&page_id));
-
-        if !page_exists {
-            if let Ok(loaded_page) = self.load_page_from_file(table_name, page_id) {
-                self.pool
-                    .entry(table_name.to_string())
-                    .or_default()
-                    .insert(page_id, loaded_page);
-            } else {
-                // Create new page
-                let new_page = Page::new(page_id, PageType::Table);
-                self.pool
-                    .entry(table_name.to_string())
-                    .or_default()
-                    .insert(page_id, new_page);
-            }
+        let page = Page::new(page_count, PageType::Table);
+        if !page.has_room_for(size) {
+            return Err(miette!("A tuple of {size} bytes does not fit in a page."));
         }
+        self.page_counts
+            .insert(table_name.to_string(), page_count + 1);
 
         Ok(self
             .pool
-            .get_mut(table_name)
-            .unwrap()
-            .get_mut(&page_id)
-            .unwrap())
+            .entry(table_name.to_string())
+            .or_default()
+            .entry(page_count)
+            .or_insert(page))
     }
 
     pub(crate) fn save_page(&mut self, table_name: &str, page_id: PageId) -> Result<()> {

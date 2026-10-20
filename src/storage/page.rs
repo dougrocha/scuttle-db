@@ -156,9 +156,13 @@ impl Page {
         }
     }
 
+    /// Whether a tuple of `len` bytes, plus the item pointer it needs, fits in this page.
+    pub fn has_room_for(&self, len: usize) -> bool {
+        self.free_space() >= len + ItemPointer::SIZE
+    }
+
     pub fn add_data(&mut self, data: &[u8]) -> Result<ItemId> {
-        let needed_space = data.len() + ItemPointer::SIZE;
-        if self.free_space() < needed_space {
+        if !self.has_room_for(data.len()) {
             return Err(miette!("Not enough space in the page to add data."));
         }
 

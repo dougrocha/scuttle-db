@@ -60,11 +60,8 @@ impl SystemCatalog {
     pub fn load_all_tables(&self, buffer_pool: &mut BufferPool) -> Result<Vec<(String, Schema)>> {
         let mut tables = vec![];
 
-        for page_id in 0..100 {
-            let page = match buffer_pool.get_page(self.name(), page_id) {
-                Ok(p) => p,
-                Err(_) => break,
-            };
+        for page_id in 0..buffer_pool.page_count(self.name()) {
+            let page = buffer_pool.get_page(self.name(), page_id)?;
 
             for item_pointer in page.item_pointers() {
                 if item_pointer.is_deleted() {

@@ -318,16 +318,15 @@ impl Database {
         table_name: &str,
     ) -> Result<Vec<(PageId, ItemId, Row)>, DatabaseError> {
         let mut found_rows = Vec::new();
-        let max_pages = 1000; // To prevent infinite loops
+        let page_count = self.buffer_manager.page_count(table_name);
 
-        for current_page_id in 0..max_pages {
-            // Use get_page instead of get_page_mut (which doesn't exist)
-            let page_res = self.buffer_manager.get_page(table_name, current_page_id);
-
-            let page = match page_res {
-                Ok(page) => page,
-                Err(_) => break,
-            };
+        for current_page_id in 0..page_count {
+            // Every page below the count exists, so failing to read one is a real error,
+            // not the end of the table.
+            let page = self
+                .buffer_manager
+                .get_page(table_name, current_page_id)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             // The item id is the pointer's index, so enumerate before skipping deleted items
             for (item_id, item_pointer) in page.item_pointers().enumerate() {
@@ -1092,6 +1091,38 @@ mod tests {
                 vec![Value::Int64(4), Value::Int64(35)],
             ]
         );
+    }
+
+    #[test]
+    fn test_table_larger_than_1000_pages_persists() {
+        let mut db = TestDb::new("many-pages");
+        db.execute("CREATE TABLE wide (id INT, body TEXT)");
+
+        // About 2KB per row fits four rows in a page, so this needs more than 1000 pages
+        let body = "x".repeat(2000);
+        let rows = 4200;
+        for start in (0..rows).step_by(100) {
+            let values: Vec<String> = (start..start + 100)
+                .map(|id| format!("({id}, '{body}')"))
+                .collect();
+            db.execute(&format!("INSERT INTO wide VALUES {}", values.join(", ")));
+        }
+        assert!(db.db.buffer_manager.page_count("wide") > 1000);
+
+        let count = |db: &mut TestDb| db.query("SELECT COUNT(*) FROM wide");
+        assert_eq!(count(&mut db), vec![vec![Value::Int64(rows)]]);
+
+        // Reopening reads the page count back from the file, and the last page loaded
+        // from disk is full, so the next insert has to start a new page
+        db.reopen();
+        assert_eq!(count(&mut db), vec![vec![Value::Int64(rows)]]);
+        db.execute(&format!("INSERT INTO wide VALUES ({rows}, '{body}')"));
+        assert_eq!(count(&mut db), vec![vec![Value::Int64(rows + 1)]]);
+
+        // Rows past page 1000 can be found and deleted
+        assert_eq!(db.affected("DELETE FROM wide WHERE id >= 4100"), Some(101));
+        db.reopen();
+        assert_eq!(count(&mut db), vec![vec![Value::Int64(4100)]]);
     }
 
     #[test]
