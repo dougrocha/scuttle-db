@@ -11,7 +11,7 @@ A user combines rows from several tables with `INNER JOIN` or `LEFT [OUTER] JOIN
 - `self-join` `users a JOIN users b`.
 - `chains` `a JOIN b ON ... LEFT JOIN c ON ...` (left-deep). An ON clause sees only the tables to its left and its own table.
 - `star` `*` returns every column of every table in FROM order. `t.*` returns one table's columns.
-- `errors` ambiguous unqualified names, unknown or hidden aliases, duplicate table names, RIGHT/FULL/CROSS.
+- `errors` ambiguous unqualified names, unknown or hidden aliases, duplicate table names, RIGHT/FULL/CROSS, comma joins.
 
 ## How to get to it (user POV)
 
@@ -56,11 +56,34 @@ Preconditions:
     - `  x Column reference "id" is ambiguous`
     - `  x Invalid query: Parse error: FULL JOIN is not supported`
     - After the relaunch, the LEFT JOIN returns the same 4 rows from the stored tables.
+- **`t.*`, a three-table chain, and scope errors.** In a new drive, run the CREATE and INSERT lines from the step above, then:
+
+    ```sql
+    CREATE TABLE depts (code TEXT, title TEXT);
+    INSERT INTO depts VALUES ('eng', 'Engineering');
+    SELECT o.*, u.name FROM users u JOIN orders o ON u.id = o.user_id WHERE o.id = 12;
+    SELECT u.name, o.total, d.title FROM users u JOIN orders o ON u.id = o.user_id LEFT JOIN depts d ON u.dept = d.code ORDER BY o.id;
+    SELECT * FROM users u JOIN orders o ON u.id = d.code JOIN depts d ON u.dept = d.code;
+    SELECT users.name FROM users u;
+    SELECT * FROM users JOIN users ON users.id = users.id;
+    SELECT * FROM users u RIGHT JOIN orders o ON u.id = o.user_id;
+    SELECT * FROM users CROSS JOIN orders;
+    SELECT * FROM users, orders;
+    ```
+
+    Expect, in order:
+    - `t.*`: headers `id | user_id | total | name`, row `12 3 75 cy`.
+    - Chain: `ann 100 Engineering`, `ann 50 Engineering`, `cy 75 NULL`.
+    - `  x Missing FROM-clause entry for table d`. The first ON cannot see a later table.
+    - `  x Missing FROM-clause entry for table users`. The alias hides the table name.
+    - `  x Table name "users" specified more than once; give one of them an alias`
+    - `RIGHT JOIN is not supported`, `CROSS JOIN is not supported`, and `Unexpected Comma after end of statement`, each after `  x Invalid query: Parse error: `.
 
 ## Gotchas
 
 - Check values from both sides. A wrong column offset gives NULLs, not an error. A LEFT JOIN whose right side is all NULL is suspicious unless the data explains it.
-- Output headers are bare column names (`id`, `id`), as in PostgreSQL. `ORDER BY id` over two different `id` outputs is an ambiguity error. Use `ORDER BY o.id` or a position.
+- Output headers are bare column names (`id`, `id`), as in PostgreSQL. `ORDER BY id` over two different `id` outputs fails with `ORDER BY "id" is ambiguous`. Use `ORDER BY o.id` or a position.
+- RIGHT, FULL, CROSS, and OUTER are reserved words. `FROM users right` fails as an unsupported join, not as an alias.
 - WHERE runs after the join. A right-side condition in WHERE removes the NULL rows of a LEFT JOIN. Put it in ON to keep them.
 - A quoted identifier with a dot (`"a.b"`) is split into `a.b`. This is a known limitation.
 - EXPLAIN is not a REPL command. The tests in `src/sql/planner/explain.rs` cover join plans.

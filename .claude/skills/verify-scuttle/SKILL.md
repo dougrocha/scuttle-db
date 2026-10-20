@@ -5,7 +5,7 @@ description: Drive the scuttle-db SQL REPL (the `scuttle-db` binary) the way a u
 
 # Verify scuttle-db
 
-The user types SQL into a line-oriented REPL (`src/bin/scuttle.rs`). It prints the prompt `DB: `, runs each line as one statement, and stores tables under `./db/` relative to its working directory. Piped stdin works, so this skill needs no PTY or tmux.
+The user types SQL into a line-oriented REPL (`src/bin/scuttle.rs`, with the loop in `src/repl.rs`). It prints the prompt `DB: `, runs each line as one statement, and stores tables under `./db/` relative to its working directory. Piped stdin works, so this skill needs no PTY or tmux.
 
 The helper is `.claude/skills/verify-scuttle/bin/scv`, relative to the repo root. Run `scv help` for every subcommand. The examples below call it as `scv`. Use the full path, or put its directory on `PATH` for the session.
 
@@ -65,12 +65,12 @@ SQL
 
 How the REPL behaves:
 
-- It runs one statement per line. A trailing `;` is optional. A blank line prints the prompt again. `scv drive` drops blank lines anyway, so the transcript stays positional.
+- It runs one statement per line. A trailing `;` is optional. A second statement on the same line is a parse error, and a statement cannot span lines. A blank line prints the prompt again. `scv drive` drops blank lines anyway, so the transcript stays positional.
 - The Nth `DB: ` prompt comes before the Nth statement's output.
 - Success prints `OK` (CREATE), `N row(s) affected` (INSERT, UPDATE, DELETE), or a dashed table that ends `(N rows)` (SELECT). NULL prints as `NULL`.
 - An error prints to stderr as a miette report that starts `  x `, for example `  x Table not found: nope`. The session continues. `scv drive` merges stderr into the transcript.
 - With piped stdin, the exit code is 1 when any statement failed and 0 otherwise. On a terminal it is always 0.
-- `exit`, `:q`, and EOF end the session and print `Exiting Scuttle`. `scv drive` appends `exit` and wraps the run in `timeout 20`. Exit code 124 means it hung.
+- `exit`, `:q`, and EOF end the session and print `Exiting Scuttle`. `exit` and `:q` must be the whole line, in lower case. `scv drive` appends `exit` and wraps the run in `timeout 20`. Exit code 124 means it hung.
 
 Each drive without `--data` starts in its own data dir, so cases never share state. `scv reset` is needed only to free the scratch dirs.
 

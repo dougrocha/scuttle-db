@@ -13,6 +13,7 @@ This directory is the maintained source for verifying what a user can do in the 
 
 - Send one SQL statement per line through `scv drive`. It drops blank lines and appends `exit`.
 - Treat the SQL in the recipes as literal. The expected output is copied from real runs.
+- `1 | ann` in an expectation is shorthand for one row's cells. The REPL pads each cell to 12 characters, so match the values, not the exact line.
 - Read results by position: the Nth `DB: ` prompt comes before the Nth statement's output.
 - Errors print `  x <message>` to stderr. A piped run exits 1 when any statement failed. Read the transcript to see which one.
 - Use `--data <dir>` only to relaunch in the same directory, never to share state between unrelated cases.
@@ -38,8 +39,8 @@ Each feature file starts with an H1 title and one paragraph about the user-visib
 - [Create and insert](./create-and-insert.md) covers CREATE TABLE, INSERT with several rows, a column list, and NULL, type checks, column defaults, and timestamps.
 - [Select queries](./select-queries.md) covers projection, WHERE, IS NULL, ORDER BY, LIMIT and OFFSET, GROUP BY with aggregates, aliases, and arithmetic.
 - [Update and delete](./update-delete.md) covers UPDATE ... SET ... WHERE and DELETE ... WHERE.
-- [Persistence](./persistence.md) covers rows, the catalog, and mutations surviving a REPL restart.
-- [Joins](./joins.md) covers INNER and LEFT JOIN, table aliases, qualified columns, self-joins, chains, `*` and `t.*`, and ambiguity errors.
-- [Errors](./errors.md) covers unknown tables, parse errors, unsupported syntax, and the session continuing.
+- [Persistence](./persistence.md) covers rows, the catalog, and mutations surviving a REPL restart or a kill, and tables larger than one page.
+- [Joins](./joins.md) covers INNER and LEFT JOIN, table aliases, qualified columns, self-joins, chains, `*` and `t.*`, and scope and ambiguity errors.
+- [Errors](./errors.md) covers unknown tables, parse errors, unsupported syntax, `:q`, and the session continuing.
 
-These are not supported yet, so they have no feature file: RIGHT, FULL, and CROSS joins (rejected with an error), and EXPLAIN in the REPL. When one lands, add a feature file and list it here.
+These are not supported yet, so they have no feature file: RIGHT, FULL, CROSS, and comma joins; EXPLAIN and DROP in the REPL; DISTINCT, HAVING, NOT, LIKE, IN, and BETWEEN; negative literals; and UNIQUE enforcement. Each is rejected with an error except UNIQUE, which parses and is ignored. When one lands, add a feature file or a recipe step and list it here.
