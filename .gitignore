@@ -12,3 +12,6 @@ example_dbs/
 
 # local project instructions
 /CLAUDE.local.md
+
+# Local PostgreSQL cluster for benchmarking (mise)
+/.pgdata

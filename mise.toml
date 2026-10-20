@@ -1,0 +1,9 @@
+[tools]
+postgres = "18"
+
+[env]
+PGDATA = "{{config_root}}/.pgdata"
+PGHOST = "/tmp"
+PGPORT = "5433"
+PGUSER = "postgres"
+PGDATABASE = "postgres"
