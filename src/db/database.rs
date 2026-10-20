@@ -279,22 +279,28 @@ impl Database {
     /// and stored in a page managed by the buffer pool. The row is persisted
     /// to disk immediately.
     pub fn insert_row(&mut self, table_name: &str, row: Row) -> Result<(PageId, ItemId)> {
+        let location = self.append_row(table_name, row)?;
+        self.buffer_manager.flush()?;
+        Ok(location)
+    }
+
+    /// Adds a row to the table's last page and marks the page dirty, without writing it.
+    ///
+    /// Statements call this for every row and leave the writing to the flush at the end of
+    /// [`Database::execute_query`], so each page is written once per statement, not once per row.
+    fn append_row(&mut self, table_name: &str, row: Row) -> Result<(PageId, ItemId)> {
         // Get schema first (separate borrow scope)
         let encoded_data = {
             let table = self.get_table(table_name)?;
             table.schema().encode_row(&row)
         };
 
-        // Now get the page and insert data
         let free_page = self
             .buffer_manager
             .get_free_page(table_name, encoded_data.len())?;
         let page_id = free_page.header.page_id;
-
         let item_id = free_page.add_data(&encoded_data)?;
-
-        // Note: save_page method needs to be implemented in BufferManager
-        self.buffer_manager.save_page(table_name, page_id)?;
+        self.buffer_manager.mark_dirty(table_name, page_id);
 
         Ok((page_id, item_id))
     }
@@ -368,13 +374,18 @@ impl Database {
             .parse()
             .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))?;
 
-        match statement {
+        let response = match statement {
             Statement::Create(create_stmt) => self.handle_create(create_stmt),
             Statement::Select(select_stmt) => self.handle_select(select_stmt),
             Statement::Insert(insert_stmt) => self.handle_insert(insert_stmt),
             Statement::Update(update_stmt) => self.handle_update(update_stmt),
             Statement::Delete(delete_stmt) => self.handle_delete(delete_stmt),
-        }
+        };
+
+        // Write the pages this statement changed. This runs even when the statement failed,
+        // so the file always matches the pages in memory.
+        self.buffer_manager.flush()?;
+        response
     }
 
     /// Describes how a SQL statement would run, without running it.
@@ -528,9 +539,9 @@ impl Database {
             self.buffer_manager
                 .get_page(&table_name, page_id)?
                 .delete_item(item_id)?;
-            self.buffer_manager.save_page(&table_name, page_id)?;
+            self.buffer_manager.mark_dirty(&table_name, page_id);
 
-            self.insert_row(&table_name, new_row)?;
+            self.append_row(&table_name, new_row)?;
         }
 
         Ok(QueryResponse {
@@ -575,7 +586,7 @@ impl Database {
             self.buffer_manager
                 .get_page(&table_name, page_id)?
                 .delete_item(item_id)?;
-            self.buffer_manager.save_page(&table_name, page_id)?;
+            self.buffer_manager.mark_dirty(&table_name, page_id);
             rows_affected += 1;
         }
 
@@ -623,7 +634,7 @@ impl Database {
 
                 rows_affected = new_rows.len();
                 for row in new_rows {
-                    context.database.insert_row(&table_name, row)?;
+                    context.database.append_row(&table_name, row)?;
                 }
             } else {
                 todo!()

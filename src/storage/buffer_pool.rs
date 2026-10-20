@@ -1,8 +1,8 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use miette::{IntoDiagnostic, Result, miette};
@@ -27,6 +27,9 @@ pub struct BufferPool {
     /// Pages per table, see [`BufferPool::page_count`].
     page_counts: HashMap<String, PageId>,
 
+    /// Pages changed since the last [`BufferPool::flush`], per table. Always empty in memory.
+    dirty: HashMap<String, BTreeSet<PageId>>,
+
     /// Directory holding the `.table` files. `None` keeps every page in memory,
     /// which is how the database runs in the browser.
     data_directory: Option<PathBuf>,
@@ -37,6 +40,7 @@ impl BufferPool {
         Self {
             pool: HashMap::new(),
             page_counts: HashMap::new(),
+            dirty: HashMap::new(),
             data_directory: Some(data_directory.into()),
         }
     }
@@ -137,6 +141,8 @@ impl BufferPool {
             .or_insert(page))
     }
 
+    /// Writes one page to disk now. Used for the catalog, whose rows must be saved
+    /// as soon as a table is created.
     pub(crate) fn save_page(&mut self, table_name: &str, page_id: PageId) -> Result<()> {
         let Some(path) = self.table_path(table_name) else {
             // In-memory pages already live in the pool, so there is nothing to write.
@@ -144,18 +150,64 @@ impl BufferPool {
         };
 
         let page = self.get_page(table_name, page_id)?;
+        let mut file = Self::open_for_write(&path)?;
+        Self::write_page(&mut file, page)
+    }
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(path)
-            .into_diagnostic()?;
+    /// Records that a page changed, so the next [`BufferPool::flush`] writes it.
+    ///
+    /// The page itself is already updated in the pool. Marking it is cheap, so a
+    /// statement can change the same page many times and it is still written once.
+    pub(crate) fn mark_dirty(&mut self, table_name: &str, page_id: PageId) {
+        if self.data_directory.is_none() {
+            // Nothing is ever written in memory, so don't collect pages that would never be flushed.
+            return;
+        }
 
-        let offset = (page_id as usize) * Page::SIZE;
-        file.seek(SeekFrom::Start(offset as u64))
-            .into_diagnostic()?;
-        file.write_all(&page.to_bytes()).into_diagnostic()?;
+        self.dirty
+            .entry(table_name.to_string())
+            .or_default()
+            .insert(page_id);
+    }
+
+    /// Writes every page marked dirty since the last flush, opening each table file once.
+    pub(crate) fn flush(&mut self) -> Result<()> {
+        for (table_name, page_ids) in std::mem::take(&mut self.dirty) {
+            let Some(path) = self.table_path(&table_name) else {
+                continue;
+            };
+            let mut file = Self::open_for_write(&path)?;
+
+            // BTreeSet iterates in order, so the file is written front to back
+            for page_id in page_ids {
+                let page = self
+                    .pool
+                    .get(&table_name)
+                    .and_then(|pages| pages.get(&page_id))
+                    .ok_or_else(|| {
+                        miette!("Dirty page {page_id} of {table_name} is not in memory.")
+                    })?;
+                Self::write_page(&mut file, page)?;
+            }
+        }
 
         Ok(())
+    }
+
+    fn open_for_write(path: &Path) -> Result<File> {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .into_diagnostic()
+    }
+
+    /// Writes a page at its own offset in the table file.
+    fn write_page(file: &mut File, page: &Page) -> Result<()> {
+        let offset = (page.header.page_id as usize) * Page::SIZE;
+        file.seek(SeekFrom::Start(offset as u64))
+            .into_diagnostic()?;
+        file.write_all(&page.to_bytes()).into_diagnostic()
     }
 }
