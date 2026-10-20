@@ -26,6 +26,7 @@ Preconditions:
 - **Join two tables, then relaunch.** Run:
 
     ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
     out=$(scv drive joins <<'SQL'
     CREATE TABLE users (id INT, name TEXT, dept TEXT);
     INSERT INTO users VALUES (1, 'ann', 'eng'), (2, 'bob', 'eng'), (3, 'cy', 'ops');
@@ -56,9 +57,15 @@ Preconditions:
     - `  x Column reference "id" is ambiguous`
     - `  x Invalid query: Parse error: FULL JOIN is not supported`
     - After the relaunch, the LEFT JOIN returns the same 4 rows from the stored tables.
-- **`t.*`, a three-table chain, and scope errors.** In a new drive, run the CREATE and INSERT lines from the step above, then:
+- **`t.*`, a three-table chain, and scope errors.** Run:
 
-    ```sql
+    ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
+    scv drive joins-more <<'SQL'
+    CREATE TABLE users (id INT, name TEXT, dept TEXT);
+    INSERT INTO users VALUES (1, 'ann', 'eng'), (2, 'bob', 'eng'), (3, 'cy', 'ops');
+    CREATE TABLE orders (id INT, user_id INT, total INT);
+    INSERT INTO orders VALUES (10, 1, 100), (11, 1, 50), (12, 3, 75), (13, 9, 5);
     CREATE TABLE depts (code TEXT, title TEXT);
     INSERT INTO depts VALUES ('eng', 'Engineering');
     SELECT o.*, u.name FROM users u JOIN orders o ON u.id = o.user_id WHERE o.id = 12;
@@ -69,6 +76,7 @@ Preconditions:
     SELECT * FROM users u RIGHT JOIN orders o ON u.id = o.user_id;
     SELECT * FROM users CROSS JOIN orders;
     SELECT * FROM users, orders;
+    SQL
     ```
 
     Expect, in order:

@@ -23,6 +23,7 @@ Preconditions:
 - **Send three bad statements, then a good one.** Run:
 
     ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
     scv drive errors <<'SQL'
     CREATE TABLE users (id INT);
     SELECT * FROM nope;
@@ -40,6 +41,7 @@ Preconditions:
 - **Trailing junk, two statements on a line, other unsupported syntax, then `:q`.** Run:
 
     ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
     out=$(scv drive errors-more <<'SQL'
     CREATE TABLE users (id INT);
     SELECT * FROM users u extra;
@@ -57,7 +59,7 @@ Preconditions:
     echo 'SELECT * FROM after_q;' | scv drive --data "$data" errors-after-q
     ```
 
-    Expect `OK`, then these lines, each prefixed `  x Invalid query: Parse error: `:
+    Expect `OK`, then these lines in `errors.txt`, each prefixed `  x Invalid query: Parse error: `:
     - `Unexpected Identifier("extra") after end of statement`
     - `Unexpected Keyword(Select) after end of statement`
     - `RIGHT JOIN is not supported`, then `CROSS JOIN is not supported`

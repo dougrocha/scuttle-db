@@ -15,7 +15,7 @@ This directory is the maintained source for verifying what a user can do in the 
 - Treat the SQL in the recipes as literal. The expected output is copied from real runs.
 - `1 | ann` in an expectation is shorthand for one row's cells. The REPL pads each cell to 12 characters, so match the values, not the exact line.
 - Read results by position: the Nth `DB: ` prompt comes before the Nth statement's output.
-- Errors print `  x <message>` to stderr. A piped run exits 1 when any statement failed. Read the transcript to see which one.
+- Errors print `  x <message>` to stderr. A piped run exits 1 when any statement failed. Match the expected error text against the case's `errors.txt`, which keeps each message on one line.
 - Use `--data <dir>` only to relaunch in the same directory, never to share state between unrelated cases.
 
 ## Proof and skip reporting

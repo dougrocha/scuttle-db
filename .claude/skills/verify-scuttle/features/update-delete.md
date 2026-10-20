@@ -22,6 +22,7 @@ Preconditions:
 - **Update one row and delete another.** Run:
 
     ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
     scv drive mutate <<'SQL'
     CREATE TABLE t (id INT, v TEXT);
     INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c');
@@ -35,6 +36,7 @@ Preconditions:
 - **Update every row, swap columns, hit assignment errors, delete every row.** Run:
 
     ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
     scv drive mutate-all <<'SQL'
     CREATE TABLE t (a INT, b INT, s TEXT);
     INSERT INTO t VALUES (1, 10, 'x'), (2, 20, 'y');
@@ -62,5 +64,5 @@ Preconditions:
 
 - `N row(s) affected` is not proof on its own. Finish with a SELECT that shows the new state.
 - UPDATE deletes each matching row and appends the new version at the end of the table. A SELECT without ORDER BY returns updated rows last.
-- Neither statement takes a table alias, and a SET target must be a bare column name. `SET t.v = 1` is a parse error.
+- Neither statement takes a table alias, and a SET target must be a bare column name. `SET t.v = 1` fails with `Column t.v could not be found`.
 - To prove the change reached disk, add the restart step from [persistence.md](persistence.md).

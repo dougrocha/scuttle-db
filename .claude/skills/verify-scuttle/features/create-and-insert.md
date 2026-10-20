@@ -25,6 +25,7 @@ Preconditions:
 - **Create, insert, and hit a type error.** Run:
 
     ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
     scv drive ddl-insert <<'SQL'
     CREATE TABLE t (id INT, v TEXT);
     INSERT INTO t (id) VALUES (1);
@@ -39,6 +40,7 @@ Preconditions:
 - **Column defaults.** Run:
 
     ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
     scv drive col-default <<'SQL'
     CREATE TABLE d (id INT, n INT DEFAULT 5, f FLOAT DEFAULT 2, s TEXT DEFAULT 'hi', b BOOL DEFAULT TRUE, z TEXT DEFAULT NULL);
     INSERT INTO d (id) VALUES (1);
@@ -52,6 +54,7 @@ Preconditions:
 - **Timestamps.** Run:
 
     ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
     scv drive timestamp <<'SQL'
     CREATE TABLE ev (id INT, at TIMESTAMP);
     INSERT INTO ev VALUES (1, '2026-03-01 12:00:00'), (2, '2026-03-01T08:30:00'), (3, '2024-02-29');
@@ -68,6 +71,7 @@ Preconditions:
 - **Constraints and INSERT errors.** Run:
 
     ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
     scv drive constraints <<'SQL'
     CREATE TABLE v (id INT NOT NULL, s VARCHAR(3), f FLOAT, at TIMESTAMP DEFAULT '2026-01-01', u INT UNIQUE);
     INSERT INTO v (id, f, u) VALUES (1, 7, 9), (2, 1.5, 9);

@@ -24,6 +24,7 @@ Preconditions:
 - **Query one table every way.** Run:
 
     ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
     scv drive select <<'SQL'
     CREATE TABLE users (id INT, name TEXT, age INT, dept TEXT);
     INSERT INTO users VALUES (1, 'ann', 30, 'eng'), (2, 'bob', NULL, 'ops'), (3, 'cy', 25, 'eng'), (4, 'di', 41, 'ops');
@@ -43,9 +44,13 @@ Preconditions:
     - `LIMIT 2 OFFSET 1` returns ids `2`, `3`.
     - Group by returns `eng | 2 | 27.5 | 30` and `ops | 2 | 41 | 41`. COUNT(*) counts bob. AVG and MAX skip his NULL.
     - Alias and arithmetic: headers `who | ?column?`, rows `ann 31`, `cy 26`.
-- **NULL ordering, empty aggregates, integer division, and unsupported syntax.** In a new drive, run the CREATE and INSERT lines from the step above, then:
+- **NULL ordering, empty aggregates, integer division, and unsupported syntax.** Run:
 
-    ```sql
+    ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
+    scv drive select-more <<'SQL'
+    CREATE TABLE users (id INT, name TEXT, age INT, dept TEXT);
+    INSERT INTO users VALUES (1, 'ann', 30, 'eng'), (2, 'bob', NULL, 'ops'), (3, 'cy', 25, 'eng'), (4, 'di', 41, 'ops');
     SELECT name FROM users WHERE age IS NOT NULL AND (age < 26 OR dept != 'eng') ORDER BY name;
     SELECT name, age FROM users ORDER BY age;
     SELECT name, age FROM users ORDER BY age DESC;
@@ -55,6 +60,7 @@ Preconditions:
     SELECT u.name FROM users u ORDER BY u.id OFFSET 3;
     SELECT DISTINCT dept FROM users;
     SELECT name FROM users WHERE NOT age > 26;
+    SQL
     ```
 
     Expect, in order:

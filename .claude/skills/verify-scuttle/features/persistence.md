@@ -24,6 +24,7 @@ Preconditions:
 - **Write, quit, relaunch, read.** Run:
 
     ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
     out=$(scv drive persist-1 <<'SQL'
     CREATE TABLE users (id INT, name TEXT);
     INSERT INTO users VALUES (1, 'ann'), (2, 'bob');
@@ -44,6 +45,7 @@ Preconditions:
 - **Fill several pages.** Run:
 
     ```sh
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
     out=$( { echo "CREATE TABLE big (id INT, pad TEXT);"
       for i in $(seq 1 600); do echo "INSERT INTO big VALUES ($i, '$(printf 'x%.0s' {1..50})');"; done
       echo "SELECT COUNT(*), MIN(id), MAX(id) FROM big;"; } | scv drive big-1 )
@@ -60,13 +62,18 @@ Preconditions:
 - **Kill before exit.** Run:
 
     ```sh
-    bin="$(git rev-parse --show-toplevel)/target/debug/scuttle-db"
-    k=$(mktemp -d ~/.cache/verify-scuttle/data/kill.XXXX)
-    (cd "$k" && (printf "CREATE TABLE k (id INT);\nINSERT INTO k VALUES (7);\n"; sleep 30) | timeout 2 "$bin")
-    echo 'SELECT * FROM k;' | scv drive --data "$k" kill-2
+    export PATH="$(git rev-parse --show-toplevel)/.claude/skills/verify-scuttle/bin:$PATH"
+    out=$(scv drive --kill-after 2 kill-1 <<'SQL'
+    CREATE TABLE k (id INT);
+    INSERT INTO k VALUES (7);
+    SQL
+    )
+    echo "$out"
+    data=$(echo "$out" | rg -o 'data=(.*)' -r '$1')
+    echo 'SELECT * FROM k;' | scv drive --data "$data" kill-2
     ```
 
-    Expect the first command to exit 124 without `Exiting Scuttle`. The second run returns `7`.
+    Expect the first drive to print `--- exit=124` after about 2 seconds, with no `Exiting Scuttle`. The second run returns `7`.
 
 ## Gotchas
 

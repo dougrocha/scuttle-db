@@ -3,91 +3,140 @@
 set -uo pipefail
 
 TOOL=$(basename "$0")
-REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+REPO=$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel) || exit 2
 BIN="$REPO/target/debug/scuttle-db"
 EVIDENCE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/verify-scuttle"
-DATA_ROOT="$EVIDENCE_ROOT/data"
 RUN_FILE="$EVIDENCE_ROOT/.current-run"
 
-die() { echo "$TOOL: $*" >&2; exit 1; }
+# Exit 2 so a harness error never looks like the REPL's own exit 1.
+die() { echo "$TOOL: $*" >&2; exit 2; }
 
+# SCV_RUN pins a run dir, so agents verifying at the same time do not share .current-run.
 run_dir() {
+  if [[ -n ${SCV_RUN:-} ]]; then
+    [[ -d $SCV_RUN ]] || die "SCV_RUN=$SCV_RUN is not a directory"
+    echo "$SCV_RUN"
+    return
+  fi
   [[ -f $RUN_FILE ]] || die "no run started; run: $TOOL start <name>"
   cat "$RUN_FILE"
 }
 
 cmd_help() {
   cat <<EOF
-$TOOL start <name>                     new evidence dir under $EVIDENCE_ROOT, prints its path
-$TOOL doctor                           read-only check that the binary is built from the current source
-$TOOL drive [--data DIR] <case> [sql]  pipe SQL (file or stdin) to the REPL in a fresh data dir, or reuse DIR
-$TOOL reset                            delete the scratch data dirs under $DATA_ROOT
-$TOOL cleanup                          reset; evidence stays
+$TOOL start <name>                  new evidence dir under $EVIDENCE_ROOT, prints its path
+$TOOL doctor                        read-only check that the binary is built from the current source
+$TOOL drive <case> [sql-file]       pipe SQL (file, or stdin) to the REPL in a fresh data dir
+      --data DIR                    reuse DIR instead (it must hold a db/ from an earlier drive)
+      --kill-after SECS             do not send exit; kill the REPL after SECS (expect exit 124)
+$TOOL reset                         delete this run's data dirs
+$TOOL cleanup                       reset; evidence stays
+
+drive exits with the REPL's exit code. Exit 2 is a harness error.
+Set SCV_RUN=<dir printed by start> when another agent may be verifying at the same time.
 EOF
 }
 
 cmd_start() {
   local dir
-  dir="$EVIDENCE_ROOT/${1:?name}-$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$dir" && echo "$dir" >"$RUN_FILE" && echo "$dir"
+  mkdir -p "$EVIDENCE_ROOT" || die "cannot create $EVIDENCE_ROOT"
+  dir=$(mktemp -d "$EVIDENCE_ROOT/${1:?name}-$(date +%Y%m%d-%H%M%S)-XXXX") || die "cannot create run dir"
+  echo "$dir" >"$RUN_FILE" && echo "$dir"
 }
 
 # shellcheck disable=SC2016 # each check string is evaluated later on purpose
 cmd_doctor() {
   local ok=true stale
   check() { if eval "$2" >/dev/null 2>&1; then echo "ok    $1"; else echo "FAIL  $1  ($3)"; ok=false; fi; }
-  check "binary built" '[[ -x $BIN ]]' "cargo build --bin scuttle-db"
-  stale=$(fd -t f -e rs . "$REPO/src" -x bash -c '[[ "$1" -nt "$2" ]] && echo "$1"' _ {} "$BIN" 2>/dev/null | head -1)
-  check "binary newer than src/" '[[ -x $BIN && -z $stale ]]' "${stale:-binary missing} is newer; cargo build --bin scuttle-db"
   check "fd, rg, eza, timeout installed" 'command -v fd && command -v rg && command -v eza && command -v timeout' "paru -S fd ripgrep eza coreutils"
-  echo "info  commit $(git -C "$REPO" rev-parse --short HEAD)$(git -C "$REPO" diff --quiet || echo ' (dirty)')"
+  check "binary built" '[[ -x $BIN ]]' "cargo build --bin scuttle-db"
+  stale=$(find "$REPO/src" "$REPO/Cargo.toml" "$REPO/Cargo.lock" -newer "$BIN" \( -name '*.rs' -o -name 'Cargo.*' \) -print -quit 2>/dev/null)
+  check "binary newer than src/ and Cargo.*" '[[ -x $BIN && -z $stale ]]' "${stale:-$BIN} is newer; cargo build --bin scuttle-db"
+  echo "info  commit $(git -C "$REPO" rev-parse --short HEAD)$([[ -n $(git -C "$REPO" status --porcelain) ]] && echo ' (dirty)')"
   echo "info  binary $BIN"
   [[ -d $REPO/db ]] && echo "info  $REPO/db is the user's REPL data; $TOOL never touches it"
   $ok
 }
 
 cmd_drive() {
-  local data="" case sql ev i=1 code
-  if [[ ${1:-} == --data ]]; then data=${2:?DIR}; shift 2; fi
-  case=${1:?usage: $TOOL drive [--data DIR] <case> [sql]}
-  sql=${2:-/dev/stdin}
-  [[ -x $BIN ]] || die "binary missing; run: cargo build --bin scuttle-db"
-
-  if [[ -z $data ]]; then
-    mkdir -p "$DATA_ROOT"
-    data=$(mktemp -d "$DATA_ROOT/$case.XXXX")
+  local data="" kill_after="" args=() name sql run ev i=1 code
+  while (($#)); do
+    case $1 in
+      --data) data=${2:?--data needs a DIR}; shift 2 ;;
+      --kill-after) kill_after=${2:?--kill-after needs SECS}; shift 2 ;;
+      -*) die "unknown option: $1" ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  ((${#args[@]} >= 1 && ${#args[@]} <= 2)) || die "usage: $TOOL drive [--data DIR] [--kill-after SECS] <case> [sql-file]"
+  name=${args[0]}
+  [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || die "case name must be letters, digits, '.', '_' or '-': $name"
+  sql=${args[1]:-/dev/stdin}
+  if [[ $sql == /dev/stdin ]]; then
+    [[ -t 0 ]] && die "no SQL: pass a file or pipe statements on stdin"
+  else
+    [[ -r $sql ]] || die "cannot read SQL file: $sql"
   fi
-  mkdir -p "$data" && data=$(cd "$data" && pwd)
-  [[ $data == "$REPO" ]] && die "refusing to run in the repo root (would use the user's ./db)"
+  [[ -x $BIN ]] || die "binary missing; run: cargo build --bin scuttle-db"
+  run=$(run_dir) || exit 2
 
-  ev="$(run_dir)/$case"
-  while [[ -e $ev ]]; do i=$((i + 1)); ev="$(run_dir)/$case-$i"; done
-  mkdir -p "$ev"
-  # Blank lines are harmless to the REPL, but dropping them keeps the transcript positional.
-  # EOF also ends the REPL; the explicit exit shows a clean end, and the timeout catches a hang.
-  { rg -v '^\s*$' "$sql" || true; echo exit; } >"$ev/input.sql"
+  if [[ -n $data ]]; then
+    [[ -d $data/db ]] || die "--data $data has no db/; pass the data= dir an earlier drive printed"
+  else
+    mkdir -p "$run/data" || die "cannot create $run/data"
+    data=$(mktemp -d "$run/data/$name.XXXX") || die "cannot create data dir"
+  fi
+  data=$(cd "$data" && pwd -P)
+  [[ $data == "$(cd "$REPO" && pwd -P)" ]] && die "refusing to run in the repo root (would use the user's ./db)"
 
-  (cd "$data" && timeout 20 "$BIN" <"$ev/input.sql" >"$ev/transcript.txt" 2>&1)
+  ev="$run/$name"
+  while [[ -e $ev ]]; do i=$((i + 1)); ev="$run/$name.$i"; done
+  mkdir -p "$ev" || die "cannot create $ev"
+  # Dropping blank lines keeps the transcript positional. grep exits 1 when nothing is left.
+  grep -v '^[[:space:]]*$' "$sql" >"$ev/input.sql"
+  case $? in
+    0) ;;
+    1) die "no SQL statements in input" ;;
+    *) die "cannot read SQL input: $sql" ;;
+  esac
+
+  if [[ -n $kill_after ]]; then
+    # stdin stays open past the kill, so the REPL never sees EOF. Bash does not wait for <(...).
+    (cd "$data" && timeout "$kill_after" "$BIN" < <(cat "$ev/input.sql"; sleep $((kill_after + 1))) >"$ev/transcript.txt" 2>&1)
+  else
+    # EOF also ends the REPL; the explicit exit shows a clean end, and the timeout catches a hang.
+    echo exit >>"$ev/input.sql"
+    (cd "$data" && timeout 20 "$BIN" <"$ev/input.sql" >"$ev/transcript.txt" 2>&1)
+  fi
   code=$?
 
   echo "$code" >"$ev/exit_code"
   echo "$data" >"$ev/data_dir"
   eza -la --no-user --no-time "$data/db" >"$ev/db_files.txt" 2>&1 || echo "(no db dir)" >"$ev/db_files.txt"
+  # miette wraps long reports onto `  | ` lines. Join each report onto one line so a message is one substring.
+  # A report's first line follows the prompt: `DB:   x <message>`.
+  awk '/^(DB: )? *x /{if(e)print e; sub(/^(DB: )?/,""); e=$0; next} e&&/^ *\| /{sub(/^ *\| */,""); e=e" "$0; next} {if(e)print e; e=""} END{if(e)print e}' \
+    "$ev/transcript.txt" >"$ev/errors.txt"
 
   cat "$ev/transcript.txt"
   echo "--- exit=$code data=$data"
-  [[ $code -eq 124 ]] && echo "--- TIMEOUT: REPL did not exit (missing 'exit' or a hang)"
+  [[ $code -eq 124 && -z $kill_after ]] && echo "--- TIMEOUT: REPL did not exit (a hang)"
   echo "$ev"
+  return "$code"
 }
 
 cmd_reset() {
-  rm -rf "$DATA_ROOT"
-  echo "removed $DATA_ROOT"
+  local run
+  run=$(run_dir) || exit 2
+  rm -rf "$run/data"
+  echo "removed $run/data"
 }
 
 cmd_cleanup() {
+  local run
+  run=$(run_dir) || exit 2
   cmd_reset
-  echo "evidence kept in $(run_dir)"
+  echo "evidence kept in $run"
 }
 
 sub=${1:-help}
