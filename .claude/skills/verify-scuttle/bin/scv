@@ -1,0 +1,99 @@
+#!/bin/bash
+# Drive the scuttle-db REPL with real stdin in isolated data dirs and keep the transcripts. Run `scv help`.
+set -uo pipefail
+
+TOOL=$(basename "$0")
+REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+BIN="$REPO/target/debug/scuttle-db"
+EVIDENCE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/verify-scuttle"
+DATA_ROOT="$EVIDENCE_ROOT/data"
+RUN_FILE="$EVIDENCE_ROOT/.current-run"
+
+die() { echo "$TOOL: $*" >&2; exit 1; }
+
+run_dir() {
+  [[ -f $RUN_FILE ]] || die "no run started; run: $TOOL start <name>"
+  cat "$RUN_FILE"
+}
+
+cmd_help() {
+  cat <<EOF
+$TOOL start <name>                     new evidence dir under $EVIDENCE_ROOT, prints its path
+$TOOL doctor                           read-only check that the binary is built from the current source
+$TOOL drive [--data DIR] <case> [sql]  pipe SQL (file or stdin) to the REPL in a fresh data dir, or reuse DIR
+$TOOL reset                            delete the scratch data dirs under $DATA_ROOT
+$TOOL cleanup                          reset; evidence stays
+EOF
+}
+
+cmd_start() {
+  local dir
+  dir="$EVIDENCE_ROOT/${1:?name}-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$dir" && echo "$dir" >"$RUN_FILE" && echo "$dir"
+}
+
+# shellcheck disable=SC2016 # each check string is evaluated later on purpose
+cmd_doctor() {
+  local ok=true stale
+  check() { if eval "$2" >/dev/null 2>&1; then echo "ok    $1"; else echo "FAIL  $1  ($3)"; ok=false; fi; }
+  check "binary built" '[[ -x $BIN ]]' "cargo build --bin scuttle-db"
+  stale=$(fd -t f -e rs . "$REPO/src" -x bash -c '[[ "$1" -nt "$2" ]] && echo "$1"' _ {} "$BIN" 2>/dev/null | head -1)
+  check "binary newer than src/" '[[ -x $BIN && -z $stale ]]' "${stale:-binary missing} is newer; cargo build --bin scuttle-db"
+  check "fd, rg, eza, timeout installed" 'command -v fd && command -v rg && command -v eza && command -v timeout' "paru -S fd ripgrep eza coreutils"
+  echo "info  commit $(git -C "$REPO" rev-parse --short HEAD)$(git -C "$REPO" diff --quiet || echo ' (dirty)')"
+  echo "info  binary $BIN"
+  [[ -d $REPO/db ]] && echo "info  $REPO/db is the user's REPL data; $TOOL never touches it"
+  $ok
+}
+
+cmd_drive() {
+  local data="" case sql ev i=1 code
+  if [[ ${1:-} == --data ]]; then data=${2:?DIR}; shift 2; fi
+  case=${1:?usage: $TOOL drive [--data DIR] <case> [sql]}
+  sql=${2:-/dev/stdin}
+  [[ -x $BIN ]] || die "binary missing; run: cargo build --bin scuttle-db"
+
+  if [[ -z $data ]]; then
+    mkdir -p "$DATA_ROOT"
+    data=$(mktemp -d "$DATA_ROOT/$case.XXXX")
+  fi
+  mkdir -p "$data" && data=$(cd "$data" && pwd)
+  [[ $data == "$REPO" ]] && die "refusing to run in the repo root (would use the user's ./db)"
+
+  ev="$(run_dir)/$case"
+  while [[ -e $ev ]]; do i=$((i + 1)); ev="$(run_dir)/$case-$i"; done
+  mkdir -p "$ev"
+  # Blank lines are harmless to the REPL, but dropping them keeps the transcript positional.
+  # EOF also ends the REPL; the explicit exit shows a clean end, and the timeout catches a hang.
+  { rg -v '^\s*$' "$sql" || true; echo exit; } >"$ev/input.sql"
+
+  (cd "$data" && timeout 20 "$BIN" <"$ev/input.sql" >"$ev/transcript.txt" 2>&1)
+  code=$?
+
+  echo "$code" >"$ev/exit_code"
+  echo "$data" >"$ev/data_dir"
+  eza -la --no-user --no-time "$data/db" >"$ev/db_files.txt" 2>&1 || echo "(no db dir)" >"$ev/db_files.txt"
+
+  cat "$ev/transcript.txt"
+  echo "--- exit=$code data=$data"
+  [[ $code -eq 124 ]] && echo "--- TIMEOUT: REPL did not exit (missing 'exit' or a hang)"
+  echo "$ev"
+}
+
+cmd_reset() {
+  rm -rf "$DATA_ROOT"
+  echo "removed $DATA_ROOT"
+}
+
+cmd_cleanup() {
+  cmd_reset
+  echo "evidence kept in $(run_dir)"
+}
+
+sub=${1:-help}
+shift || true
+case "$sub" in
+  help | -h | --help) cmd_help ;;
+  start | doctor | drive | reset | cleanup) "cmd_$sub" "$@" ;;
+  *) die "unknown command: $sub (run $TOOL help)" ;;
+esac
