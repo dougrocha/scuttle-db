@@ -162,7 +162,7 @@ impl<'src> SqlParser<'src> {
             let table = self.parse_table_ref()?;
             self.expect_keyword(Keyword::On)?;
             // parse_expression(0) stops at JOIN / INNER / LEFT / WHERE / GROUP, because
-            // peek_binary_op() fails on them and the loop in parse_expression ends.
+            // peek_binary_op() returns None for them and the loop in parse_expression ends.
             let on = self.parse_expression(0)?;
             joins.push(JoinClause { kind, table, on });
         }
@@ -361,7 +361,7 @@ impl<'src> SqlParser<'src> {
     fn parse_expression(&mut self, min_prec: u8) -> Result<Expression> {
         let mut lhs = self.parse_primary()?;
 
-        while let Ok(op) = self.peek_binary_op() {
+        while let Some(op) = self.peek_binary_op() {
             if op.precedence() < min_prec {
                 break;
             }
@@ -586,25 +586,35 @@ impl<'src> SqlParser<'src> {
         }
     }
 
-    fn peek_binary_op(&mut self) -> Result<Operator> {
-        match self.peek_token()? {
-            Token::Equal => Ok(Operator::Equal),
-            Token::NotEqual => Ok(Operator::NotEqual),
-            Token::GreaterThan => Ok(Operator::GreaterThan),
-            Token::LessThan => Ok(Operator::LessThan),
-            Token::GreaterThanEqual => Ok(Operator::GreaterThanEqual),
-            Token::LessThanEqual => Ok(Operator::LessThanEqual),
+    /// The operator the next token stands for, or `None` if it isn't one.
+    ///
+    /// Every expression ends on a token that isn't an operator, so `None` is the common
+    /// case and must stay cheap: it is a plain answer, not an error.
+    fn peek_binary_op(&mut self) -> Option<Operator> {
+        let Some(Ok(token)) = self.lexer.peek() else {
+            return None;
+        };
 
-            Token::Plus => Ok(Operator::Add),
-            Token::Minus => Ok(Operator::Subtract),
-            Token::Asterisk => Ok(Operator::Multiply),
-            Token::Slash => Ok(Operator::Divide),
+        let op = match token {
+            Token::Equal => Operator::Equal,
+            Token::NotEqual => Operator::NotEqual,
+            Token::GreaterThan => Operator::GreaterThan,
+            Token::LessThan => Operator::LessThan,
+            Token::GreaterThanEqual => Operator::GreaterThanEqual,
+            Token::LessThanEqual => Operator::LessThanEqual,
 
-            Token::Keyword(Keyword::And) => Ok(Operator::And),
-            Token::Keyword(Keyword::Or) => Ok(Operator::Or),
+            Token::Plus => Operator::Add,
+            Token::Minus => Operator::Subtract,
+            Token::Asterisk => Operator::Multiply,
+            Token::Slash => Operator::Divide,
 
-            t => Err(miette!("Expected a binary operator, but found {:?}", t)),
-        }
+            Token::Keyword(Keyword::And) => Operator::And,
+            Token::Keyword(Keyword::Or) => Operator::Or,
+
+            _ => return None,
+        };
+
+        Some(op)
     }
 
     fn next_token(&mut self) -> Result<Token<'src>> {
