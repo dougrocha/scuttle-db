@@ -40,18 +40,10 @@ impl<'src> SqlParser<'src> {
 
     /// Parses the query and returns the top-level AST node (Statement).
     pub fn parse(&mut self) -> Result<Statement> {
-        let token = self.peek_token()?;
-
-        let statement = match token {
-            Token::Keyword(keyword) => match keyword {
-                Keyword::Select => self.parse_select_statement()?,
-                Keyword::Create => self.parse_create_statement()?,
-                Keyword::Insert => self.parse_insert_statement()?,
-                Keyword::Update => self.parse_update_statement()?,
-                Keyword::Delete => self.parse_delete_statement()?,
-                _ => return Err(miette!("Unsupported keyword: {:?}", keyword)),
-            },
-            _ => return Err(miette!("Unexpected token: {:?}", token)),
+        let statement = if self.consume_if(Token::Keyword(Keyword::Explain)) {
+            Statement::Explain(Box::new(self.parse_statement()?))
+        } else {
+            self.parse_statement()?
         };
 
         // Anything left over is a clause we don't understand. Reject it instead of
@@ -62,6 +54,22 @@ impl<'src> SqlParser<'src> {
         }
 
         Ok(statement)
+    }
+
+    fn parse_statement(&mut self) -> Result<Statement> {
+        let token = self.peek_token()?;
+
+        match token {
+            Token::Keyword(keyword) => match keyword {
+                Keyword::Select => self.parse_select_statement(),
+                Keyword::Create => self.parse_create_statement(),
+                Keyword::Insert => self.parse_insert_statement(),
+                Keyword::Update => self.parse_update_statement(),
+                Keyword::Delete => self.parse_delete_statement(),
+                _ => Err(miette!("Unsupported keyword: {:?}", keyword)),
+            },
+            _ => Err(miette!("Unexpected token: {:?}", token)),
+        }
     }
 
     fn parse_select_statement(&mut self) -> Result<Statement> {

@@ -71,6 +71,8 @@ pub enum Keyword {
     Null,
 
     Distinct,
+
+    Explain,
 }
 
 impl Keyword {

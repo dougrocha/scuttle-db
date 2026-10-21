@@ -418,6 +418,14 @@ impl Database {
             Statement::Insert(insert_stmt) => self.handle_insert(insert_stmt),
             Statement::Update(update_stmt) => self.handle_update(update_stmt),
             Statement::Delete(delete_stmt) => self.handle_delete(delete_stmt),
+            Statement::Explain(statement) => self.describe(*statement).map(|plan| QueryResponse {
+                columns: vec!["QUERY PLAN".to_string()],
+                rows: plan
+                    .lines()
+                    .map(|line| Row::new(vec![Value::Text(line.to_string())]))
+                    .collect(),
+                rows_affected: None,
+            }),
         };
 
         // Write the pages this statement changed. This runs even when the statement failed,
@@ -461,6 +469,14 @@ impl Database {
             .parse()
             .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))?;
 
+        match statement {
+            Statement::Explain(statement) => self.describe(*statement),
+            statement => self.describe(statement),
+        }
+    }
+
+    /// The plan for `statement`, rendered as [`Database::explain`] returns it.
+    fn describe(&mut self, statement: Statement) -> Result<String> {
         let context = CatalogContext::new(self);
         let analyzer = Analyzer::new(&context);
         let mut plan = match statement {
@@ -472,6 +488,9 @@ impl Database {
             Statement::Insert(insert_stmt) => analyzer.analyze_insert(insert_stmt)?,
             Statement::Update(update_stmt) => analyzer.analyze_update(update_stmt)?,
             Statement::Delete(delete_stmt) => analyzer.analyze_delete(delete_stmt)?,
+            Statement::Explain(_) => {
+                return Err(DatabaseError::InvalidQuery("cannot EXPLAIN an EXPLAIN".into()).into());
+            }
         };
 
         optimizer::use_indexes(&mut plan, &context.database.tables);
@@ -1298,6 +1317,44 @@ mod tests {
         assert!(plan(&mut db, "id > 91").ends_with("IndexScan: item (id > 91)"));
         assert!(plan(&mut db, "id > 89").ends_with("    Scan: item"));
         assert!(plan(&mut db, "id > 0").ends_with("    Scan: item"));
+    }
+
+    #[test]
+    fn test_explain_statement_returns_the_plan_as_rows() {
+        let mut db = TestDb::new("explain-statement");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, qty INT)");
+
+        let response = db
+            .db
+            .execute_query("explain SELECT qty FROM item WHERE id = 5;")
+            .unwrap();
+
+        assert_eq!(response.columns, vec!["QUERY PLAN"]);
+        let lines: Vec<_> = response
+            .rows
+            .iter()
+            .map(|row| row.values[0].to_string())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "Projection: qty",
+                "  Filter: id = 5",
+                "    IndexScan: item (id = 5)"
+            ]
+        );
+
+        // Explaining a write doesn't run it
+        db.db
+            .execute_query("EXPLAIN INSERT INTO item VALUES (1, 2)")
+            .unwrap();
+        assert!(
+            db.db
+                .execute_query("SELECT * FROM item")
+                .unwrap()
+                .rows
+                .is_empty()
+        );
     }
 
     #[test]

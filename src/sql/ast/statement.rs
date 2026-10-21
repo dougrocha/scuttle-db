@@ -11,6 +11,9 @@ pub enum Statement {
     Insert(InsertStatement),
     Update(UpdateStatement),
     Delete(DeleteStatement),
+
+    /// `EXPLAIN <statement>`: describe the plan instead of running it.
+    Explain(Box<Statement>),
 }
 
 #[derive(Debug, Clone)]
