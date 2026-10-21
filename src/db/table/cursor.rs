@@ -1,10 +1,10 @@
-use miette::Result;
+use miette::{Result, miette};
 
 use crate::{
-    db::table::{row::Row, schema::Schema},
+    db::table::{index::Ctid, row::Row, schema::Schema},
     storage::{
         buffer_pool::BufferPool,
-        page::{ItemId, PageHeader, PageId},
+        page::{ItemId, ItemPointer, Page, PageHeader, PageId},
     },
 };
 
@@ -61,15 +61,36 @@ impl TableCursor {
                 continue;
             }
 
-            let offset = item_pointer.offset as usize - PageHeader::SIZE;
-            let length = item_pointer.length as usize;
-            let row = self
-                .schema
-                .decode_row(&page.data[offset..offset + length])?;
-
+            let row = decode_item(page, item_pointer, &self.schema)?;
             emit(page_id, item_id as ItemId, row)?;
         }
 
         Ok(true)
     }
+}
+
+/// Reads the row stored at `ctid`, or `None` if it was deleted. Index scans use this to
+/// fetch the rows an index points to.
+pub(crate) fn fetch_row(
+    pool: &mut BufferPool,
+    table_name: &str,
+    schema: &Schema,
+    (page_id, item_id): Ctid,
+) -> Result<Option<Row>> {
+    let page = pool.get_page(table_name, page_id)?;
+    let item_pointer = page
+        .item_pointers()
+        .nth(item_id as usize)
+        .ok_or_else(|| miette!("No item {item_id} on page {page_id} of {table_name}."))?;
+
+    if item_pointer.is_deleted() {
+        return Ok(None);
+    }
+    decode_item(page, item_pointer, schema).map(Some)
+}
+
+fn decode_item(page: &Page, item_pointer: ItemPointer, schema: &Schema) -> Result<Row> {
+    let offset = item_pointer.offset as usize - PageHeader::SIZE;
+    let length = item_pointer.length as usize;
+    schema.decode_row(&page.data[offset..offset + length])
 }

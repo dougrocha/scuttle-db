@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Bound,
+};
 
 use miette::Result;
 
@@ -77,7 +80,34 @@ impl TableIndex {
     }
 
     fn key(&self, row: &Row) -> Option<IndexKey> {
-        IndexKey::for_column(&self.data_type, &row.values[self.column])
+        self.key_for(&row.values[self.column])
+    }
+
+    /// The key this index would store `value` under, if it can hold it at all.
+    pub(crate) fn key_for(&self, value: &Value) -> Option<IndexKey> {
+        IndexKey::for_column(&self.data_type, value)
+    }
+
+    /// The rows whose key is within `range`, in key order.
+    pub(crate) fn range(&self, range: &IndexRange) -> Vec<Ctid> {
+        // `BTreeMap::range` panics on bounds that cross, such as `id > 5 AND id < 3`.
+        // No key can match those, so there is nothing to read.
+        let crossed = match (&range.lower, &range.upper) {
+            (Bound::Included(lo), Bound::Included(hi)) => lo > hi,
+            (
+                Bound::Included(lo) | Bound::Excluded(lo),
+                Bound::Included(hi) | Bound::Excluded(hi),
+            ) => lo >= hi,
+            _ => false,
+        };
+        if crossed {
+            return Vec::new();
+        }
+
+        self.entries
+            .range::<IndexKey, _>((range.lower.as_ref(), range.upper.as_ref()))
+            .flat_map(|(_, ctids)| ctids.iter().copied())
+            .collect()
     }
 
     pub(crate) fn insert(&mut self, row: &Row, ctid: Ctid) {
@@ -116,12 +146,30 @@ impl TableIndex {
 
             if taken || !seen.insert(key.clone()) {
                 return Err(DatabaseError::ConstraintViolation(format!(
-                    "duplicate key {key:?} in unique column {column_name}"
+                    "duplicate key {key} in unique column {column_name}"
                 ))
                 .into());
             }
         }
 
         Ok(())
+    }
+}
+
+/// The part of one index a scan reads: the keys of `column` between two bounds.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct IndexRange {
+    pub(crate) column: usize,
+    pub(crate) lower: Bound<IndexKey>,
+    pub(crate) upper: Bound<IndexKey>,
+}
+
+impl std::fmt::Display for IndexKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IndexKey::Int(n) => write!(f, "{n}"),
+            IndexKey::Text(s) => write!(f, "'{s}'"),
+            IndexKey::Timestamp(t) => write!(f, "TIMESTAMP '{}'", Value::Timestamp(*t)),
+        }
     }
 }

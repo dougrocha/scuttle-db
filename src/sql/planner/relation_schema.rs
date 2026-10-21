@@ -215,6 +215,7 @@ mod tests {
             table_name: "users".to_string(),
             alias: Some("u".to_string()),
             schema: users_schema(),
+            index: None,
         };
 
         let schema = plan.output_schema();

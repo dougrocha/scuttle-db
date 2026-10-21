@@ -22,7 +22,7 @@ use crate::{
         },
         catalog_context::CatalogContext,
         evaluator::{Evaluator, expression::ExpressionEvaluator, predicate::PredicateEvaluator},
-        planner::{explain, logical::LogicalPlan, physical::PhysicalPlanner},
+        planner::{explain, logical::LogicalPlan, optimizer, physical::PhysicalPlanner},
     },
     storage::{
         buffer_pool::BufferPool,
@@ -463,7 +463,7 @@ impl Database {
 
         let context = CatalogContext::new(self);
         let analyzer = Analyzer::new(&context);
-        let plan = match statement {
+        let mut plan = match statement {
             Statement::Create(create_stmt) => LogicalPlan::CreateTable {
                 table_name: create_stmt.table_name,
                 columns: create_stmt.columns,
@@ -474,6 +474,7 @@ impl Database {
             Statement::Delete(delete_stmt) => analyzer.analyze_delete(delete_stmt)?,
         };
 
+        optimizer::use_indexes(&mut plan, &context.database.tables);
         Ok(explain::explain(&plan))
     }
 
@@ -509,7 +510,8 @@ impl Database {
     fn handle_select(&mut self, select_stmt: statement::SelectStatement) -> Result<QueryResponse> {
         let mut context = CatalogContext::new(self);
         let analyzer = Analyzer::new(&context);
-        let anayzed_plan = analyzer.analyze_select(select_stmt)?;
+        let mut anayzed_plan = analyzer.analyze_select(select_stmt)?;
+        optimizer::use_indexes(&mut anayzed_plan, &context.database.tables);
         let columns = anayzed_plan.output_schema().names();
 
         // TODO: Eventually add a optimizer here for logical_plan.
@@ -1213,6 +1215,76 @@ mod tests {
         assert!(db.fails("INSERT INTO acct VALUES (3, 'z@x', '')"));
         assert!(db.fails("INSERT INTO acct VALUES (9, 'a@x', '')"));
         db.execute("INSERT INTO acct VALUES (9, 'z@x', '')");
+    }
+
+    #[test]
+    fn test_index_scan_returns_the_same_rows_as_a_full_scan() {
+        let mut db = TestDb::new("index-scan");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, code TEXT UNIQUE, qty INT)");
+        db.execute("CREATE TABLE plain (id INT, code TEXT, qty INT)");
+        for table in ["item", "plain"] {
+            let values: Vec<String> = (1..=300)
+                .map(|id| format!("({id}, 'c{id:03}', {})", id % 7))
+                .collect();
+            db.execute(&format!("INSERT INTO {table} VALUES {}", values.join(", ")));
+            db.execute(&format!("DELETE FROM {table} WHERE id = 150"));
+            db.execute(&format!("UPDATE {table} SET id = id + 1000 WHERE id = 151"));
+        }
+
+        // Each WHERE runs through the index on `item` and as a full scan on `plain`
+        for filter in [
+            "id = 42",
+            "id = 150",
+            "id = 1151",
+            "42 = id",
+            "id > 290",
+            "id >= 140 AND id < 160",
+            "100 < id AND id <= 103 AND qty > 2",
+            "id > 50 AND id < 10",
+            "id = 7 AND id = 8",
+            "code = 'c007'",
+            "code >= 'c298'",
+        ] {
+            let sql =
+                |table| format!("SELECT id, code, qty FROM {table} WHERE {filter} ORDER BY id");
+            assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{filter}");
+            assert!(
+                db.db
+                    .explain(&sql("item"))
+                    .unwrap()
+                    .contains("IndexScan: item"),
+                "{filter}"
+            );
+        }
+
+        // Conditions an index can't narrow keep the full scan
+        for filter in ["qty = 3", "id != 5", "id = 5 OR id = 6", "id = 5.5"] {
+            let plan = db
+                .db
+                .explain(&format!("SELECT id FROM item WHERE {filter}"))
+                .unwrap();
+            assert!(
+                plan.contains("Scan: item") && !plan.contains("IndexScan"),
+                "{filter}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_explain_shows_the_index_range() {
+        let mut db = TestDb::new("index-explain");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, qty INT)");
+
+        assert_eq!(
+            db.db.explain("SELECT qty FROM item WHERE id = 5").unwrap(),
+            "Projection: qty\n  Filter: id = 5\n    IndexScan: item (id = 5)"
+        );
+        assert_eq!(
+            db.db
+                .explain("SELECT qty FROM item i WHERE i.id > 5 AND i.id <= 9")
+                .unwrap(),
+            "Projection: qty\n  Filter: (id > 5) AND (id <= 9)\n    IndexScan: item i (id > 5 AND id <= 9)"
+        );
     }
 
     #[test]

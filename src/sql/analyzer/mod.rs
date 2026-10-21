@@ -499,6 +499,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             table_name: table.name.clone(),
             alias: table.alias.clone(),
             schema: def.schema().clone(),
+            index: None,
         })
     }
 

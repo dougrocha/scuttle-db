@@ -4,6 +4,9 @@
 //! schema it reads: a scan's table columns, a join's qualified columns, a projection's
 //! output names, and so on.
 
+use std::ops::Bound;
+
+use crate::db::table::index::IndexRange;
 use crate::sql::analyzer::AnalyzedExpression;
 use crate::sql::planner::logical::LogicalPlan;
 use crate::sql::planner::relation_schema::RelationSchema;
@@ -20,11 +23,24 @@ fn write_node(plan: &LogicalPlan, depth: usize, lines: &mut Vec<String>) {
 
     match plan {
         LogicalPlan::Scan {
-            table_name, alias, ..
-        } => lines.push(match alias {
-            Some(alias) => format!("{indent}Scan: {table_name} {alias}"),
-            None => format!("{indent}Scan: {table_name}"),
-        }),
+            table_name,
+            alias,
+            schema,
+            index,
+        } => {
+            let mut line = match index {
+                Some(_) => format!("{indent}IndexScan: {table_name}"),
+                None => format!("{indent}Scan: {table_name}"),
+            };
+            if let Some(alias) = alias {
+                line.push_str(&format!(" {alias}"));
+            }
+            if let Some(range) = index {
+                let column = &schema.columns[range.column].name;
+                line.push_str(&format!(" ({})", render_range(column, range)));
+            }
+            lines.push(line);
+        }
         LogicalPlan::Join {
             left,
             right,
@@ -176,6 +192,31 @@ fn write_filtered_scan(
         depth += 1;
     }
     lines.push(format!("{}Scan: {table_name}", "  ".repeat(depth)));
+}
+
+/// An index range as the conditions it stands for: `id = 5`, or `id > 10 AND id <= 50`.
+fn render_range(column: &str, range: &IndexRange) -> String {
+    if let (Bound::Included(lo), Bound::Included(hi)) = (&range.lower, &range.upper)
+        && lo == hi
+    {
+        return format!("{column} = {lo}");
+    }
+
+    let lower = match &range.lower {
+        Bound::Included(key) => Some(format!("{column} >= {key}")),
+        Bound::Excluded(key) => Some(format!("{column} > {key}")),
+        Bound::Unbounded => None,
+    };
+    let upper = match &range.upper {
+        Bound::Included(key) => Some(format!("{column} <= {key}")),
+        Bound::Excluded(key) => Some(format!("{column} < {key}")),
+        Bound::Unbounded => None,
+    };
+    [lower, upper]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 #[cfg(test)]

@@ -257,6 +257,7 @@ mod tests {
             table_name: table.to_string(),
             alias: Some(alias.to_string()),
             schema,
+            index: None,
         }
     }
 

@@ -1,5 +1,6 @@
 use crate::{
     ColumnDef, DataType, Schema,
+    db::table::index::IndexRange,
     sql::{
         analyzer::{AggregateFunction, AnalyzedExpression},
         ast::statement::JoinKind,
@@ -29,6 +30,11 @@ pub enum LogicalPlan {
         /// The table's schema as the analyzer saw it, so the node can state its output
         /// without a catalog. Physical planning hands it to the scan, which decodes rows with it.
         schema: Schema,
+
+        /// Read only the rows an index finds in this range, instead of the whole table.
+        /// Set by [`use_indexes`](super::optimizer::use_indexes). The Filter above the scan
+        /// still checks every row, so the range may cover more rows than the WHERE clause.
+        index: Option<IndexRange>,
     },
     /// Nested-loop join. Output row is the left row followed by the right row.
     ///
@@ -123,6 +129,7 @@ impl LogicalPlan {
                 table_name,
                 alias,
                 schema,
+                ..
             } => RelationSchema::table(alias.as_deref().unwrap_or(table_name), schema),
             LogicalPlan::Join { left, right, .. } => {
                 RelationSchema::join(&left.output_schema(), &right.output_schema())

@@ -3,8 +3,12 @@ use std::cmp::Ordering;
 use miette::{Result, miette};
 
 use crate::{
-    Value,
-    db::table::{cursor::TableCursor, row::Row},
+    Schema, Value,
+    db::table::{
+        cursor::{TableCursor, fetch_row},
+        index::Ctid,
+        row::Row,
+    },
     sql::{
         analyzer::AnalyzedExpression,
         ast::statement::JoinKind,
@@ -32,6 +36,27 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
         analyzed_plan: LogicalPlan,
     ) -> Result<Box<dyn ExecutionNode>> {
         match analyzed_plan {
+            LogicalPlan::Scan {
+                table_name,
+                schema,
+                index: Some(range),
+                ..
+            } => {
+                let table = self.context.get_table(&table_name)?;
+                let index = table
+                    .indexes
+                    .iter()
+                    .find(|index| index.column == range.column)
+                    .ok_or_else(|| {
+                        miette!("No index on column {} of {table_name}", range.column)
+                    })?;
+
+                Ok(Box::new(IndexScanExec {
+                    ctids: index.range(&range).into_iter(),
+                    table_name,
+                    schema,
+                }))
+            }
             LogicalPlan::Scan {
                 table_name, schema, ..
             } => {
@@ -155,6 +180,39 @@ impl ExecutionNode for ScanExec {
                 Ok(())
             })?
         {}
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(RecordBatch { rows }))
+    }
+}
+
+/// Reads only the rows an index found, in key order.
+///
+/// The index lookup happens when the plan is built, which costs little: it is a list of
+/// row locations, not rows. Rows are fetched from the heap as batches are asked for.
+#[derive(Debug)]
+pub struct IndexScanExec {
+    table_name: String,
+    schema: Schema,
+    ctids: std::vec::IntoIter<Ctid>,
+}
+impl ExecutionNode for IndexScanExec {
+    fn next(&mut self, pool: &mut BufferPool) -> Result<Option<RecordBatch>> {
+        let batch_size = 1024;
+
+        let mut rows = Vec::with_capacity(batch_size.min(self.ctids.len()));
+        while rows.len() < batch_size
+            && let Some(ctid) = self.ctids.next()
+        {
+            // The index drops a row when it is deleted, so this only skips rows deleted
+            // after the lookup
+            if let Some(row) = fetch_row(pool, &self.table_name, &self.schema, ctid)? {
+                rows.push(row);
+            }
+        }
 
         if rows.is_empty() {
             return Ok(None);
