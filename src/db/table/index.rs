@@ -50,6 +50,9 @@ pub(crate) struct TableIndex {
     pub(crate) column: usize,
     data_type: DataType,
     entries: BTreeMap<IndexKey, Vec<Ctid>>,
+
+    /// Rows in the index. NULLs aren't indexed, so this can be less than the table's rows.
+    pub(crate) len: usize,
 }
 
 impl TableIndex {
@@ -75,6 +78,7 @@ impl TableIndex {
                 column,
                 data_type: def.data_type,
                 entries: BTreeMap::new(),
+                len: 0,
             })
             .collect()
     }
@@ -90,6 +94,18 @@ impl TableIndex {
 
     /// The rows whose key is within `range`, in key order.
     pub(crate) fn range(&self, range: &IndexRange) -> Vec<Ctid> {
+        self.ctids_in(range).collect()
+    }
+
+    /// How many rows fall in `range`, counting no further than `limit`.
+    ///
+    /// A `BTreeMap` can't count a range without walking it, so the limit keeps the cost
+    /// of asking "is this range small?" small even when the answer is no.
+    pub(crate) fn count_up_to(&self, range: &IndexRange, limit: usize) -> usize {
+        self.ctids_in(range).take(limit).count()
+    }
+
+    fn ctids_in<'a>(&'a self, range: &'a IndexRange) -> impl Iterator<Item = Ctid> + 'a {
         // `BTreeMap::range` panics on bounds that cross, such as `id > 5 AND id < 3`.
         // No key can match those, so there is nothing to read.
         let crossed = match (&range.lower, &range.upper) {
@@ -100,26 +116,30 @@ impl TableIndex {
             ) => lo >= hi,
             _ => false,
         };
-        if crossed {
-            return Vec::new();
-        }
 
-        self.entries
-            .range::<IndexKey, _>((range.lower.as_ref(), range.upper.as_ref()))
+        (!crossed)
+            .then(|| {
+                self.entries
+                    .range::<IndexKey, _>((range.lower.as_ref(), range.upper.as_ref()))
+            })
+            .into_iter()
+            .flatten()
             .flat_map(|(_, ctids)| ctids.iter().copied())
-            .collect()
     }
 
     pub(crate) fn insert(&mut self, row: &Row, ctid: Ctid) {
         if let Some(key) = self.key(row) {
             self.entries.entry(key).or_default().push(ctid);
+            self.len += 1;
         }
     }
 
     pub(crate) fn remove(&mut self, row: &Row, ctid: Ctid) {
         let Some(key) = self.key(row) else { return };
         if let Some(ctids) = self.entries.get_mut(&key) {
+            let before = ctids.len();
             ctids.retain(|&c| c != ctid);
+            self.len -= before - ctids.len();
             if ctids.is_empty() {
                 self.entries.remove(&key);
             }

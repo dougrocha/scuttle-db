@@ -12,7 +12,13 @@ use crate::{
     sql::{analyzer::AnalyzedExpression, ast::operator::Operator, planner::logical::LogicalPlan},
 };
 
-/// Sets `index` on every Scan whose Filter compares an indexed column with a literal.
+/// Above this share of an index's rows, fetching rows one at a time through the index
+/// costs more than reading every page in order. Postgres' crossover is usually 5 to 10%.
+/// With pages cached in memory it was nearer 50% here, so 10% leaves room to spare.
+const MAX_INDEX_FRACTION: f64 = 0.1;
+
+/// Sets `index` on every Scan whose Filter compares an indexed column with a literal,
+/// when the index finds few enough rows to beat reading the whole table.
 ///
 /// The Filter stays in place and still checks each row, so the index only has to find
 /// a superset of the matching rows.
@@ -42,43 +48,56 @@ pub(crate) fn use_indexes(plan: &mut LogicalPlan, tables: &BTreeMap<String, Tabl
     }
 }
 
-/// The range of the first index that some part of the condition narrows.
+/// The range of the index that finds the fewest rows, if any finds few enough.
 fn pick_index(condition: &AnalyzedExpression, indexes: &[TableIndex]) -> Option<IndexRange> {
     let mut conjuncts = Vec::new();
     split_and(condition, &mut conjuncts);
 
-    indexes.iter().find_map(|index| {
-        let mut range = IndexRange {
-            column: index.column,
-            lower: Bound::Unbounded,
-            upper: Bound::Unbounded,
+    indexes
+        .iter()
+        .filter_map(|index| {
+            let range = narrow(index, &conjuncts)?;
+            let limit = (index.len as f64 * MAX_INDEX_FRACTION) as usize + 1;
+            let rows = index.count_up_to(&range, limit);
+            (rows < limit).then_some((rows, range))
+        })
+        .min_by_key(|(rows, _)| *rows)
+        .map(|(_, range)| range)
+}
+
+/// The keys of `index` that the conditions allow, or `None` if none of them is about
+/// the index's column.
+fn narrow(index: &TableIndex, conjuncts: &[&AnalyzedExpression]) -> Option<IndexRange> {
+    let mut range = IndexRange {
+        column: index.column,
+        lower: Bound::Unbounded,
+        upper: Bound::Unbounded,
+    };
+    let mut narrowed = false;
+
+    for conjunct in conjuncts {
+        let Some((column, op, value)) = column_vs_literal(conjunct) else {
+            continue;
         };
-        let mut narrowed = false;
+        let Some(key) = index.key_for(value).filter(|_| column == index.column) else {
+            continue;
+        };
 
-        for conjunct in &conjuncts {
-            let Some((column, op, value)) = column_vs_literal(conjunct) else {
-                continue;
-            };
-            let Some(key) = index.key_for(value).filter(|_| column == index.column) else {
-                continue;
-            };
-
-            match op {
-                Operator::Equal => {
-                    tighten_lower(&mut range.lower, Bound::Included(key.clone()));
-                    tighten_upper(&mut range.upper, Bound::Included(key));
-                }
-                Operator::GreaterThan => tighten_lower(&mut range.lower, Bound::Excluded(key)),
-                Operator::GreaterThanEqual => tighten_lower(&mut range.lower, Bound::Included(key)),
-                Operator::LessThan => tighten_upper(&mut range.upper, Bound::Excluded(key)),
-                Operator::LessThanEqual => tighten_upper(&mut range.upper, Bound::Included(key)),
-                _ => continue,
+        match op {
+            Operator::Equal => {
+                tighten_lower(&mut range.lower, Bound::Included(key.clone()));
+                tighten_upper(&mut range.upper, Bound::Included(key));
             }
-            narrowed = true;
+            Operator::GreaterThan => tighten_lower(&mut range.lower, Bound::Excluded(key)),
+            Operator::GreaterThanEqual => tighten_lower(&mut range.lower, Bound::Included(key)),
+            Operator::LessThan => tighten_upper(&mut range.upper, Bound::Excluded(key)),
+            Operator::LessThanEqual => tighten_upper(&mut range.upper, Bound::Included(key)),
+            _ => continue,
         }
+        narrowed = true;
+    }
 
-        narrowed.then_some(range)
-    })
+    narrowed.then_some(range)
 }
 
 /// The parts of `a AND b AND c`, or the expression itself when it isn't an AND.

@@ -1274,6 +1274,8 @@ mod tests {
     fn test_explain_shows_the_index_range() {
         let mut db = TestDb::new("index-explain");
         db.execute("CREATE TABLE item (id INT PRIMARY KEY, qty INT)");
+        let values: Vec<String> = (1..=100).map(|id| format!("({id}, 0)")).collect();
+        db.execute(&format!("INSERT INTO item VALUES {}", values.join(", ")));
 
         assert_eq!(
             db.db.explain("SELECT qty FROM item WHERE id = 5").unwrap(),
@@ -1285,6 +1287,17 @@ mod tests {
                 .unwrap(),
             "Projection: qty\n  Filter: (id > 5) AND (id <= 9)\n    IndexScan: item i (id > 5 AND id <= 9)"
         );
+
+        // Past a tenth of the table, reading every page in order beats fetching rows one
+        // at a time, so the index is only used for the narrower range
+        let plan = |db: &mut TestDb, filter: &str| {
+            db.db
+                .explain(&format!("SELECT qty FROM item WHERE {filter}"))
+                .unwrap()
+        };
+        assert!(plan(&mut db, "id > 91").ends_with("IndexScan: item (id > 91)"));
+        assert!(plan(&mut db, "id > 89").ends_with("    Scan: item"));
+        assert!(plan(&mut db, "id > 0").ends_with("    Scan: item"));
     }
 
     #[test]
