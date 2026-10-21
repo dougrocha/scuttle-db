@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use miette::{IntoDiagnostic, Result, miette};
@@ -30,6 +30,9 @@ pub struct BufferPool {
     /// Pages changed since the last [`BufferPool::flush`], per table. Always empty in memory.
     dirty: HashMap<String, BTreeSet<PageId>>,
 
+    /// Each table file, opened once on first use and kept open, see [`BufferPool::file`].
+    files: HashMap<String, File>,
+
     /// Directory holding the `.table` files. `None` keeps every page in memory,
     /// which is how the database runs in the browser.
     data_directory: Option<PathBuf>,
@@ -41,6 +44,7 @@ impl BufferPool {
             pool: HashMap::new(),
             page_counts: HashMap::new(),
             dirty: HashMap::new(),
+            files: HashMap::new(),
             data_directory: Some(data_directory.into()),
         }
     }
@@ -81,11 +85,10 @@ impl BufferPool {
             .unwrap())
     }
 
-    fn load_page_from_file(&self, table_name: &str, page_id: PageId) -> Result<Page> {
-        let path = self
-            .table_path(table_name)
+    fn load_page_from_file(&mut self, table_name: &str, page_id: PageId) -> Result<Page> {
+        let file = self
+            .file(table_name, false)?
             .ok_or_else(|| miette!("Page {page_id} of {table_name} is not in memory."))?;
-        let mut file = File::open(path).into_diagnostic()?;
 
         let mut buffer: [u8; Page::SIZE] = [0; Page::SIZE];
         let offset = (page_id as usize) * Page::SIZE;
@@ -144,14 +147,13 @@ impl BufferPool {
     /// Writes one page to disk now. Used for the catalog, whose rows must be saved
     /// as soon as a table is created.
     pub(crate) fn save_page(&mut self, table_name: &str, page_id: PageId) -> Result<()> {
-        let Some(path) = self.table_path(table_name) else {
+        if self.data_directory.is_none() {
             // In-memory pages already live in the pool, so there is nothing to write.
             return Ok(());
-        };
+        }
 
-        let page = self.get_page(table_name, page_id)?;
-        let mut file = Self::open_for_write(&path)?;
-        Self::write_page(&mut file, page)
+        self.get_page(table_name, page_id)?;
+        self.flush_pages(table_name, [page_id])
     }
 
     /// Records that a page changed, so the next [`BufferPool::flush`] writes it.
@@ -173,41 +175,61 @@ impl BufferPool {
     /// Writes every page marked dirty since the last flush, opening each table file once.
     pub(crate) fn flush(&mut self) -> Result<()> {
         for (table_name, page_ids) in std::mem::take(&mut self.dirty) {
-            let Some(path) = self.table_path(&table_name) else {
-                continue;
-            };
-            let mut file = Self::open_for_write(&path)?;
-
             // BTreeSet iterates in order, so the file is written front to back
-            for page_id in page_ids {
-                let page = self
-                    .pool
-                    .get(&table_name)
-                    .and_then(|pages| pages.get(&page_id))
-                    .ok_or_else(|| {
-                        miette!("Dirty page {page_id} of {table_name} is not in memory.")
-                    })?;
-                Self::write_page(&mut file, page)?;
-            }
+            self.flush_pages(&table_name, page_ids)?;
         }
 
         Ok(())
     }
 
-    fn open_for_write(path: &Path) -> Result<File> {
-        OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .into_diagnostic()
+    /// Writes the given pages of a table, each at its own offset in the table file.
+    fn flush_pages(
+        &mut self,
+        table_name: &str,
+        page_ids: impl IntoIterator<Item = PageId>,
+    ) -> Result<()> {
+        if self.file(table_name, true)?.is_none() {
+            return Ok(());
+        }
+        // Borrow the fields directly, so the file and the pages can be used at the same time
+        let file = self.files.get_mut(table_name).expect("opened above");
+
+        for page_id in page_ids {
+            let page = self
+                .pool
+                .get(table_name)
+                .and_then(|pages| pages.get(&page_id))
+                .ok_or_else(|| miette!("Dirty page {page_id} of {table_name} is not in memory."))?;
+
+            let offset = (page_id as usize) * Page::SIZE;
+            file.seek(SeekFrom::Start(offset as u64))
+                .into_diagnostic()?;
+            file.write_all(&page.to_bytes()).into_diagnostic()?;
+        }
+
+        Ok(())
     }
 
-    /// Writes a page at its own offset in the table file.
-    fn write_page(file: &mut File, page: &Page) -> Result<()> {
-        let offset = (page.header.page_id as usize) * Page::SIZE;
-        file.seek(SeekFrom::Start(offset as u64))
-            .into_diagnostic()?;
-        file.write_all(&page.to_bytes()).into_diagnostic()
+    /// The open file of a table, opening it on first use. `None` when the pool is in memory.
+    ///
+    /// Reads pass `create: false`, so asking for a page of a table that has no file is an
+    /// error instead of leaving an empty file behind.
+    fn file(&mut self, table_name: &str, create: bool) -> Result<Option<&mut File>> {
+        let Some(path) = self.table_path(table_name) else {
+            return Ok(None);
+        };
+
+        if !self.files.contains_key(table_name) {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(create)
+                .truncate(false)
+                .open(path)
+                .into_diagnostic()?;
+            self.files.insert(table_name.to_string(), file);
+        }
+
+        Ok(self.files.get_mut(table_name))
     }
 }
