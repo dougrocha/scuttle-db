@@ -109,6 +109,8 @@ pub fn values_greater_than(left: &Value, right: &Value) -> Value {
         (Value::Int64(a), Value::Float64(b)) => (*a as f64) > *b,
         (Value::Float64(a), Value::Int64(b)) => *a > (*b as f64),
         (Value::Timestamp(a), Value::Timestamp(b)) => a > b,
+        (Value::Text(a), Value::Text(b)) => a > b,
+        (Value::Bool(a), Value::Bool(b)) => a > b,
         _ => false,
     };
     Value::Bool(result)
@@ -125,6 +127,8 @@ pub fn values_less_than(left: &Value, right: &Value) -> Value {
         (Value::Int64(a), Value::Float64(b)) => (*a as f64) < *b,
         (Value::Float64(a), Value::Int64(b)) => *a < (*b as f64),
         (Value::Timestamp(a), Value::Timestamp(b)) => a < b,
+        (Value::Text(a), Value::Text(b)) => a < b,
+        (Value::Bool(a), Value::Bool(b)) => a < b,
         _ => false,
     };
     Value::Bool(result)
@@ -154,6 +158,19 @@ pub fn compare_values(left: &Value, right: &Value) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_text_and_bool_compare_in_order() {
+        let (a, b) = (Value::from("a"), Value::from("b"));
+        assert_eq!(values_less_than(&a, &b), Value::Bool(true));
+        assert_eq!(values_less_than(&b, &a), Value::Bool(false));
+        assert_eq!(values_greater_than(&b, &a), Value::Bool(true));
+        assert_eq!(values_greater_than(&a, &a), Value::Bool(false));
+
+        let (no, yes) = (Value::Bool(false), Value::Bool(true));
+        assert_eq!(values_less_than(&no, &yes), Value::Bool(true));
+        assert_eq!(values_greater_than(&no, &yes), Value::Bool(false));
+    }
 
     #[test]
     fn test_compare_values_nulls_last() {
