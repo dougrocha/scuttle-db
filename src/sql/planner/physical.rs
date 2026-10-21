@@ -32,9 +32,11 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
     ) -> Result<Box<dyn ExecutionNode>> {
         match analyzed_plan {
             LogicalPlan::Scan { table_name, .. } => {
-                let data = self.context.database.get_rows(&table_name)?;
+                let rows = self.context.database.get_rows(&table_name)?;
 
-                Ok(Box::new(ScanExec { data }))
+                Ok(Box::new(ScanExec {
+                    rows: rows.into_iter(),
+                }))
             }
             LogicalPlan::Filter { input, condition } => {
                 let child_node = self.create_physical_plan(*input)?;
@@ -131,18 +133,18 @@ pub trait ExecutionNode: std::fmt::Debug {
 
 #[derive(Debug)]
 pub struct ScanExec {
-    data: Vec<Row>,
+    /// Rows not handed out yet. An iterator, not a `Vec`: draining a `Vec` from the
+    /// front shifts everything behind it, which made a full scan quadratic.
+    rows: std::vec::IntoIter<Row>,
 }
 impl ExecutionNode for ScanExec {
     fn next(&mut self) -> Result<Option<RecordBatch>> {
         let batch_size = 1024;
 
-        if self.data.is_empty() {
+        let chunk: Vec<Row> = self.rows.by_ref().take(batch_size).collect();
+        if chunk.is_empty() {
             return Ok(None);
         }
-
-        let end = batch_size.min(self.data.len());
-        let chunk = self.data.drain(..end).collect();
 
         Ok(Some(RecordBatch { rows: chunk }))
     }
