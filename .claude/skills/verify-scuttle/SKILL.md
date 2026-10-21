@@ -5,7 +5,7 @@ description: Drive the scuttle-db SQL REPL (the `scuttle-db` binary) the way a u
 
 # Verify scuttle-db
 
-The user types SQL into a line-oriented REPL (`src/bin/scuttle.rs`, with the loop in `src/repl.rs`). It prints the prompt `DB: `, runs each line as one statement, and stores tables under `./db/` relative to its working directory. Piped stdin works, so this skill needs no PTY or tmux.
+The user types SQL into a line-oriented REPL (`src/bin/scuttle.rs`, with the loop in `src/repl.rs`). It prints the prompt `DB: `, runs each line as one statement, and stores tables under `./db/` relative to its working directory (`--data <dir>` changes that, `--in-memory` writes nothing). Piped stdin works, so this skill needs no PTY or tmux.
 
 The helper is `.claude/skills/verify-scuttle/bin/scv`, relative to the repo root. Run `scv help` for every subcommand. The examples call it as `scv`. Bash tool calls do not keep `PATH`, so start every call with:
 
