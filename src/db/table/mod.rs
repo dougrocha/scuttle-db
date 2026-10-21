@@ -3,6 +3,7 @@ use miette::Result;
 use crate::{DatabaseError, core::types::Value};
 
 pub mod column_def;
+pub(crate) mod cursor;
 pub mod row;
 pub mod schema;
 pub mod table_def;

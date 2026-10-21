@@ -4,7 +4,7 @@ use miette::{Result, miette};
 
 use crate::{
     Value,
-    db::table::row::Row,
+    db::table::{cursor::TableCursor, row::Row},
     sql::{
         analyzer::AnalyzedExpression,
         ast::statement::JoinKind,
@@ -15,6 +15,7 @@ use crate::{
         },
         planner::logical::{AggregateCall, LogicalPlan, SortKey},
     },
+    storage::buffer_pool::BufferPool,
 };
 
 pub struct PhysicalPlanner<'a, 'db> {
@@ -31,11 +32,13 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
         analyzed_plan: LogicalPlan,
     ) -> Result<Box<dyn ExecutionNode>> {
         match analyzed_plan {
-            LogicalPlan::Scan { table_name, .. } => {
-                let rows = self.context.database.get_rows(&table_name)?;
+            LogicalPlan::Scan {
+                table_name, schema, ..
+            } => {
+                let pool = &mut self.context.database.buffer_manager;
 
                 Ok(Box::new(ScanExec {
-                    rows: rows.into_iter(),
+                    cursor: TableCursor::open(pool, table_name, schema),
                 }))
             }
             LogicalPlan::Filter { input, condition } => {
@@ -127,26 +130,37 @@ pub struct RecordBatch {
     pub rows: Vec<Row>,
 }
 
+/// A node of the physical plan, pulled one batch at a time.
+///
+/// The caller lends the pool for one call only. Nodes are `'static`, so they can't keep
+/// it, and that lets two scans of the same table share it (a self-join).
 pub trait ExecutionNode: std::fmt::Debug {
-    fn next(&mut self) -> Result<Option<RecordBatch>>;
+    fn next(&mut self, pool: &mut BufferPool) -> Result<Option<RecordBatch>>;
 }
 
+/// Full table scan. It reads and decodes pages when a batch is asked for, not up front.
 #[derive(Debug)]
 pub struct ScanExec {
-    /// Rows not handed out yet. An iterator, not a `Vec`: draining a `Vec` from the
-    /// front shifts everything behind it, which made a full scan quadratic.
-    rows: std::vec::IntoIter<Row>,
+    cursor: TableCursor,
 }
 impl ExecutionNode for ScanExec {
-    fn next(&mut self) -> Result<Option<RecordBatch>> {
+    fn next(&mut self, pool: &mut BufferPool) -> Result<Option<RecordBatch>> {
         let batch_size = 1024;
 
-        let chunk: Vec<Row> = self.rows.by_ref().take(batch_size).collect();
-        if chunk.is_empty() {
+        // Whole pages only, so a batch is at least `batch_size` rows unless the table ran out
+        let mut rows = Vec::with_capacity(batch_size);
+        while rows.len() < batch_size
+            && self.cursor.read_next_page(pool, |_, _, row| {
+                rows.push(row);
+                Ok(())
+            })?
+        {}
+
+        if rows.is_empty() {
             return Ok(None);
         }
 
-        Ok(Some(RecordBatch { rows: chunk }))
+        Ok(Some(RecordBatch { rows }))
     }
 }
 #[derive(Debug)]
@@ -155,8 +169,8 @@ pub struct ProjectionExec {
     exprs: Vec<AnalyzedExpression>,
 }
 impl ExecutionNode for ProjectionExec {
-    fn next(&mut self) -> Result<Option<RecordBatch>> {
-        let Some(batch) = self.child.next()? else {
+    fn next(&mut self, pool: &mut BufferPool) -> Result<Option<RecordBatch>> {
+        let Some(batch) = self.child.next(pool)? else {
             return Ok(None);
         };
 
@@ -189,10 +203,10 @@ pub struct FilterExec {
     expr: AnalyzedExpression,
 }
 impl ExecutionNode for FilterExec {
-    fn next(&mut self) -> Result<Option<RecordBatch>> {
+    fn next(&mut self, pool: &mut BufferPool) -> Result<Option<RecordBatch>> {
         let evaluator = PredicateEvaluator;
 
-        while let Some(batch) = self.child.next()? {
+        while let Some(batch) = self.child.next(pool)? {
             let mut filtered_rows = Vec::with_capacity(batch.rows.len());
 
             for row in batch.rows {
@@ -228,11 +242,11 @@ pub struct JoinExec {
     right_rows: Option<Vec<Row>>,
 }
 impl ExecutionNode for JoinExec {
-    fn next(&mut self) -> Result<Option<RecordBatch>> {
+    fn next(&mut self, pool: &mut BufferPool) -> Result<Option<RecordBatch>> {
         // 1. Drain the right side exactly once.
         if self.right_rows.is_none() {
             let mut rows = Vec::new();
-            while let Some(batch) = self.right.next()? {
+            while let Some(batch) = self.right.next(pool)? {
                 rows.extend(batch.rows);
             }
             self.right_rows = Some(rows);
@@ -241,7 +255,7 @@ impl ExecutionNode for JoinExec {
         let evaluator = PredicateEvaluator; // Null -> false: right for ON
 
         loop {
-            let Some(batch) = self.left.next()? else {
+            let Some(batch) = self.left.next(pool)? else {
                 return Ok(None);
             };
             let mut out = Vec::new();
@@ -296,7 +310,7 @@ impl AggregateExec {
     }
 }
 impl ExecutionNode for AggregateExec {
-    fn next(&mut self) -> Result<Option<RecordBatch>> {
+    fn next(&mut self, pool: &mut BufferPool) -> Result<Option<RecordBatch>> {
         if self.done {
             return Ok(None);
         }
@@ -308,7 +322,7 @@ impl ExecutionNode for AggregateExec {
         // found with a linear search, which is fine at this scale.
         let mut groups: Vec<(Vec<Value>, Vec<Accumulator>)> = Vec::new();
 
-        while let Some(batch) = self.child.next()? {
+        while let Some(batch) = self.child.next(pool)? {
             for row in batch.rows {
                 let key = self
                     .group_by
@@ -363,7 +377,7 @@ pub struct SortExec {
     done: bool,
 }
 impl ExecutionNode for SortExec {
-    fn next(&mut self) -> Result<Option<RecordBatch>> {
+    fn next(&mut self, pool: &mut BufferPool) -> Result<Option<RecordBatch>> {
         if self.done {
             return Ok(None);
         }
@@ -372,7 +386,7 @@ impl ExecutionNode for SortExec {
         let evaluator = ExpressionEvaluator;
 
         let mut keyed_rows = Vec::new();
-        while let Some(batch) = self.child.next()? {
+        while let Some(batch) = self.child.next(pool)? {
             for row in batch.rows {
                 let key = self
                     .keys
@@ -417,13 +431,13 @@ pub struct LimitExec {
     to_skip: u64,
 }
 impl ExecutionNode for LimitExec {
-    fn next(&mut self) -> Result<Option<RecordBatch>> {
+    fn next(&mut self, pool: &mut BufferPool) -> Result<Option<RecordBatch>> {
         loop {
             if self.remaining == Some(0) {
                 return Ok(None);
             }
 
-            let Some(mut batch) = self.child.next()? else {
+            let Some(mut batch) = self.child.next(pool)? else {
                 return Ok(None);
             };
 

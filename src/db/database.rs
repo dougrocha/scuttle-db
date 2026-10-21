@@ -9,7 +9,7 @@ use crate::{
     ColumnConstraint, ColumnDef, DatabaseError, Value,
     db::{
         catalog::system_catalog::SystemCatalog,
-        table::{Table, row::Row, schema::Schema, table_def::TableDef},
+        table::{Table, cursor::TableCursor, row::Row, schema::Schema, table_def::TableDef},
     },
     sql::{
         analyzer::Analyzer,
@@ -23,7 +23,7 @@ use crate::{
     },
     storage::{
         buffer_pool::BufferPool,
-        page::{ItemId, PageHeader, PageId},
+        page::{ItemId, PageId},
     },
 };
 
@@ -305,59 +305,23 @@ impl Database {
         Ok((page_id, item_id))
     }
 
-    /// Retrieves all rows from a table (full table scan).
-    ///
-    /// Scans all pages for the table and decodes all non-deleted rows.
-    /// This is an expensive operation for large tables. Use [`Database::execute_query`]
-    /// with a WHERE clause to filter rows efficiently.
-    pub fn get_rows(&mut self, table_name: &str) -> Result<Vec<Row>, DatabaseError> {
-        let rows = self.get_rows_with_location(table_name)?;
-        Ok(rows.into_iter().map(|(_, _, row)| row).collect())
-    }
-
-    /// Like [`Database::get_rows`], but also returns where each row is stored.
+    /// Every live row of a table, with where it is stored.
     ///
     /// The `(PageId, ItemId)` pair identifies the tuple (PostgreSQL's `ctid`), which
-    /// UPDATE and DELETE need to mark the old version as deleted.
-    fn get_rows_with_location(
-        &mut self,
-        table_name: &str,
-    ) -> Result<Vec<(PageId, ItemId, Row)>, DatabaseError> {
-        let mut found_rows = Vec::new();
-        let page_count = self.buffer_manager.page_count(table_name);
+    /// UPDATE and DELETE need to mark the old version as deleted. They read the whole
+    /// table before writing, so unlike a SELECT this doesn't stream.
+    fn get_rows_with_location(&mut self, table_name: &str) -> Result<Vec<(PageId, ItemId, Row)>> {
+        let schema = self.get_table(table_name)?.schema().clone();
+        let mut cursor =
+            TableCursor::open(&mut self.buffer_manager, table_name.to_string(), schema);
 
-        for current_page_id in 0..page_count {
-            // Every page below the count exists, so failing to read one is a real error,
-            // not the end of the table.
-            let page = self
-                .buffer_manager
-                .get_page(table_name, current_page_id)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let mut rows = Vec::new();
+        while cursor.read_next_page(&mut self.buffer_manager, |page_id, item_id, row| {
+            rows.push((page_id, item_id, row));
+            Ok(())
+        })? {}
 
-            // The item id is the pointer's index, so enumerate before skipping deleted items
-            for (item_id, item_pointer) in page.item_pointers().enumerate() {
-                if item_pointer.is_deleted() {
-                    continue;
-                }
-
-                let offset = item_pointer.offset as usize - PageHeader::SIZE;
-                let length = item_pointer.length as usize;
-
-                let item_data = &page.data[offset..offset + length];
-                let decoded_row = self
-                    .tables
-                    .get(table_name)
-                    .unwrap()
-                    .schema()
-                    .decode_row(item_data)
-                    // TODO: Eventually return a SerializationError
-                    .expect("Row should be decoded");
-
-                found_rows.push((current_page_id, item_id as ItemId, decoded_row));
-            }
-        }
-
-        Ok(found_rows)
+        Ok(rows)
     }
 
     /// Executes a SQL query and returns the results.
@@ -484,12 +448,11 @@ impl Database {
         let mut physical_planner = PhysicalPlanner::new(&mut context);
         let mut executor = physical_planner.create_physical_plan(anayzed_plan)?;
 
-        let mut batches = Vec::new();
-        while let Some(batch) = executor.next()? {
-            batches.push(batch);
+        let mut rows = Vec::new();
+        while let Some(batch) = executor.next(&mut self.buffer_manager)? {
+            rows.extend(batch.rows);
         }
 
-        let rows = batches.into_iter().flat_map(|b| b.rows).collect();
         Ok(QueryResponse {
             columns,
             rows,

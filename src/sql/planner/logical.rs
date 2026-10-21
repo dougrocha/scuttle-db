@@ -27,7 +27,7 @@ pub enum LogicalPlan {
         alias: Option<String>,
 
         /// The table's schema as the analyzer saw it, so the node can state its output
-        /// without a catalog. Physical planning reads rows by `table_name` and ignores it.
+        /// without a catalog. Physical planning hands it to the scan, which decodes rows with it.
         schema: Schema,
     },
     /// Nested-loop join. Output row is the left row followed by the right row.
