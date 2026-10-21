@@ -31,6 +31,10 @@ pub enum DatabaseError {
     #[error("Invalid query: {0}")]
     InvalidQuery(String),
 
+    /// A write would break a constraint, such as a duplicate key in a UNIQUE column.
+    #[error("Constraint violation: {0}")]
+    ConstraintViolation(String),
+
     #[error("Unsupported Action")]
     Unsupported,
 }

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs::File,
     path::{Path, PathBuf},
 };
@@ -9,7 +10,9 @@ use crate::{
     ColumnConstraint, ColumnDef, DatabaseError, Value,
     db::{
         catalog::system_catalog::SystemCatalog,
-        table::{Table, cursor::TableCursor, row::Row, schema::Schema, table_def::TableDef},
+        table::{
+            Table, cursor::TableCursor, index::Ctid, row::Row, schema::Schema, table_def::TableDef,
+        },
     },
     sql::{
         analyzer::Analyzer,
@@ -170,7 +173,9 @@ impl Database {
             let tables = self.catalog.load_all_tables(&mut self.buffer_manager)?;
 
             for (name, schema) in tables {
-                self.tables.insert(name.clone(), TableDef { name, schema });
+                self.tables
+                    .insert(name.clone(), TableDef::new(name.clone(), schema));
+                self.rebuild_indexes(&name)?;
             }
         } else {
             println!("No catalog exists. Creates when adding a table");
@@ -203,6 +208,17 @@ impl Database {
     pub fn create_table(&mut self, name: &str, schema: Schema) -> Result<(), DatabaseError> {
         if self.table_exists(name) {
             return Err(DatabaseError::TableAlreadyExists(name.to_string()));
+        }
+
+        let primary_keys = schema
+            .columns
+            .iter()
+            .filter(|column| column.constraints.contains(&ColumnConstraint::PrimaryKey))
+            .count();
+        if primary_keys > 1 {
+            return Err(DatabaseError::InvalidQuery(format!(
+                "multiple primary keys for table {name} are not allowed"
+            )));
         }
 
         let _ = self
@@ -288,7 +304,10 @@ impl Database {
     ///
     /// Statements call this for every row and leave the writing to the flush at the end of
     /// [`Database::execute_query`], so each page is written once per statement, not once per row.
-    fn append_row(&mut self, table_name: &str, row: Row) -> Result<(PageId, ItemId)> {
+    ///
+    /// The row is added to the table's indexes too. Uniqueness is not checked here: callers
+    /// check every row of the statement first, see [`Database::check_unique`].
+    fn append_row(&mut self, table_name: &str, row: Row) -> Result<Ctid> {
         // Get schema first (separate borrow scope)
         let encoded_data = {
             let table = self.get_table(table_name)?;
@@ -302,7 +321,62 @@ impl Database {
         let item_id = free_page.add_data(&encoded_data)?;
         self.buffer_manager.mark_dirty(table_name, page_id);
 
+        for index in &mut self.get_table_mut(table_name)?.indexes {
+            index.insert(&row, (page_id, item_id));
+        }
+
         Ok((page_id, item_id))
+    }
+
+    /// Marks a row deleted and takes it out of the table's indexes. `row` must be the row
+    /// stored at `ctid`, which is how the index finds its entry.
+    fn delete_row(&mut self, table_name: &str, ctid: Ctid, row: &Row) -> Result<()> {
+        let (page_id, item_id) = ctid;
+        self.buffer_manager
+            .get_page(table_name, page_id)?
+            .delete_item(item_id)?;
+        self.buffer_manager.mark_dirty(table_name, page_id);
+
+        for index in &mut self.get_table_mut(table_name)?.indexes {
+            index.remove(row, ctid);
+        }
+
+        Ok(())
+    }
+
+    /// Fails if writing `new_rows` would break a UNIQUE or PRIMARY KEY column.
+    ///
+    /// `replacing` holds the rows the statement deletes first (an UPDATE's old versions).
+    /// Checked before anything is written, so a failing statement changes nothing.
+    fn check_unique(
+        &self,
+        table_name: &str,
+        new_rows: &[Row],
+        replacing: &BTreeSet<Ctid>,
+    ) -> Result<()> {
+        let table = self.get_table(table_name)?;
+        for index in &table.indexes {
+            let column_name = &table.schema.columns[index.column].name;
+            index.check_unique(column_name, new_rows, replacing)?;
+        }
+
+        Ok(())
+    }
+
+    /// Fills a table's indexes from its rows. Run when the database opens, since only
+    /// the indexes' existence is stored, not their entries.
+    fn rebuild_indexes(&mut self, table_name: &str) -> Result<()> {
+        if self.get_table(table_name)?.indexes.is_empty() {
+            return Ok(());
+        }
+
+        for (page_id, item_id, row) in self.get_rows_with_location(table_name)? {
+            for index in &mut self.get_table_mut(table_name)?.indexes {
+                index.insert(&row, (page_id, item_id));
+            }
+        }
+
+        Ok(())
     }
 
     /// Every live row of a table, with where it is stored.
@@ -494,16 +568,20 @@ impl Database {
                 new_row.values[*index] = Self::coerce_for_column(value, &schema.columns[*index])?;
             }
 
-            updates.push((page_id, item_id, new_row));
+            updates.push(((page_id, item_id), row, new_row));
         }
 
-        let rows_affected = updates.len();
-        for (page_id, item_id, new_row) in updates {
-            self.buffer_manager
-                .get_page(&table_name, page_id)?
-                .delete_item(item_id)?;
-            self.buffer_manager.mark_dirty(&table_name, page_id);
+        // A row may keep its own key, so the old versions don't count as duplicates
+        let replacing: BTreeSet<Ctid> = updates.iter().map(|(ctid, ..)| *ctid).collect();
+        let new_rows: Vec<Row> = updates
+            .iter()
+            .map(|(.., new_row)| new_row.clone())
+            .collect();
+        self.check_unique(&table_name, &new_rows, &replacing)?;
 
+        let rows_affected = updates.len();
+        for (ctid, old_row, new_row) in updates {
+            self.delete_row(&table_name, ctid, &old_row)?;
             self.append_row(&table_name, new_row)?;
         }
 
@@ -546,10 +624,7 @@ impl Database {
                 continue;
             }
 
-            self.buffer_manager
-                .get_page(&table_name, page_id)?
-                .delete_item(item_id)?;
-            self.buffer_manager.mark_dirty(&table_name, page_id);
+            self.delete_row(&table_name, (page_id, item_id), &row)?;
             rows_affected += 1;
         }
 
@@ -594,6 +669,10 @@ impl Database {
 
                     new_rows.push(Row::new(values));
                 }
+
+                context
+                    .database
+                    .check_unique(&table_name, &new_rows, &BTreeSet::new())?;
 
                 rows_affected = new_rows.len();
                 for row in new_rows {
@@ -1097,6 +1176,50 @@ mod tests {
         assert_eq!(db.affected("DELETE FROM wide WHERE id >= 4100"), Some(101));
         db.reopen();
         assert_eq!(count(&mut db), vec![vec![Value::Int64(4100)]]);
+    }
+
+    #[test]
+    fn test_unique_columns_reject_duplicates_and_change_nothing() {
+        let mut db = TestDb::new("unique");
+        db.execute("CREATE TABLE acct (id INT PRIMARY KEY, email TEXT UNIQUE, note TEXT)");
+        db.execute("INSERT INTO acct VALUES (1, 'a@x', 'one'), (2, 'b@x', 'two')");
+        let ids = |db: &mut TestDb| db.query("SELECT id FROM acct ORDER BY id");
+        let both = vec![vec![Value::Int64(1)], vec![Value::Int64(2)]];
+
+        // Against stored rows, within one statement, and on either unique column. A failing
+        // statement writes none of its rows.
+        assert!(db.fails("INSERT INTO acct VALUES (3, 'c@x', ''), (1, 'd@x', '')"));
+        assert!(db.fails("INSERT INTO acct VALUES (3, 'c@x', ''), (3, 'd@x', '')"));
+        assert!(db.fails("INSERT INTO acct VALUES (3, 'a@x', '')"));
+        assert_eq!(ids(&mut db), both);
+
+        // NULL is not a key, so a UNIQUE column holds any number of them
+        db.execute("INSERT INTO acct VALUES (3, NULL, ''), (4, NULL, '')");
+        db.execute("DELETE FROM acct WHERE id >= 3");
+
+        // A row may keep its key, and keys may move as long as they stay distinct
+        db.execute("UPDATE acct SET note = 'same key' WHERE id = 1");
+        db.execute("UPDATE acct SET id = id + 1");
+        assert_eq!(
+            ids(&mut db),
+            vec![vec![Value::Int64(2)], vec![Value::Int64(3)]]
+        );
+        assert!(db.fails("UPDATE acct SET id = 7"));
+
+        // A deleted key is free again, and the index comes back after a restart
+        db.execute("DELETE FROM acct WHERE id = 3");
+        db.execute("INSERT INTO acct VALUES (3, 'b2@x', '')");
+        db.reopen();
+        assert!(db.fails("INSERT INTO acct VALUES (3, 'z@x', '')"));
+        assert!(db.fails("INSERT INTO acct VALUES (9, 'a@x', '')"));
+        db.execute("INSERT INTO acct VALUES (9, 'z@x', '')");
+    }
+
+    #[test]
+    fn test_create_table_rejects_two_primary_keys() {
+        let mut db = TestDb::new("two-pks");
+        assert!(db.fails("CREATE TABLE t (a INT PRIMARY KEY, b INT PRIMARY KEY)"));
+        assert!(db.fails("SELECT * FROM t"));
     }
 
     #[test]
