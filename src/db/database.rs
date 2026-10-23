@@ -57,24 +57,45 @@ impl std::fmt::Display for QueryResponse {
             return write!(f, "OK");
         }
 
-        let separator = "-".repeat(8 + self.columns.len() * 15);
+        // Laid out like psql: each column as wide as its widest value
+        let cells: Vec<Vec<String>> = self
+            .rows
+            .iter()
+            .map(|row| row.values.iter().map(Value::to_string).collect())
+            .collect();
+        let widths: Vec<usize> = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                cells
+                    .iter()
+                    .filter_map(|row| row.get(i))
+                    .chain([name])
+                    .map(|cell| cell.chars().count())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
 
-        writeln!(f, "{separator}")?;
-        for name in &self.columns {
-            write!(f, " | {name: <12}")?;
+        let write_line = |f: &mut std::fmt::Formatter<'_>, cells: &[String]| {
+            let padded: Vec<String> = cells
+                .iter()
+                .zip(&widths)
+                .map(|(cell, &width)| format!(" {cell:<width$} "))
+                .collect();
+            writeln!(f, "{}", padded.join("|").trim_end())
+        };
+
+        write_line(f, &self.columns)?;
+        let rule: Vec<String> = widths.iter().map(|width| "-".repeat(width + 2)).collect();
+        writeln!(f, "{}", rule.join("+"))?;
+        for row in &cells {
+            write_line(f, row)?;
         }
-        writeln!(f)?;
-        writeln!(f, "{separator}")?;
 
-        for row in &self.rows {
-            for value in &row.values {
-                write!(f, " | {: <12}", value.to_string())?;
-            }
-            writeln!(f)?;
-        }
-
-        writeln!(f, "{separator}")?;
-        write!(f, "({} rows)", self.rows.len())
+        let noun = if cells.len() == 1 { "row" } else { "rows" };
+        write!(f, "({} {noun})", cells.len())
     }
 }
 
@@ -1354,6 +1375,33 @@ mod tests {
                 .unwrap()
                 .rows
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_response_columns_widen_to_fit_their_values() {
+        let response = QueryResponse {
+            columns: vec!["id".into(), "name".into()],
+            rows: vec![
+                Row::new(vec![
+                    Value::Int64(1),
+                    Value::Text("a much longer name".into()),
+                ]),
+                Row::new(vec![Value::Int64(123456), Value::Null]),
+            ],
+            rows_affected: None,
+        };
+
+        assert_eq!(
+            response.to_string(),
+            [
+                " id     | name",
+                "--------+--------------------",
+                " 1      | a much longer name",
+                " 123456 | NULL",
+                "(2 rows)",
+            ]
+            .join("\n")
         );
     }
 

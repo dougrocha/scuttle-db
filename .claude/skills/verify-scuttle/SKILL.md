@@ -76,7 +76,7 @@ How the REPL behaves:
 
 - It runs one statement per line. A trailing `;` is optional. A second statement on the same line is a parse error, and a statement cannot span lines. A blank line prints the prompt again. `scv drive` drops blank lines anyway, so the transcript stays positional.
 - The Nth `DB: ` prompt comes before the Nth statement's output.
-- Success prints `OK` (CREATE), `N row(s) affected` (INSERT, UPDATE, DELETE), or a dashed table that ends `(N rows)` (SELECT). NULL prints as `NULL`.
+- Success prints `OK` (CREATE), `N row(s) affected` (INSERT, UPDATE, DELETE), or a table that ends `(N rows)`, or `(1 row)` for one row (SELECT). NULL prints as `NULL`.
 - An error prints to stderr as a miette report that starts `  x `, for example `  x Table not found: nope`. The session continues. `scv drive` merges stderr into the transcript.
 - With piped stdin, the exit code is 1 when any statement failed and 0 otherwise. On a terminal it is always 0.
 - `exit`, `:q`, and EOF end the session and print `Exiting Scuttle`. `exit` and `:q` must be the whole line, in lower case. `scv drive` appends `exit` and wraps the run in `timeout 20`. Exit code 124 without `--kill-after` means it hung.
