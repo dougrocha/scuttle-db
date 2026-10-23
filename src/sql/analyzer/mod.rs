@@ -789,18 +789,3 @@ impl<'a, 'db> Analyzer<'a, 'db> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::{ColumnDef, Schema, core::types::DataType};
-
-    /// Creates a test schema with common columns
-    fn create_test_schema() -> Schema {
-        Schema::new(vec![
-            ColumnDef::new("id", DataType::Int64),
-            ColumnDef::new("name", DataType::Text),
-            ColumnDef::new("email", DataType::Text),
-            ColumnDef::new("age", DataType::Int64),
-        ])
-    }
-}

@@ -219,9 +219,11 @@ impl Page {
 
     pub fn item_pointers(&self) -> impl Iterator<Item = ItemPointer> {
         self.data
-            .chunks_exact(ItemPointer::SIZE)
+            .as_chunks::<{ ItemPointer::SIZE }>()
+            .0
+            .iter()
             .take(self.header.item_count as usize)
-            .map(|chunk| ItemPointer::from_bytes(chunk.try_into().unwrap()))
+            .map(|chunk| ItemPointer::from_bytes(*chunk))
     }
 }
 

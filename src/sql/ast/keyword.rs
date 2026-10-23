@@ -79,11 +79,4 @@ impl Keyword {
     pub fn is_bool_literal(self) -> bool {
         matches!(self, Self::True | Self::False)
     }
-
-    pub fn is_type(self) -> bool {
-        matches!(
-            self,
-            Self::Integer | Self::Float | Self::Text | Self::Timestamp | Self::Date | Self::Boolean
-        )
-    }
 }

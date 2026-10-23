@@ -19,7 +19,7 @@ pub enum SelectTarget {
 #[derive(Debug, Clone)]
 pub struct SelectList(pub Vec<SelectTarget>);
 
-impl<'src> std::ops::Deref for SelectList {
+impl std::ops::Deref for SelectList {
     type Target = Vec<SelectTarget>;
 
     fn deref(&self) -> &Self::Target {

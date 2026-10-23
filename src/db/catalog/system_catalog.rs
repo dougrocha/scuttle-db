@@ -1,7 +1,7 @@
 use miette::{IntoDiagnostic, Result, miette};
 
 use crate::{
-    ColumnDef, DataType, DatabaseError,
+    ColumnDef, DataType,
     core::types::Value,
     db::table::{Table, row::Row, schema::Schema},
     storage::{buffer_pool::BufferPool, page::PageHeader},
@@ -96,10 +96,6 @@ impl SystemCatalog {
 
         Ok(tables)
     }
-
-    pub fn remove_table(name: &str) -> Result<bool> {
-        todo!()
-    }
 }
 
 impl Default for SystemCatalog {
@@ -115,13 +111,5 @@ impl Table for SystemCatalog {
 
     fn schema(&self) -> &Schema {
         &self.schema
-    }
-
-    fn insert_row(&mut self, _row: Row) -> Result<(), DatabaseError> {
-        todo!()
-    }
-
-    fn get_rows(&self, _column: &str, _value: Value) -> Result<Vec<Row>, DatabaseError> {
-        todo!()
     }
 }

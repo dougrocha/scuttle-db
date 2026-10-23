@@ -1,8 +1,4 @@
-use miette::Result;
-
-use crate::{DatabaseError, core::types::Value};
-
-use super::{Table, index::TableIndex, row::Row, schema::Schema};
+use super::{Table, index::TableIndex, schema::Schema};
 
 /// A table (relation) with a name and schema.
 ///
@@ -41,40 +37,5 @@ impl Table for TableDef {
 
     fn schema(&self) -> &Schema {
         &self.schema
-    }
-
-    fn insert_row(&mut self, row: Row) -> Result<(), DatabaseError> {
-        if row.values.len() != self.schema.columns.len() {
-            return Err(DatabaseError::TypeMismatch(
-                "Row length doesn't match schema".to_string(),
-            ));
-        }
-
-        for (i, value) in row.values.iter().enumerate() {
-            let column = &self.schema.columns[i];
-
-            match value {
-                Value::Null => {
-                    if !column.is_nullable() {
-                        return Err(DatabaseError::TypeMismatch(format!(
-                            "Column {} cannot be null",
-                            column.name
-                        )));
-                    }
-                }
-                _ => {
-                    if let Err(msg) = value.is_compatible_with(&column.data_type) {
-                        return Err(DatabaseError::TypeMismatch(msg));
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn get_rows(&self, _column: &str, _value: Value) -> Result<Vec<Row>, DatabaseError> {
-        // Implementation for retrieving rows from the relation
-        todo!()
     }
 }

@@ -12,14 +12,6 @@ use crate::{
     storage::page::{Page, PageId, PageType},
 };
 
-#[derive(Debug)]
-pub struct TableFile {
-    pub table_id: u32,
-    pub table_name: String,
-    pub file_path: PathBuf,
-    pub page_count: u32,
-}
-
 #[derive(Debug, Default)]
 pub struct BufferPool {
     pool: HashMap<String, HashMap<PageId, Page>>,
