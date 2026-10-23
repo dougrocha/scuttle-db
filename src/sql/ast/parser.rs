@@ -41,7 +41,10 @@ impl<'src> SqlParser<'src> {
     /// Parses the query and returns the top-level AST node (Statement).
     pub fn parse(&mut self) -> Result<Statement> {
         let statement = if self.consume_if(Token::Keyword(Keyword::Explain)) {
-            Statement::Explain(Box::new(self.parse_statement()?))
+            Statement::Explain {
+                analyze: self.consume_if(Token::Keyword(Keyword::Analyze)),
+                statement: Box::new(self.parse_statement()?),
+            }
         } else {
             self.parse_statement()?
         };

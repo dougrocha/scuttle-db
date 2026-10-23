@@ -12,8 +12,12 @@ pub enum Statement {
     Update(UpdateStatement),
     Delete(DeleteStatement),
 
-    /// `EXPLAIN <statement>`: describe the plan instead of running it.
-    Explain(Box<Statement>),
+    /// `EXPLAIN [ANALYZE] <statement>`: describe the plan instead of running it. With
+    /// ANALYZE, run it too and report what each node produced.
+    Explain {
+        statement: Box<Statement>,
+        analyze: bool,
+    },
 }
 
 #[derive(Debug, Clone)]

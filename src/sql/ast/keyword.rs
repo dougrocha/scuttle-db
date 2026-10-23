@@ -73,6 +73,7 @@ pub enum Keyword {
     Distinct,
 
     Explain,
+    Analyze,
 }
 
 impl Keyword {

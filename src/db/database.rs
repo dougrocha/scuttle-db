@@ -5,6 +5,7 @@ use std::{
 };
 
 use miette::Result;
+use web_time::{Duration, Instant};
 
 use crate::{
     ColumnConstraint, ColumnDef, DatabaseError, Value,
@@ -439,14 +440,16 @@ impl Database {
             Statement::Insert(insert_stmt) => self.handle_insert(insert_stmt),
             Statement::Update(update_stmt) => self.handle_update(update_stmt),
             Statement::Delete(delete_stmt) => self.handle_delete(delete_stmt),
-            Statement::Explain(statement) => self.describe(*statement).map(|plan| QueryResponse {
-                columns: vec!["QUERY PLAN".to_string()],
-                rows: plan
-                    .lines()
-                    .map(|line| Row::new(vec![Value::Text(line.to_string())]))
-                    .collect(),
-                rows_affected: None,
-            }),
+            Statement::Explain { statement, analyze } => self
+                .explain_statement(*statement, analyze)
+                .map(|plan| QueryResponse {
+                    columns: vec!["QUERY PLAN".to_string()],
+                    rows: plan
+                        .lines()
+                        .map(|line| Row::new(vec![Value::Text(line.to_string())]))
+                        .collect(),
+                    rows_affected: None,
+                }),
         };
 
         // Write the pages this statement changed. This runs even when the statement failed,
@@ -459,6 +462,8 @@ impl Database {
     ///
     /// Parses and analyzes the statement into a logical plan, then renders the plan
     /// as an indented tree, one node per line, similar to Postgres' `EXPLAIN`.
+    ///
+    /// `EXPLAIN ANALYZE SELECT ...` runs the query as well and adds each node's rows and time.
     ///
     /// # Arguments
     ///
@@ -491,9 +496,58 @@ impl Database {
             .map_err(|e| DatabaseError::InvalidQuery(format!("Parse error: {e}")))?;
 
         match statement {
-            Statement::Explain(statement) => self.describe(*statement),
+            Statement::Explain { statement, analyze } => {
+                self.explain_statement(*statement, analyze)
+            }
             statement => self.describe(statement),
         }
+    }
+
+    fn explain_statement(&mut self, statement: Statement, analyze: bool) -> Result<String> {
+        match (statement, analyze) {
+            (Statement::Select(select_stmt), true) => self.explain_analyze(select_stmt),
+            (_, true) => Err(DatabaseError::InvalidQuery(
+                "EXPLAIN ANALYZE only supports SELECT, since it runs the statement".into(),
+            )
+            .into()),
+            (statement, false) => self.describe(statement),
+        }
+    }
+
+    /// Runs `select_stmt` and returns its plan with the rows and time of each node, like
+    /// Postgres' `EXPLAIN ANALYZE`. A node's time includes the time of the nodes under it.
+    fn explain_analyze(&mut self, select_stmt: statement::SelectStatement) -> Result<String> {
+        let mut context = CatalogContext::new(self);
+        let mut plan = Analyzer::new(&context).analyze_select(select_stmt)?;
+        optimizer::use_indexes(&mut plan, &context.database.tables);
+        let tree = explain::explain(&plan);
+
+        // Building the plan includes the index lookup, so it is timed apart from running it
+        let start = Instant::now();
+        let mut planner = PhysicalPlanner::profiled(&mut context);
+        let mut executor = planner.create_physical_plan(plan)?;
+        let profile = planner.into_profile();
+        let planning = start.elapsed();
+
+        let start = Instant::now();
+        while executor.next(&mut self.buffer_manager)?.is_some() {}
+        let execution = start.elapsed();
+
+        let ms = |time: Duration| time.as_secs_f64() * 1000.0;
+        let mut lines: Vec<String> = tree
+            .lines()
+            .zip(&profile)
+            .map(|(line, stats)| {
+                format!(
+                    "{line} (rows={} time={:.3} ms)",
+                    stats.rows.get(),
+                    ms(stats.time.get())
+                )
+            })
+            .collect();
+        lines.push(format!("Planning time: {:.3} ms", ms(planning)));
+        lines.push(format!("Execution time: {:.3} ms", ms(execution)));
+        Ok(lines.join("\n"))
     }
 
     /// The plan for `statement`, rendered as [`Database::explain`] returns it.
@@ -509,7 +563,7 @@ impl Database {
             Statement::Insert(insert_stmt) => analyzer.analyze_insert(insert_stmt)?,
             Statement::Update(update_stmt) => analyzer.analyze_update(update_stmt)?,
             Statement::Delete(delete_stmt) => analyzer.analyze_delete(delete_stmt)?,
-            Statement::Explain(_) => {
+            Statement::Explain { .. } => {
                 return Err(DatabaseError::InvalidQuery("cannot EXPLAIN an EXPLAIN".into()).into());
             }
         };
@@ -1372,6 +1426,60 @@ mod tests {
         assert!(
             db.db
                 .execute_query("SELECT * FROM item")
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_explain_analyze_counts_the_rows_each_node_produced() {
+        let mut db = TestDb::new("explain-analyze");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, qty INT)");
+        let values: Vec<String> = (1..=100).map(|id| format!("({id}, 0)")).collect();
+        db.execute(&format!("INSERT INTO item VALUES {}", values.join(", ")));
+
+        // Times vary between runs, so only the text before them is compared
+        let analyze = |db: &mut TestDb, filter: &str| -> Vec<String> {
+            let sql = format!("EXPLAIN ANALYZE SELECT qty FROM item WHERE {filter}");
+            let response = db.db.execute_query(&sql).unwrap();
+            response
+                .rows
+                .iter()
+                .map(|row| {
+                    let line = row.values[0].to_string();
+                    match line.split_once(" time=") {
+                        Some((before, _)) => before.to_string(),
+                        None => line.split_once(": ").unwrap().0.to_string(),
+                    }
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            analyze(&mut db, "id > 80"),
+            [
+                "Projection: qty (rows=20",
+                "  Filter: id > 80 (rows=20",
+                "    Scan: item (rows=100",
+                "Planning time",
+                "Execution time",
+            ]
+        );
+        assert_eq!(
+            analyze(&mut db, "id = 5")[2],
+            "    IndexScan: item (id = 5) (rows=1"
+        );
+
+        // It runs the statement, so writes are refused rather than applied
+        assert!(
+            db.db
+                .execute_query("EXPLAIN ANALYZE INSERT INTO item VALUES (101, 0)")
+                .is_err()
+        );
+        assert!(
+            db.db
+                .execute_query("SELECT * FROM item WHERE id = 101")
                 .unwrap()
                 .rows
                 .is_empty()

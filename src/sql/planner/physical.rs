@@ -1,6 +1,7 @@
-use std::cmp::Ordering;
+use std::{cell::Cell, cmp::Ordering, rc::Rc, time::Duration};
 
 use miette::{Result, miette};
+use web_time::Instant;
 
 use crate::{
     Schema, Value,
@@ -24,17 +25,51 @@ use crate::{
 
 pub struct PhysicalPlanner<'a, 'db> {
     context: &'a mut CatalogContext<'db>,
+
+    /// Set by [`PhysicalPlanner::profiled`]: one entry per node, in the order EXPLAIN
+    /// prints them.
+    profile: Option<Vec<Rc<NodeStats>>>,
 }
 
 impl<'a, 'db> PhysicalPlanner<'a, 'db> {
     pub(crate) fn new(context: &'a mut CatalogContext<'db>) -> Self {
-        Self { context }
+        Self {
+            context,
+            profile: None,
+        }
+    }
+
+    /// A planner whose nodes count their rows and time, for EXPLAIN ANALYZE. Read the
+    /// counts with [`PhysicalPlanner::into_profile`] after the plan has run.
+    pub(crate) fn profiled(context: &'a mut CatalogContext<'db>) -> Self {
+        Self {
+            context,
+            profile: Some(Vec::new()),
+        }
+    }
+
+    /// The stats of every node built so far, parent before children (the order
+    /// EXPLAIN prints them). Empty unless the planner is [`PhysicalPlanner::profiled`].
+    pub(crate) fn into_profile(self) -> Vec<Rc<NodeStats>> {
+        self.profile.unwrap_or_default()
     }
 
     pub fn create_physical_plan(
         &mut self,
         analyzed_plan: LogicalPlan,
     ) -> Result<Box<dyn ExecutionNode>> {
+        // The slot is taken before the children are built, so parents come first
+        let Some(profile) = &mut self.profile else {
+            return self.build_node(analyzed_plan);
+        };
+        let stats = Rc::new(NodeStats::default());
+        profile.push(Rc::clone(&stats));
+
+        let child = self.build_node(analyzed_plan)?;
+        Ok(Box::new(ProfiledExec { child, stats }))
+    }
+
+    fn build_node(&mut self, analyzed_plan: LogicalPlan) -> Result<Box<dyn ExecutionNode>> {
         match analyzed_plan {
             LogicalPlan::Scan {
                 table_name,
@@ -161,6 +196,36 @@ pub struct RecordBatch {
 /// it, and that lets two scans of the same table share it (a self-join).
 pub trait ExecutionNode: std::fmt::Debug {
     fn next(&mut self, pool: &mut BufferPool) -> Result<Option<RecordBatch>>;
+}
+
+/// What one node of a profiled plan produced.
+#[derive(Debug, Default)]
+pub(crate) struct NodeStats {
+    pub(crate) rows: Cell<usize>,
+
+    /// Time spent in the node's `next`, including the children it pulled from.
+    pub(crate) time: Cell<Duration>,
+}
+
+/// Wraps a node and records its rows and time in `stats`.
+#[derive(Debug)]
+struct ProfiledExec {
+    child: Box<dyn ExecutionNode>,
+    stats: Rc<NodeStats>,
+}
+impl ExecutionNode for ProfiledExec {
+    fn next(&mut self, pool: &mut BufferPool) -> Result<Option<RecordBatch>> {
+        let start = Instant::now();
+        let batch = self.child.next(pool)?;
+        self.stats.time.set(self.stats.time.get() + start.elapsed());
+
+        if let Some(batch) = &batch {
+            self.stats
+                .rows
+                .set(self.stats.rows.get() + batch.rows.len());
+        }
+        Ok(batch)
+    }
 }
 
 /// Full table scan. It reads and decodes pages when a batch is asked for, not up front.
