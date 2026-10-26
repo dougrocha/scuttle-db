@@ -79,6 +79,8 @@ A table bigger than RAM crashes on the first scan. This phase puts a cap on each
 
 ### 2.1 Buffer pool eviction
 
+**Done.** Clock sweep with a usage count up to 5, the dirty flag on each slot, `get_page_mut` marks pages dirty, `--cache-pages` (default 16,384), and page hits and reads per node in EXPLAIN ANALYZE. On 1M rows with no index, peak memory went from 41 MB to 4 MB with a 100-page cache. The ~170 MB left with `users_pk` is its in-memory index, which Phase 3 moves to pages.
+
 | Policy | Used by | Trade-off |
 |---|---|---|
 | LRU | textbooks | A single big scan pushes out every useful page ("sequential flooding") |

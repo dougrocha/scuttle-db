@@ -31,7 +31,7 @@ use crate::{
         },
     },
     storage::{
-        buffer_pool::BufferPool,
+        buffer_pool::{BufferPool, DEFAULT_CACHE_PAGES},
         page::{ItemId, PageId},
     },
 };
@@ -144,12 +144,18 @@ impl Database {
     /// with no tables loaded. Call [`Database::initialize`] after creation to
     /// set up any necessary system catalogs (currently a no-op).
     pub fn new<P: AsRef<Path>>(data_directory: P) -> Self {
+        Self::with_cache_pages(data_directory, DEFAULT_CACHE_PAGES)
+    }
+
+    /// Like [`Database::new`], but caches at most `pages` pages of 8 KB in memory. Pages
+    /// past that are written back if changed and dropped, then read again when needed.
+    pub fn with_cache_pages<P: AsRef<Path>>(data_directory: P, pages: usize) -> Self {
         let data_dir = data_directory.as_ref().to_path_buf();
         std::fs::create_dir_all(&data_dir).ok();
 
         Self {
             tables: std::collections::BTreeMap::default(),
-            buffer_manager: BufferPool::new(&data_dir),
+            buffer_manager: BufferPool::with_capacity(&data_dir, pages),
             catalog: SystemCatalog::new(),
 
             data_directory: Some(data_dir),
@@ -475,7 +481,7 @@ impl Database {
     /// Parses and analyzes the statement into a logical plan, then renders the plan
     /// as an indented tree, one node per line, similar to Postgres' `EXPLAIN`.
     ///
-    /// `EXPLAIN ANALYZE SELECT ...` runs the query as well and adds each node's rows and time.
+    /// `EXPLAIN ANALYZE SELECT ...` runs the query as well and adds each node's rows, time and page cache hits and reads.
     ///
     /// # Arguments
     ///
@@ -551,9 +557,11 @@ impl Database {
             .zip(&profile)
             .map(|(line, stats)| {
                 format!(
-                    "{line} (rows={} time={:.3} ms)",
+                    "{line} (rows={} time={:.3} ms pages: hit={} read={})",
                     stats.rows.get(),
-                    ms(stats.time.get())
+                    ms(stats.time.get()),
+                    stats.hits.get(),
+                    stats.reads.get()
                 )
             })
             .collect();
@@ -1557,6 +1565,60 @@ mod tests {
                 assert_eq!(db.query(&sql), expected, "{sql}");
             }
         }
+    }
+
+    #[test]
+    fn test_a_tiny_page_cache_gives_the_same_answers() {
+        let dir = std::env::temp_dir().join(format!("scuttle-tiny-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let open = || {
+            let mut db = Database::with_cache_pages(&dir, 3);
+            db.initialize().unwrap();
+            db
+        };
+        let query = |db: &mut Database, sql: &str| -> Vec<Vec<Value>> {
+            let response = db.execute_query(sql).unwrap();
+            response.rows.into_iter().map(|row| row.values).collect()
+        };
+
+        let mut db = open();
+        db.execute_query("CREATE TABLE item (id INT PRIMARY KEY, note TEXT)")
+            .unwrap();
+        // About 40 pages of rows, so a 3-page cache evicts on nearly every page
+        let note = "x".repeat(200);
+        for chunk in (0..1500).collect::<Vec<_>>().chunks(100) {
+            let values: Vec<String> = chunk.iter().map(|id| format!("({id}, '{note}')")).collect();
+            db.execute_query(&format!("INSERT INTO item VALUES {}", values.join(", ")))
+                .unwrap();
+        }
+        db.execute_query("UPDATE item SET note = 'changed' WHERE id >= 1000")
+            .unwrap();
+        db.execute_query("DELETE FROM item WHERE id < 100").unwrap();
+
+        for reopened in [false, true] {
+            if reopened {
+                db = open();
+            }
+            assert_eq!(
+                query(&mut db, "SELECT count(*) FROM item"),
+                [[Value::Int64(1400)]]
+            );
+            assert_eq!(
+                query(&mut db, "SELECT count(*) FROM item WHERE note = 'changed'"),
+                [[Value::Int64(500)]]
+            );
+            // Through the index, which fetches each row's page by itself
+            assert_eq!(
+                query(&mut db, "SELECT id, note FROM item WHERE id = 1234"),
+                [[Value::Int64(1234), Value::Text("changed".into())]]
+            );
+            assert!(query(&mut db, "SELECT id FROM item WHERE id = 50").is_empty());
+        }
+        assert!(
+            db.buffer_manager.stats().reads > 40,
+            "{:?}",
+            db.buffer_manager.stats()
+        );
     }
 
     #[test]

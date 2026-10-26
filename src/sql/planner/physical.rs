@@ -221,6 +221,11 @@ pub(crate) struct NodeStats {
 
     /// Time spent in the node's `next`, including the children it pulled from.
     pub(crate) time: Cell<Duration>,
+
+    /// Page requests the cache answered from memory, and pages it read from disk, during
+    /// the node's `next`. Like `time`, these include the children.
+    pub(crate) hits: Cell<u64>,
+    pub(crate) reads: Cell<u64>,
 }
 
 /// Wraps a node and records its rows and time in `stats`.
@@ -231,9 +236,16 @@ struct ProfiledExec {
 }
 impl ExecutionNode for ProfiledExec {
     fn next(&mut self, ctx: &mut ExecCtx<'_>) -> Result<Option<RecordBatch>> {
-        let start = Instant::now();
+        let (start, cache) = (Instant::now(), ctx.pool.stats());
         let batch = self.child.next(ctx)?;
         self.stats.time.set(self.stats.time.get() + start.elapsed());
+
+        let after = ctx.pool.stats();
+        let stats = &self.stats;
+        stats.hits.set(stats.hits.get() + after.hits - cache.hits);
+        stats
+            .reads
+            .set(stats.reads.get() + after.reads - cache.reads);
 
         if let Some(batch) = &batch {
             self.stats

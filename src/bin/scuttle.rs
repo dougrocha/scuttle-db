@@ -2,20 +2,21 @@ use std::io::{IsTerminal, stderr, stdin, stdout};
 use std::process::ExitCode;
 
 use miette::{IntoDiagnostic, Result};
-use scuttle_db::{Database, run_repl};
+use scuttle_db::{DEFAULT_CACHE_PAGES, Database, run_repl};
 
 const USAGE: &str = "\
-Usage: scuttle-db [--data <dir> | --in-memory]
+Usage: scuttle-db [--data <dir> [--cache-pages <n>] | --in-memory]
 
 Options:
-  -d, --data <dir>  Store tables in <dir> (default: ./db)
-      --in-memory   Keep all data in memory; nothing is written to disk
-  -h, --help        Print this help
+  -d, --data <dir>         Store tables in <dir> (default: ./db)
+      --cache-pages <n>    Keep at most <n> 8 KB pages in memory (default: 16384, 128 MB)
+      --in-memory          Keep all data in memory; nothing is written to disk
+  -h, --help               Print this help
 ";
 
 /// Where the database keeps its tables, as chosen on the command line.
 enum Storage {
-    Dir(String),
+    Dir { dir: String, cache_pages: usize },
     InMemory,
 }
 
@@ -23,6 +24,7 @@ enum Storage {
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Storage>, String> {
     let mut data = None;
     let mut in_memory = false;
+    let mut cache_pages = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
@@ -32,16 +34,27 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Storage>,
                         .ok_or_else(|| format!("{arg} needs a directory"))?,
                 );
             }
+            "--cache-pages" => {
+                let n = args.next().ok_or_else(|| format!("{arg} needs a number"))?;
+                match n.parse() {
+                    Ok(n) if n > 0 => cache_pages = Some(n),
+                    _ => return Err(format!("{arg} needs a positive number, got {n}")),
+                }
+            }
             "--in-memory" => in_memory = true,
             _ => return Err(format!("unknown argument: {arg}")),
         }
     }
     match (data, in_memory) {
         (Some(_), true) => Err("--data and --in-memory cannot be combined".to_string()),
+        (None, true) if cache_pages.is_some() => {
+            Err("--cache-pages has no effect with --in-memory, which caches every page".to_string())
+        }
         (None, true) => Ok(Some(Storage::InMemory)),
-        (data, false) => Ok(Some(Storage::Dir(
-            data.unwrap_or_else(|| "./db".to_string()),
-        ))),
+        (data, false) => Ok(Some(Storage::Dir {
+            dir: data.unwrap_or_else(|| "./db".to_string()),
+            cache_pages: cache_pages.unwrap_or(DEFAULT_CACHE_PAGES),
+        })),
     }
 }
 
@@ -73,7 +86,7 @@ fn main() -> Result<ExitCode> {
     miette::set_panic_hook();
 
     let mut db = match storage {
-        Storage::Dir(dir) => Database::new(dir),
+        Storage::Dir { dir, cache_pages } => Database::with_cache_pages(dir, cache_pages),
         Storage::InMemory => Database::in_memory(),
     };
     db.initialize().expect("Failed to init catalog");

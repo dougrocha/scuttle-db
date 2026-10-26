@@ -17,3 +17,4 @@ pub use db::{
     },
 };
 pub use repl::run_repl;
+pub use storage::buffer_pool::DEFAULT_CACHE_PAGES;
