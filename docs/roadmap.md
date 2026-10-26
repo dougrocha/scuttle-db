@@ -23,7 +23,7 @@ Phase 0  Foundations ──┬── Phase 1  Top-N
 
 | Step | Done when |
 |---|---|
-| 0.1 Commit a benchmark script (`scripts/bench/`) that generates the 1M-row tables and runs queries in interleaved rounds. `/tmp` got wiped once already. | `scripts/bench/run.sh` prints the median time per query. |
+| 0.1 Commit a benchmark (`examples/bench/`) that generates the 1M-row tables and runs queries in interleaved rounds, in one process so the index rebuild on open isn't timed. `/tmp` got wiped once already. | `cargo run --release --example bench -- run <dir>` prints the median time per query. |
 | 0.2 Pass an execution context to `next()`: `ExecCtx { pool, tables }`. Nodes can then read an index while running, not only while being built. Features 3, 4 and 5 need this. | All tests pass, and EXPLAIN ANALYZE output is unchanged. |
 | 0.3 Make catalog rows deletable, then make `drop_table` delete its catalog row and file. Today it only forgets the table in memory, so the table comes back after a restart. | A test drops a table, reopens the database, and finds the table gone. |
 
