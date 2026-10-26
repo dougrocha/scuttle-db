@@ -533,7 +533,7 @@ impl Database {
     fn explain_analyze(&mut self, select_stmt: statement::SelectStatement) -> Result<String> {
         let mut context = CatalogContext::new(self);
         let mut plan = Analyzer::new(&context).analyze_select(select_stmt)?;
-        optimizer::use_indexes(&mut plan, &context.database.tables);
+        optimizer::optimize(&mut plan, &context.database.tables);
         let tree = explain::explain(&plan);
 
         // Building the plan includes the index lookup, so it is timed apart from running it
@@ -582,7 +582,7 @@ impl Database {
             }
         };
 
-        optimizer::use_indexes(&mut plan, &context.database.tables);
+        optimizer::optimize(&mut plan, &context.database.tables);
         Ok(explain::explain(&plan))
     }
 
@@ -619,7 +619,7 @@ impl Database {
         let mut context = CatalogContext::new(self);
         let analyzer = Analyzer::new(&context);
         let mut anayzed_plan = analyzer.analyze_select(select_stmt)?;
-        optimizer::use_indexes(&mut anayzed_plan, &context.database.tables);
+        optimizer::optimize(&mut anayzed_plan, &context.database.tables);
         let columns = anayzed_plan.output_schema().names();
 
         // TODO: Eventually add a optimizer here for logical_plan.
@@ -1521,6 +1521,42 @@ mod tests {
         db.execute("INSERT INTO item VALUES (1)");
         assert_eq!(db.query("SELECT * FROM item"), [[Value::Int64(1)]]);
         assert!(db.db.drop_table("nope").is_err());
+    }
+
+    #[test]
+    fn test_top_n_returns_the_same_rows_as_a_full_sort() {
+        let mut db = TestDb::new("top-n");
+        db.execute("CREATE TABLE item (id INT, grp INT, tag TEXT)");
+        // Few distinct values, so most rows tie and only input order tells them apart
+        let values: Vec<String> = (0..300)
+            .map(|id| {
+                let tag = if id % 5 == 0 {
+                    "NULL".to_string()
+                } else {
+                    format!("'t{}'", id % 3)
+                };
+                format!("({id}, {}, {tag})", (id * 7) % 4)
+            })
+            .collect();
+        db.execute(&format!("INSERT INTO item VALUES {}", values.join(", ")));
+
+        for order in ["grp", "grp DESC", "tag", "tag DESC, grp", "grp, tag DESC"] {
+            let sorted = db.query(&format!("SELECT id FROM item ORDER BY {order}"));
+            for (limit, offset) in [
+                (0, 0),
+                (1, 0),
+                (10, 0),
+                (10, 25),
+                (299, 1),
+                (500, 0),
+                (5, 298),
+            ] {
+                let sql =
+                    format!("SELECT id FROM item ORDER BY {order} LIMIT {limit} OFFSET {offset}");
+                let expected: Vec<_> = sorted.iter().skip(offset).take(limit).cloned().collect();
+                assert_eq!(db.query(&sql), expected, "{sql}");
+            }
+        }
     }
 
     #[test]

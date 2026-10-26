@@ -1,4 +1,4 @@
-use std::{cell::Cell, cmp::Ordering, rc::Rc, time::Duration};
+use std::{cell::Cell, cmp::Ordering, collections::BinaryHeap, rc::Rc, time::Duration};
 
 use miette::{Result, miette};
 use web_time::Instant;
@@ -137,6 +137,16 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                 Ok(Box::new(SortExec {
                     child: child_node,
                     keys,
+                    done: false,
+                }))
+            }
+            LogicalPlan::TopN { input, keys, k } => {
+                let child_node = self.create_physical_plan(*input)?;
+
+                Ok(Box::new(TopNExec {
+                    child: child_node,
+                    keys,
+                    k: usize::try_from(k).unwrap_or(usize::MAX),
                     done: false,
                 }))
             }
@@ -526,27 +536,116 @@ impl ExecutionNode for SortExec {
             }
         }
 
-        keyed_rows.sort_by(|(a, _), (b, _)| {
-            for ((a, b), key) in a.iter().zip(b).zip(&self.keys) {
-                let ordering = compare_values(a, b);
-                let ordering = if key.descending {
-                    ordering.reverse()
-                } else {
-                    ordering
-                };
-
-                if ordering != Ordering::Equal {
-                    return ordering;
-                }
-            }
-            Ordering::Equal
-        });
+        keyed_rows.sort_by(|(a, _), (b, _)| compare_keys(a, b, &self.keys));
 
         Ok(Some(RecordBatch {
             rows: keyed_rows.into_iter().map(|(_, row)| row).collect(),
         }))
     }
 }
+
+/// Orders two rows by their ORDER BY values, key by key, honoring DESC.
+fn compare_keys(a: &[Value], b: &[Value], keys: &[SortKey]) -> Ordering {
+    for ((a, b), key) in a.iter().zip(b).zip(keys) {
+        let ordering = compare_values(a, b);
+        let ordering = if key.descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
+/// Returns the first `k` rows in sort order without sorting the rest, like Postgres'
+/// "top-N heapsort".
+///
+/// A max-heap holds the best `k` rows seen so far, with the worst of them on top. A new
+/// row only gets in by beating that one, so each row costs log k instead of log n, and
+/// only `k` rows are kept in memory.
+#[derive(Debug)]
+pub struct TopNExec {
+    child: Box<dyn ExecutionNode>,
+    keys: Vec<SortKey>,
+    k: usize,
+    done: bool,
+}
+impl ExecutionNode for TopNExec {
+    fn next(&mut self, ctx: &mut ExecCtx<'_>) -> Result<Option<RecordBatch>> {
+        if self.done {
+            return Ok(None);
+        }
+        self.done = true;
+
+        let Self { child, keys, k, .. } = self;
+        let evaluator = ExpressionEvaluator;
+
+        let mut heap = BinaryHeap::new();
+        let mut seq = 0;
+        while let Some(batch) = child.next(ctx)? {
+            for row in batch.rows {
+                let key = keys
+                    .iter()
+                    .map(|key| evaluator.evaluate(&key.expr, &row))
+                    .collect::<Result<Vec<_>>>()?;
+                let ranked = Ranked {
+                    key,
+                    seq,
+                    row,
+                    keys,
+                };
+                seq += 1;
+
+                if heap.len() < *k {
+                    heap.push(ranked);
+                } else if let Some(mut worst) = heap.peek_mut()
+                    && ranked < *worst
+                {
+                    *worst = ranked;
+                }
+            }
+        }
+
+        Ok(Some(RecordBatch {
+            rows: heap
+                .into_sorted_vec()
+                .into_iter()
+                .map(|ranked| ranked.row)
+                .collect(),
+        }))
+    }
+}
+
+/// A row in [`TopNExec`]'s heap, ordered the way the Sort would order it.
+///
+/// `seq` is the row's position in the input. It breaks ties, so rows with equal keys come
+/// out in input order, as they do from the (stable) Sort.
+struct Ranked<'k> {
+    key: Vec<Value>,
+    seq: usize,
+    row: Row,
+    keys: &'k [SortKey],
+}
+impl Ord for Ranked<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_keys(&self.key, &other.key, self.keys).then(self.seq.cmp(&other.seq))
+    }
+}
+impl PartialOrd for Ranked<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl PartialEq for Ranked<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+impl Eq for Ranked<'_> {}
 
 /// Skips the first `to_skip` rows, then passes through at most `remaining` rows.
 #[derive(Debug)]

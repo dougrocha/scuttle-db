@@ -1,5 +1,6 @@
-//! Rewrites a logical plan before it runs. For now only one rule: read a filtered table
-//! through an index when the WHERE clause narrows an indexed column.
+//! Rewrites a logical plan before it runs. Two rules: read a filtered table through an
+//! index when the WHERE clause narrows an indexed column, and keep only the rows a LIMIT
+//! needs instead of sorting all of them.
 
 use std::{collections::BTreeMap, ops::Bound};
 
@@ -16,6 +17,44 @@ use crate::{
 /// costs more than reading every page in order. Postgres' crossover is usually 5 to 10%.
 /// With pages cached in memory it was nearer 50% here, so 10% leaves room to spare.
 const MAX_INDEX_FRACTION: f64 = 0.1;
+
+/// Runs every rewrite on a plan before it is executed or explained.
+pub(crate) fn optimize(plan: &mut LogicalPlan, tables: &BTreeMap<String, TableDef>) {
+    use_indexes(plan, tables);
+    use_top_n(plan);
+}
+
+/// Turns the Sort under a `LIMIT n OFFSET m` into a TopN that keeps only `n + m` rows.
+///
+/// The Limit stays on top to skip the offset. A Projection between them keeps the row
+/// count, so the rule looks through it.
+pub(crate) fn use_top_n(plan: &mut LogicalPlan) {
+    if let LogicalPlan::Limit {
+        input,
+        limit: Some(limit),
+        offset,
+    } = plan
+    {
+        bound_sort(input, limit.saturating_add(*offset));
+    }
+}
+
+fn bound_sort(plan: &mut LogicalPlan, k: u64) {
+    match plan {
+        LogicalPlan::Projection { input, .. } => bound_sort(input, k),
+        LogicalPlan::Sort { input, keys } => {
+            let input = std::mem::replace(
+                input,
+                Box::new(LogicalPlan::Values {
+                    expressions: vec![],
+                }),
+            );
+            let keys = std::mem::take(keys);
+            *plan = LogicalPlan::TopN { input, keys, k };
+        }
+        _ => {}
+    }
+}
 
 /// Sets `index` on every Scan whose Filter compares an indexed column with a literal,
 /// when the index finds few enough rows to beat reading the whole table.
@@ -39,6 +78,7 @@ pub(crate) fn use_indexes(plan: &mut LogicalPlan, tables: &BTreeMap<String, Tabl
         LogicalPlan::Projection { input, .. }
         | LogicalPlan::Aggregate { input, .. }
         | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::TopN { input, .. }
         | LogicalPlan::Limit { input, .. } => use_indexes(input, tables),
         LogicalPlan::Join { left, right, .. } => {
             use_indexes(left, tables);

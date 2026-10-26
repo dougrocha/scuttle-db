@@ -70,6 +70,13 @@ pub enum LogicalPlan {
         input: Box<LogicalPlan>,
         keys: Vec<SortKey>,
     },
+    /// The first `k` rows a Sort with the same keys would return, found without sorting
+    /// every row. Made by [`use_top_n`](super::optimizer::use_top_n) from a Sort under a Limit.
+    TopN {
+        input: Box<LogicalPlan>,
+        keys: Vec<SortKey>,
+        k: u64,
+    },
     Limit {
         input: Box<LogicalPlan>,
         limit: Option<u64>,
@@ -115,7 +122,7 @@ impl LogicalPlan {
     ///
     /// - Scan: table columns; relation = alias, else table name.
     /// - Join: left then right (`JoinExec` concatenates the same way).
-    /// - Filter / Sort / Limit: input unchanged.
+    /// - Filter / Sort / TopN / Limit: input unchanged.
     /// - Aggregate: keys, then calls. Named AND labelled by text rendered against the
     ///   INPUT's labels, which is why a Sort over an Aggregate over a Join prints `u.name`.
     /// - Projection: one column per select-list output.
@@ -136,6 +143,7 @@ impl LogicalPlan {
             }
             LogicalPlan::Filter { input, .. }
             | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::TopN { input, .. }
             | LogicalPlan::Limit { input, .. } => input.output_schema(),
             LogicalPlan::Aggregate {
                 input,

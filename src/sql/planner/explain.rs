@@ -8,7 +8,7 @@ use std::ops::Bound;
 
 use crate::db::table::index::IndexRange;
 use crate::sql::analyzer::AnalyzedExpression;
-use crate::sql::planner::logical::LogicalPlan;
+use crate::sql::planner::logical::{LogicalPlan, SortKey};
 use crate::sql::planner::relation_schema::RelationSchema;
 
 /// Formats `plan` as one line per node, children indented under their parent.
@@ -87,19 +87,11 @@ fn write_node(plan: &LogicalPlan, depth: usize, lines: &mut Vec<String>) {
             write_node(input, depth + 1, lines);
         }
         LogicalPlan::Sort { input, keys } => {
-            let columns = input.output_schema();
-            let keys: Vec<String> = keys
-                .iter()
-                .map(|key| {
-                    let expr = columns.render(&key.expr);
-                    if key.descending {
-                        format!("{expr} DESC")
-                    } else {
-                        expr
-                    }
-                })
-                .collect();
-            lines.push(format!("{indent}Sort: {}", keys.join(", ")));
+            lines.push(format!("{indent}Sort: {}", render_keys(input, keys)));
+            write_node(input, depth + 1, lines);
+        }
+        LogicalPlan::TopN { input, keys, k } => {
+            lines.push(format!("{indent}TopN: {k} by {}", render_keys(input, keys)));
             write_node(input, depth + 1, lines);
         }
         LogicalPlan::Limit {
@@ -195,6 +187,23 @@ fn write_filtered_scan(
 }
 
 /// An index range as the conditions it stands for: `id = 5`, or `id > 10 AND id <= 50`.
+/// ORDER BY keys as written: `age DESC, name`.
+fn render_keys(input: &LogicalPlan, keys: &[SortKey]) -> String {
+    let columns = input.output_schema();
+    let keys: Vec<String> = keys
+        .iter()
+        .map(|key| {
+            let expr = columns.render(&key.expr);
+            if key.descending {
+                format!("{expr} DESC")
+            } else {
+                expr
+            }
+        })
+        .collect();
+    keys.join(", ")
+}
+
 fn render_range(column: &str, range: &IndexRange) -> String {
     if let (Bound::Included(lo), Bound::Included(hi)) = (&range.lower, &range.upper)
         && lo == hi
@@ -257,13 +266,17 @@ mod tests {
 
     #[test]
     fn test_explain_order_by_and_limit() {
-        let plan = users()
-            .explain("SELECT name FROM users ORDER BY age DESC LIMIT 1")
-            .unwrap();
-        assert!(plan.starts_with("Limit: 1"), "{plan}");
-        assert!(plan.contains("Sort: "), "{plan}");
-        assert!(plan.contains("DESC"), "{plan}");
-        assert!(plan.ends_with("Scan: users"), "{plan}");
+        let plan = |sql: &str| users().explain(sql).unwrap();
+
+        // A LIMIT bounds the sort: keep limit + offset rows, then the Limit skips the offset
+        assert_eq!(
+            plan("SELECT name FROM users ORDER BY age DESC LIMIT 1 OFFSET 2"),
+            "Limit: 1 offset 2\n  Projection: name\n    TopN: 3 by age DESC\n      Scan: users"
+        );
+
+        // Without a LIMIT every row is sorted
+        assert!(plan("SELECT name FROM users ORDER BY age").contains("Sort: age"));
+        assert!(plan("SELECT name FROM users ORDER BY age OFFSET 2").contains("Sort: age"));
     }
 
     #[test]
@@ -393,7 +406,7 @@ mod tests {
             ),
             (
                 "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id ORDER BY o.total DESC LIMIT 2 OFFSET 1",
-                "Limit: 2 offset 1\n  Projection: name, total\n    Sort: o.total DESC\n      Join: inner on u.id = o.user_id\n        Scan: users u\n        Scan: orders o",
+                "Limit: 2 offset 1\n  Projection: name, total\n    TopN: 3 by o.total DESC\n      Join: inner on u.id = o.user_id\n        Scan: users u\n        Scan: orders o",
             ),
             (
                 "SELECT u.name FROM users u WHERE u.age > 20 ORDER BY u.age",
