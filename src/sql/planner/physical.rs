@@ -200,7 +200,7 @@ pub struct RecordBatch {
     pub rows: Vec<Row>,
 }
 
-/// What a node may use while it runs. Only the pages for now. Phase 2 of
+/// What a node may use while it runs. Only the pages for now. Phase 3 of
 /// `docs/roadmap.md` adds the tables, so an index can be read while the plan runs.
 ///
 /// The caller lends it for one `next` call only. Nodes are `'static`, so they can't keep

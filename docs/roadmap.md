@@ -2,15 +2,18 @@
 
 A plan to learn from as much as to build from. Each phase names the idea it teaches, the
 ways real databases do it, the way we pick and why, then small steps that each end in
-something you can test. Verify every phase with `EXPLAIN ANALYZE` on a 1M-row table.
+something you can test. Verify every phase with `EXPLAIN ANALYZE` on a 1M-row table
+(`cargo run --release --example bench -- gen <dir>` makes one).
 
 ```
-Phase 0  Foundations ──┬── Phase 1  Top-N
-                       │
-                       └── Phase 2  On-disk B+tree ──┬── Phase 3  Catalog + CREATE INDEX
-                                                     ├── Phase 4  ORDER BY via index, IN / OR
-                                                     └── Phase 5  Joins + statistics
+Phase 0  Foundations ── Phase 1  Top-N ── Phase 2  Memory limits ── Phase 3  On-disk B+tree ──┬── Phase 4  Catalog + CREATE INDEX
+   (done)                  (done)                                                              ├── Phase 5  ORDER BY via index, IN / OR
+                                                                                               └── Phase 6  Joins + statistics
 ```
+
+**Why memory limits come before the B+tree:** the B+tree's pages go through the buffer
+pool, and today the pool never evicts a page. A B+tree that has to fit in RAM loses half
+the reason for putting it on disk.
 
 **Why the B+tree comes before CREATE INDEX and ORDER BY:**
 - The B+tree is keyed on (key, ctid), so non-unique indexes come with it.
@@ -19,52 +22,113 @@ Phase 0  Foundations ──┬── Phase 1  Top-N
 
 ---
 
-## Phase 0: Foundations (small)
+## Phase 0: Foundations (done)
 
 | Step | Done when |
 |---|---|
 | 0.1 Commit a benchmark (`examples/bench/`) that generates the 1M-row tables and runs queries in interleaved rounds, in one process so the index rebuild on open isn't timed. `/tmp` got wiped once already. | `cargo run --release --example bench -- run <dir>` prints the median time per query. |
-| 0.2 Pass an execution context to `next()`: `ExecCtx { pool, tables }`. Nodes can then read an index while running, not only while being built. Features 3, 4 and 5 need this. | All tests pass, and EXPLAIN ANALYZE output is unchanged. |
-| 0.3 Make catalog rows deletable, then make `drop_table` delete its catalog row and file. Today it only forgets the table in memory, so the table comes back after a restart. | A test drops a table, reopens the database, and finds the table gone. |
+| 0.2 Pass an execution context to `next()`. Nodes can then read an index while running, not only while being built. | All tests pass, and EXPLAIN ANALYZE output is unchanged. |
+| 0.3 Make catalog rows deletable, then make `drop_table` delete its catalog row and file. Before this it only forgot the table in memory, so the table came back after a restart. | A test drops a table, reopens the database, and finds the table gone. |
 
-**Teaches:** borrowing two fields of one struct at once, and why a catalog that can only be
-appended to breaks DROP.
+**What happened:**
+- `ExecCtx` holds only the pool for now. Nothing reads `tables` until Phase 3, and an unread field only gets a compiler warning.
+- The benchmark's interleaving evens out noise from the machine, but not effects from earlier queries in the same process. A query can run slower after heavy queries. To compare one query across two builds, run it on its own.
 
 ---
 
-## Phase 1: Top-N for `ORDER BY … LIMIT n` (small)
+## Phase 1: Top-N for `ORDER BY … LIMIT n` (done)
 
-**Idea:** to keep the best n rows out of M, you don't need to sort all M. Sorting is
-M·log M. A heap of n rows is M·log n and keeps only n rows in memory.
+**Idea:** to keep the best n rows out of M, you don't need to sort all M.
 
 | Approach | Used by | Trade-off |
 |---|---|---|
-| Bounded max-heap, with the bound passed from Limit down into Sort | Postgres (`top-N heapsort`) | Same Sort node; EXPLAIN shows the method |
+| Bounded max-heap, with the bound passed from Limit down into Sort | Postgres (`top-N heapsort`) | M·log n time, n rows in memory. Slow when n is close to M |
 | A separate TopN node made by an optimizer rule | DuckDB, DataFusion | The plan says plainly what runs; easier to test |
-| Collect all rows, `select_nth_unstable`, then sort the first n | — | About 5 lines, but still holds all M rows |
-| Running threshold: drop rows worse than the current n-th before storing them | DuckDB, DataFusion | An add-on to the heap |
+| Buffer rows and cut back to the best n with `select_nth_unstable` every 2n rows | — | Constant time per row on average, at most 2n rows in memory |
+| Running threshold: drop rows worse than the current n-th before storing them | DuckDB, DataFusion | An add-on to either of the above |
 
-**Pick:** a TopN node.
+**What we built:**
+- A TopN node, made by a rule from `Limit(Projection(Sort))` with `k = limit + offset`. The Limit stays on top to skip the offset.
+- A buffer cut by `select_nth`, plus a running threshold. Input position breaks ties, so results match the stable Sort.
 
-**Steps:**
-1. Write `select_nth` inside SortExec, as a baseline to measure against.
-2. Add a rule that turns `Limit(Projection(Sort))` into a TopN with `k = limit + offset`. Limit stays on top to apply the offset.
-3. Use the input order as the last tie-breaker, so results match the stable Sort exactly.
+The first version used a heap. It was fastest for small k, but `LIMIT 10 OFFSET 990000` took 1093 ms against 394 ms for a plain sort, so it was replaced:
 
-**Verify:** run `ORDER BY age LIMIT 10 OFFSET 5` on 1M rows.
-- TopN shows rows=15 and Scan shows rows=1000000.
-- Sort time drops sharply.
-- Results match the old plan row for row.
+| Query on 1M rows | Sort (before) | Heap | Buffer + select_nth (kept) |
+|---|---|---|---|
+| `LIMIT 10` | 371 ms | 85 ms | ~95 ms |
+| `LIMIT 100000` | 366 ms | 286 ms | ~200 ms |
+| `LIMIT 10 OFFSET 990000` | ~394 ms | 1080 ms | ~540 ms |
+
+When k is close to M, TopN is still slower than a plain sort, because it compares the extra input position on every row.
 
 **Read:** CMU 15-445 sorting lecture; DuckDB "TopN" blog post.
 
 ---
 
-## Phase 2: On-disk B+tree index (large: the core of the plan)
+## Phase 2: Memory limits (medium)
 
-**Idea:** the in-memory index is rebuilt by a full scan each time the database opens, and all of
-it has to fit in RAM. A B+tree stored in pages fixes both. At 8 KB per page, each page
-holds about 400 i64 entries. That means 3 levels cover 81M rows, so a lookup is 1–3
+**Idea:** today three things hold everything in memory, and on a 1M-row table you can see each one:
+
+| What | Where | Peak memory on 1M rows |
+|---|---|---|
+| The buffer pool never evicts, so every page read stays cached | `src/storage/buffer_pool.rs` | 330 MB after one scan |
+| Results are collected into a `Vec` before returning | `handle_select`, `src/db/database.rs` | +290 MB for `SELECT *` |
+| Sort holds every row it sorts | `SortExec` | +290 MB for `ORDER BY` with no LIMIT |
+
+A table bigger than RAM crashes on the first scan. This phase puts a cap on each one.
+
+### 2.1 Buffer pool eviction
+
+| Policy | Used by | Trade-off |
+|---|---|---|
+| LRU | textbooks | A single big scan pushes out every useful page ("sequential flooding") |
+| **Clock sweep**: one usage counter per page, a hand that sweeps and decrements | Postgres (counter up to 5) | Close to LRU, cheap to maintain |
+| Midpoint insertion: new pages enter the middle of the LRU list | MySQL InnoDB | Scans don't push out pages that are used often |
+| Ring buffer for big sequential scans | Postgres (256 KB ring) | Combine with any of the above |
+
+**Pick:** clock sweep.
+- **Pinning:** a page in use can't be evicted. Today the pool is lent for one `next()` call at a time, which helps.
+- **Dirty pages** are written out before eviction.
+
+**Verify:**
+- Cap the pool at 1,000 pages (8 MB) and scan the 1M-row table. The rows hash the same, and peak memory stays near the cap.
+- Measure the slowdown from re-reading pages.
+
+### 2.2 Stream results out of `execute_query`
+
+Pass batches to a callback, or return an iterator, instead of building a `Vec`. Keep the current `execute_query` as a wrapper that collects, for the browser build and the tests.
+
+**Verify:** `SELECT *` on 1M rows no longer adds 290 MB, and the CLI prints the first rows before the scan finishes.
+
+### 2.3 External merge sort
+
+1. Sort until the rows held reach a memory budget (Postgres calls it `work_mem`).
+2. Write each sorted run to a temporary file, using the same row encoding as the table pages.
+3. Merge the runs with a min-heap of each run's next row, holding one page per run.
+
+With B pages of memory, a sort of N pages takes 1 + ⌈log_{B−1}(N/B)⌉ passes. That's 2 for nearly anything here.
+
+**Rules:**
+- An in-memory database (the browser build) has nowhere to spill, so it keeps sorting in memory.
+- TopN already holds at most 2k rows.
+
+**Verify:**
+- With a small budget, `ORDER BY age` on 1M rows gives the same hash as the in-memory sort, and peak memory stays near the budget.
+- EXPLAIN ANALYZE says how many runs it wrote, the way Postgres prints `Sort Method: external merge`.
+
+**Teaches:** page replacement, pinning, sequential flooding, and why external sorting is counted in I/O passes.
+
+**Read:**
+- CMU 15-445 buffer pool and sorting lectures
+- [Postgres buffer manager README](https://github.com/postgres/postgres/blob/master/src/backend/storage/buffer/README)
+
+---
+
+## Phase 3: On-disk B+tree index (large: the core of the plan)
+
+**Idea:** the in-memory index is rebuilt by a full scan each time the database opens, and
+all of it has to fit in RAM. A B+tree stored in pages fixes both. At 8 KB per page, each
+page holds about 400 i64 entries. That means 3 levels cover 81M rows, so a lookup is 1–3
 page reads.
 
 | Approach | How | Fits scuttle? |
@@ -96,10 +160,10 @@ page reads.
 6. **Swap it in behind `TableIndex`.**
    - Range scan along the leaf chain, `count_up_to`, and `check_unique`.
    - Pass the pool into the optimizer.
-   - Make IndexScan lazy, so it holds a cursor instead of a `Vec<Ctid>` collected up front.
+   - Make IndexScan lazy, so it holds a cursor instead of a `Vec<Ctid>` collected up front. Add `tables` to `ExecCtx` for this.
    - Test: the existing IndexScan and EXPLAIN tests pass.
 7. **Delete.** Test that a deleted key can be inserted again.
-8. **Bulk build.** Sort the (key, ctid) pairs, fill leaves left to right, then build each level above from the first keys of the level below. This replaces `rebuild_indexes`.
+8. **Bulk build.** Sort the (key, ctid) pairs, fill leaves left to right, then build each level above from the first keys of the level below. This replaces `rebuild_indexes`. It can reuse Phase 2's external sort.
 9. **Persistence.** Restart tests, the generation check, and `sync_all` in `flush` (nothing calls fsync today).
 
 **Verify:**
@@ -114,7 +178,7 @@ page reads.
 
 ---
 
-## Phase 3: Catalog without JSON, plus CREATE / DROP INDEX (medium)
+## Phase 4: Catalog without JSON, plus CREATE / DROP INDEX (medium)
 
 | Approach | Used by | Trade-off |
 |---|---|---|
@@ -136,7 +200,7 @@ page reads.
 
 ---
 
-## Phase 4: Using index order, IN and OR (medium)
+## Phase 5: Using index order, IN and OR (medium)
 
 **ORDER BY through an index.**
 - A B+tree already returns keys in order. When Sort's key is an indexed column, replace the Scan with a full-range IndexScan and delete the Sort. For DESC, walk the leaf chain backwards.
@@ -156,7 +220,7 @@ page reads.
 
 ---
 
-## Phase 5: Joins and statistics (medium to large)
+## Phase 6: Joins and statistics (medium to large)
 
 Today's join compares every left row with every right row: 1M × 10K = 10^10 comparisons.
 
@@ -164,7 +228,7 @@ Today's join compares every left row with every right row: 1M × 10K = 10^10 com
 |---|---|---|
 | **Hash join** | Build a hash table from the smaller side, then stream the other side through it | Equality joins of any size |
 | **Index nested-loop** | For each left row, look up the right side in its index | Small left side, with an index on the right key |
-| Sort-merge | Sort both sides, then read them in step | Inputs already sorted (Phase 4) |
+| Sort-merge | Sort both sides, then read them in step | Inputs already sorted (Phase 5) |
 
 **Steps:**
 1. **Push WHERE conditions into join inputs.** Today the Filter sits above the Join, so a table inside a join never uses an index.
@@ -183,15 +247,23 @@ Today's join compares every left row with every right row: 1M × 10K = 10^10 com
 
 ---
 
+## Known bugs to fix along the way
+
+- A BOOLEAN or FLOAT column with PRIMARY KEY or UNIQUE accepts duplicates. Those types get no index, and nothing rejects the constraint.
+- `drop_table` isn't safe if a step fails partway, and the test only covers the success path.
+- EXPLAIN ANALYZE: "Planning time" leaves out the optimizer's index count, and stats are matched to plan lines by position with no length check.
+- `Database::insert_row` skips every check that SQL INSERT does, and nothing calls it.
+
 ## Suggested pace
 
 | Week | Work |
 |---|---|
-| 1 | Phase 0, Phase 1 |
-| 2–3 | Phase 2, steps 1–5 (the B+tree itself) |
-| 4 | Phase 2, steps 6–9 (swap it in, persist it) |
-| 5 | Phase 3 |
+| 1 | Phase 0, Phase 1 (done) |
+| 2 | Phase 2 |
+| 3–4 | Phase 3, steps 1–5 (the B+tree itself) |
+| 5 | Phase 3, steps 6–9 (swap it in, persist it) |
 | 6 | Phase 4 |
-| 7+ | Phase 5 |
+| 7 | Phase 5 |
+| 8+ | Phase 6 |
 
 Before each phase, we agree on the design before any code is written.
