@@ -1527,8 +1527,9 @@ mod tests {
     fn test_top_n_returns_the_same_rows_as_a_full_sort() {
         let mut db = TestDb::new("top-n");
         db.execute("CREATE TABLE item (id INT, grp INT, tag TEXT)");
-        // Few distinct values, so most rows tie and only input order tells them apart
-        let values: Vec<String> = (0..300)
+        // Few distinct values, so most rows tie and only input order tells them apart.
+        // More rows than TopNExec buffers (1,024), so it has to cut the buffer down.
+        let values: Vec<String> = (0..3000)
             .map(|id| {
                 let tag = if id % 5 == 0 {
                     "NULL".to_string()
@@ -1547,9 +1548,10 @@ mod tests {
                 (1, 0),
                 (10, 0),
                 (10, 25),
-                (299, 1),
-                (500, 0),
-                (5, 298),
+                (600, 0),
+                (2999, 1),
+                (5000, 0),
+                (5, 2998),
             ] {
                 let sql =
                     format!("SELECT id FROM item ORDER BY {order} LIMIT {limit} OFFSET {offset}");

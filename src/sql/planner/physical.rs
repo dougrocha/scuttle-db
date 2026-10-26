@@ -1,4 +1,4 @@
-use std::{cell::Cell, cmp::Ordering, collections::BinaryHeap, rc::Rc, time::Duration};
+use std::{cell::Cell, cmp::Ordering, rc::Rc, time::Duration};
 
 use miette::{Result, miette};
 use web_time::Instant;
@@ -561,12 +561,14 @@ fn compare_keys(a: &[Value], b: &[Value], keys: &[SortKey]) -> Ordering {
     Ordering::Equal
 }
 
-/// Returns the first `k` rows in sort order without sorting the rest, like Postgres'
-/// "top-N heapsort".
+/// Returns the first `k` rows in sort order without sorting the rest.
 ///
-/// A max-heap holds the best `k` rows seen so far, with the worst of them on top. A new
-/// row only gets in by beating that one, so each row costs log k instead of log n, and
-/// only `k` rows are kept in memory.
+/// Rows collect in a buffer. Each time it holds `2k` rows (at least 1,024), a
+/// `select_nth` keeps the best `k` and drops the rest, so at most `2k` rows are in memory
+/// and each row costs constant time on average. The worst row kept becomes a cutoff: a
+/// row that doesn't sort before it can never make the top `k`, so it is dropped without
+/// being stored. When `k` is close to the row count the buffer is never cut and this is
+/// a plain sort, where a heap would be slower than sorting.
 #[derive(Debug)]
 pub struct TopNExec {
     child: Box<dyn ExecutionNode>,
@@ -582,9 +584,15 @@ impl ExecutionNode for TopNExec {
         self.done = true;
 
         let Self { child, keys, k, .. } = self;
+        let k = *k;
+        if k == 0 {
+            return Ok(Some(RecordBatch { rows: Vec::new() }));
+        }
         let evaluator = ExpressionEvaluator;
+        let capacity = k.saturating_mul(2).max(1024);
 
-        let mut heap = BinaryHeap::new();
+        let mut kept: Vec<Ranked> = Vec::new();
+        let mut cutoff: Option<Vec<Value>> = None;
         let mut seq = 0;
         while let Some(batch) = child.next(ctx)? {
             for row in batch.rows {
@@ -592,35 +600,46 @@ impl ExecutionNode for TopNExec {
                     .iter()
                     .map(|key| evaluator.evaluate(&key.expr, &row))
                     .collect::<Result<Vec<_>>>()?;
-                let ranked = Ranked {
+                seq += 1;
+
+                // A tie loses too: it came later in the input than the row it ties with
+                if let Some(cutoff) = &cutoff
+                    && compare_keys(&key, cutoff, keys).is_ge()
+                {
+                    continue;
+                }
+
+                kept.push(Ranked {
                     key,
                     seq,
                     row,
                     keys,
-                };
-                seq += 1;
-
-                if heap.len() < *k {
-                    heap.push(ranked);
-                } else if let Some(mut worst) = heap.peek_mut()
-                    && ranked < *worst
-                {
-                    *worst = ranked;
+                });
+                if kept.len() >= capacity {
+                    keep_best(&mut kept, k);
+                    cutoff = Some(kept[k - 1].key.clone());
                 }
             }
         }
 
+        keep_best(&mut kept, k);
+        // `Ranked` never ties (`seq` breaks them), so an unstable sort gives the same order
+        kept.sort_unstable();
         Ok(Some(RecordBatch {
-            rows: heap
-                .into_sorted_vec()
-                .into_iter()
-                .map(|ranked| ranked.row)
-                .collect(),
+            rows: kept.into_iter().map(|ranked| ranked.row).collect(),
         }))
     }
 }
 
-/// A row in [`TopNExec`]'s heap, ordered the way the Sort would order it.
+/// Drops all but the `k` best rows, leaving the worst of them last.
+fn keep_best(rows: &mut Vec<Ranked>, k: usize) {
+    if rows.len() > k {
+        rows.select_nth_unstable(k - 1);
+        rows.truncate(k);
+    }
+}
+
+/// A row kept by [`TopNExec`], ordered the way the Sort would order it.
 ///
 /// `seq` is the row's position in the input. It breaks ties, so rows with equal keys come
 /// out in input order, as they do from the (stable) Sort.
