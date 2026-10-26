@@ -51,7 +51,21 @@ impl BufferPool {
             .map(|dir| dir.join(format!("{table_name}.table")))
     }
 
-    pub fn get_page(&mut self, table_name: &str, page_id: PageId) -> Result<&mut Page> {
+    /// A page to read, loaded from its file the first time.
+    pub fn get_page(&mut self, table_name: &str, page_id: PageId) -> Result<&Page> {
+        self.load(table_name, page_id).map(|page| &*page)
+    }
+
+    /// A page to change. It is marked dirty here, so the change is written by the next
+    /// [`BufferPool::flush`] and can't be lost by a caller forgetting to say so.
+    pub(crate) fn get_page_mut(&mut self, table_name: &str, page_id: PageId) -> Result<&mut Page> {
+        // Load first, so a page that fails to load is never marked dirty
+        self.load(table_name, page_id)?;
+        self.mark_dirty(table_name, page_id);
+        self.load(table_name, page_id)
+    }
+
+    fn load(&mut self, table_name: &str, page_id: PageId) -> Result<&mut Page> {
         // Check if page exists in cache first
         let page_exists = self
             .pool
@@ -108,7 +122,8 @@ impl BufferPool {
         on_disk
     }
 
-    /// Returns a page with room for a tuple of `size` bytes.
+    /// Returns a page with room for a tuple of `size` bytes, marked dirty because the
+    /// caller is about to add the tuple.
     ///
     /// Tables are append-only: only the last page is considered, and a new page is
     /// added when it is full. Space freed by DELETE is never reused.
@@ -118,7 +133,7 @@ impl BufferPool {
         if let Some(last_page_id) = page_count.checked_sub(1)
             && self.get_page(table_name, last_page_id)?.has_room_for(size)
         {
-            return self.get_page(table_name, last_page_id);
+            return self.get_page_mut(table_name, last_page_id);
         }
 
         let page = Page::new(page_count, PageType::Table);
@@ -127,6 +142,7 @@ impl BufferPool {
         }
         self.page_counts
             .insert(table_name.to_string(), page_count + 1);
+        self.mark_dirty(table_name, page_count);
 
         Ok(self
             .pool
@@ -148,11 +164,10 @@ impl BufferPool {
         self.flush_pages(table_name, [page_id])
     }
 
-    /// Records that a page changed, so the next [`BufferPool::flush`] writes it.
-    ///
-    /// The page itself is already updated in the pool. Marking it is cheap, so a
-    /// statement can change the same page many times and it is still written once.
-    pub(crate) fn mark_dirty(&mut self, table_name: &str, page_id: PageId) {
+    /// Records that a page changed, so the next [`BufferPool::flush`] writes it. Marking it
+    /// is cheap, so a statement can change the same page many times and it is still
+    /// written once.
+    fn mark_dirty(&mut self, table_name: &str, page_id: PageId) {
         if self.data_directory.is_none() {
             // Nothing is ever written in memory, so don't collect pages that would never be flushed.
             return;

@@ -71,9 +71,8 @@ impl SystemCatalog {
 
         for (page_id, item_id) in found {
             buffer_pool
-                .get_page(self.name(), page_id)?
+                .get_page_mut(self.name(), page_id)?
                 .delete_item(item_id)?;
-            buffer_pool.mark_dirty(self.name(), page_id);
         }
         Ok(())
     }

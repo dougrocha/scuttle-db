@@ -348,7 +348,6 @@ impl Database {
             .get_free_page(table_name, encoded_data.len())?;
         let page_id = free_page.header.page_id;
         let item_id = free_page.add_data(&encoded_data)?;
-        self.buffer_manager.mark_dirty(table_name, page_id);
 
         for index in &mut self.get_table_mut(table_name)?.indexes {
             index.insert(&row, (page_id, item_id));
@@ -362,9 +361,8 @@ impl Database {
     fn delete_row(&mut self, table_name: &str, ctid: Ctid, row: &Row) -> Result<()> {
         let (page_id, item_id) = ctid;
         self.buffer_manager
-            .get_page(table_name, page_id)?
+            .get_page_mut(table_name, page_id)?
             .delete_item(item_id)?;
-        self.buffer_manager.mark_dirty(table_name, page_id);
 
         for index in &mut self.get_table_mut(table_name)?.indexes {
             index.remove(row, ctid);
