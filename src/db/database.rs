@@ -23,7 +23,12 @@ use crate::{
         },
         catalog_context::CatalogContext,
         evaluator::{Evaluator, expression::ExpressionEvaluator, predicate::PredicateEvaluator},
-        planner::{explain, logical::LogicalPlan, optimizer, physical::PhysicalPlanner},
+        planner::{
+            explain,
+            logical::LogicalPlan,
+            optimizer,
+            physical::{ExecCtx, PhysicalPlanner},
+        },
     },
     storage::{
         buffer_pool::BufferPool,
@@ -387,6 +392,13 @@ impl Database {
 
     /// Fills a table's indexes from its rows. Run when the database opens, since only
     /// the indexes' existence is stored, not their entries.
+    /// What the nodes of a running plan read from.
+    fn exec_ctx(&mut self) -> ExecCtx<'_> {
+        ExecCtx {
+            pool: &mut self.buffer_manager,
+        }
+    }
+
     fn rebuild_indexes(&mut self, table_name: &str) -> Result<()> {
         if self.get_table(table_name)?.indexes.is_empty() {
             return Ok(());
@@ -530,7 +542,7 @@ impl Database {
         let planning = start.elapsed();
 
         let start = Instant::now();
-        while executor.next(&mut self.buffer_manager)?.is_some() {}
+        while executor.next(&mut self.exec_ctx())?.is_some() {}
         let execution = start.elapsed();
 
         let ms = |time: Duration| time.as_secs_f64() * 1000.0;
@@ -619,7 +631,7 @@ impl Database {
         let mut executor = physical_planner.create_physical_plan(anayzed_plan)?;
 
         let mut rows = Vec::new();
-        while let Some(batch) = executor.next(&mut self.buffer_manager)? {
+        while let Some(batch) = executor.next(&mut self.exec_ctx())? {
             rows.extend(batch.rows);
         }
 
