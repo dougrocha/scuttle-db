@@ -306,14 +306,16 @@ impl Database {
         Ok(())
     }
 
-    /// Drops a table from the database.
-    ///
-    /// Removes the table from memory. Currently does not delete on-disk files.
-    pub fn drop_table(&mut self, name: &str) -> Result<(), DatabaseError> {
-        self.tables
-            .remove(name)
-            .ok_or_else(|| DatabaseError::TableNotFound(name.to_string()))?;
-        Ok(())
+    /// Drops a table: its catalog row, its pages and its file.
+    pub fn drop_table(&mut self, name: &str) -> Result<()> {
+        if !self.table_exists(name) {
+            return Err(DatabaseError::TableNotFound(name.to_string()).into());
+        }
+
+        self.catalog.remove_table(&mut self.buffer_manager, name)?;
+        self.buffer_manager.drop_table(name)?;
+        self.tables.remove(name);
+        self.buffer_manager.flush()
     }
 
     /// Inserts a row into a table.
@@ -1496,6 +1498,29 @@ mod tests {
                 .rows
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn test_dropped_table_stays_dropped_after_reopen() {
+        let mut db = TestDb::new("drop-table");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
+        db.execute("INSERT INTO item VALUES (1)");
+
+        db.db.drop_table("item").unwrap();
+        assert!(!db.dir.join("item.table").exists());
+        db.reopen();
+
+        assert!(db.db.execute_query("SELECT * FROM item").is_err());
+        assert_eq!(
+            db.query("SELECT id FROM users WHERE id = 1"),
+            [[Value::Int64(1)]]
+        );
+
+        // The name is free again, and the new table starts empty
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
+        db.execute("INSERT INTO item VALUES (1)");
+        assert_eq!(db.query("SELECT * FROM item"), [[Value::Int64(1)]]);
+        assert!(db.db.drop_table("nope").is_err());
     }
 
     #[test]

@@ -3,7 +3,7 @@ use miette::{IntoDiagnostic, Result, miette};
 use crate::{
     ColumnDef, DataType,
     core::types::Value,
-    db::table::{Table, row::Row, schema::Schema},
+    db::table::{Table, cursor::TableCursor, row::Row, schema::Schema},
     storage::{buffer_pool::BufferPool, page::PageHeader},
 };
 
@@ -54,6 +54,27 @@ impl SystemCatalog {
         };
         buffer_pool.save_page(self.name(), page_header_id)?;
 
+        Ok(())
+    }
+
+    /// Deletes the catalog row of `name`, so the table isn't loaded again on open.
+    pub(crate) fn remove_table(&self, buffer_pool: &mut BufferPool, name: &str) -> Result<()> {
+        let mut found = Vec::new();
+        let mut cursor =
+            TableCursor::open(buffer_pool, self.name().to_string(), self.schema.clone());
+        while cursor.read_next_page(buffer_pool, |page_id, item_id, row| {
+            if matches!(&row.values[0], Value::Text(table) if table == name) {
+                found.push((page_id, item_id));
+            }
+            Ok(())
+        })? {}
+
+        for (page_id, item_id) in found {
+            buffer_pool
+                .get_page(self.name(), page_id)?
+                .delete_item(item_id)?;
+            buffer_pool.mark_dirty(self.name(), page_id);
+        }
         Ok(())
     }
 

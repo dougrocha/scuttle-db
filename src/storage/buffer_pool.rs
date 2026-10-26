@@ -202,6 +202,21 @@ impl BufferPool {
         Ok(())
     }
 
+    /// Forgets every page of `table_name` and deletes its file, if it has one.
+    pub(crate) fn drop_table(&mut self, table_name: &str) -> Result<()> {
+        self.pool.remove(table_name);
+        self.page_counts.remove(table_name);
+        self.dirty.remove(table_name);
+        self.files.remove(table_name);
+
+        match self.table_path(table_name).map(std::fs::remove_file) {
+            Some(Err(err)) if err.kind() != std::io::ErrorKind::NotFound => {
+                Err(err).into_diagnostic()
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The open file of a table, opening it on first use. `None` when the pool is in memory.
     ///
     /// Reads pass `create: false`, so asking for a page of a table that has no file is an
