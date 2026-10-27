@@ -1,8 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    cmp::{Ordering, Reverse},
-    collections::BinaryHeap,
-    path::PathBuf,
+    cmp::Ordering,
     rc::Rc,
     time::Duration,
 };
@@ -29,7 +27,8 @@ use crate::{
     },
     storage::{
         buffer_pool::BufferPool,
-        spill::{SpillReader, SpillWriter},
+        external_sort::{ExternalSort, Record, Sorted, Spill},
+        spill::{decode_values, encode_values},
     },
 };
 
@@ -549,24 +548,12 @@ impl ExecutionNode for AggregateExec {
 /// changed with [`Database::set_sort_mem`](crate::Database::set_sort_mem). 64 MB.
 pub const DEFAULT_SORT_MEM: usize = 64 * 1024 * 1024;
 
-/// Where a sort that outgrows its memory budget writes its sorted runs.
-#[derive(Debug, Clone)]
-pub(crate) struct SortSpill {
-    pub(crate) dir: PathBuf,
-
-    /// Roughly how many bytes of rows the sort may hold before it writes them out.
-    pub(crate) budget: usize,
-}
-
 /// Sorts all input rows by the ORDER BY keys.
 ///
 /// Blocking, and stable: rows with equal keys keep their input order.
 ///
 /// Rows that fit in the memory budget are sorted in memory. Past the budget it becomes an
-/// external merge sort: each time the rows held reach the budget, they are sorted and
-/// written to a temporary file as one sorted "run". When the input ends, the runs are
-/// merged: a min-heap holds the first row of each run, and the smallest is popped and
-/// replaced by the next row of its run. Only one row per run is in memory while merging,
+/// external merge sort (see [`ExternalSort`]): sorted runs are written to disk and merged,
 /// and the output streams out a batch at a time.
 #[derive(Debug)]
 pub struct SortExec {
@@ -574,7 +561,7 @@ pub struct SortExec {
     keys: Rc<[SortKey]>,
 
     /// `None` sorts in memory however many rows come in (an in-memory database).
-    spill: Option<SortSpill>,
+    spill: Option<Spill>,
     state: SortState,
 }
 
@@ -583,25 +570,20 @@ enum SortState {
     /// Nothing has been read yet.
     Start,
 
-    /// Returning rows merged from `runs` sorted runs on disk.
-    Merging { merge: Merge, runs: usize },
-
-    /// Every row has been returned. `runs` is 0 if the rows were sorted in memory.
-    Done { runs: usize },
+    /// Every row has been read and sorted, and is being returned.
+    Sorted(Sorted<KeyedRow>),
 }
 
 impl SortExec {
-    /// Reads the whole input. Returns the sorted rows if they fit in memory, or else a
-    /// merge over the sorted runs written to disk.
-    fn read_input(&mut self, ctx: &mut ExecCtx<'_>) -> Result<Result<Vec<Row>, (Merge, usize)>> {
+    /// Reads the whole input into a sort, writing runs to disk past the budget.
+    fn read_input(&mut self, ctx: &mut ExecCtx<'_>) -> Result<Sorted<KeyedRow>> {
         let evaluator = ExpressionEvaluator;
-        let budget = self.spill.as_ref().map_or(usize::MAX, |spill| spill.budget);
+        let keys = Rc::clone(&self.keys);
+        let mut sort = ExternalSort::new(
+            move |a: &KeyedRow, b: &KeyedRow| compare_keys(&a.key, &b.key, &keys),
+            self.spill.clone(),
+        );
 
-        let mut keyed_rows: Vec<(Vec<Value>, Row)> = Vec::new();
-        // What the rows point to. The list itself is counted at its capacity, since a Vec
-        // that has grown holds up to twice the room its rows use.
-        let mut value_bytes = 0;
-        let mut runs = Vec::new();
         while let Some(batch) = self.child.next(ctx)? {
             for row in batch.rows {
                 let key = self
@@ -609,92 +591,65 @@ impl SortExec {
                     .iter()
                     .map(|key| evaluator.evaluate(&key.expr, &row))
                     .collect::<Result<Vec<_>>>()?;
-                value_bytes += size_in_memory(&key) + size_in_memory(&row.values);
-                keyed_rows.push((key, row));
-
-                let list_bytes = keyed_rows.capacity() * size_of::<(Vec<Value>, Row)>();
-                if value_bytes + list_bytes >= budget
-                    && let Some(spill) = &self.spill
-                {
-                    runs.push(write_run(
-                        std::mem::take(&mut keyed_rows),
-                        &self.keys,
-                        spill,
-                    )?);
-                    value_bytes = 0;
-                }
+                sort.push(KeyedRow { key, row })?;
             }
         }
-
-        // Nothing was written out, so everything fit in memory
-        let Some(spill) = self.spill.as_ref().filter(|_| !runs.is_empty()) else {
-            return Ok(Ok(sort_rows(keyed_rows, &self.keys)));
-        };
-        if !keyed_rows.is_empty() {
-            runs.push(write_run(keyed_rows, &self.keys, spill)?);
-        }
-
-        let count = runs.len();
-        Ok(Err((Merge::new(runs, Rc::clone(&self.keys))?, count)))
+        sort.finish()
     }
 }
 
 impl ExecutionNode for SortExec {
     fn next(&mut self, ctx: &mut ExecCtx<'_>) -> Result<Option<RecordBatch>> {
-        match &mut self.state {
-            SortState::Start => match self.read_input(ctx)? {
-                Ok(rows) => {
-                    self.state = SortState::Done { runs: 0 };
-                    Ok(Some(RecordBatch { rows }))
-                }
-                Err((merge, runs)) => {
-                    self.state = SortState::Merging { merge, runs };
-                    self.next(ctx)
-                }
-            },
-            SortState::Merging { merge, runs } => {
-                let rows = merge.next_rows(1024)?;
-                if rows.is_empty() {
-                    self.state = SortState::Done { runs: *runs };
-                    return Ok(None);
-                }
-                Ok(Some(RecordBatch { rows }))
-            }
-            SortState::Done { .. } => Ok(None),
+        if let SortState::Start = self.state {
+            self.state = SortState::Sorted(self.read_input(ctx)?);
         }
+        let SortState::Sorted(sorted) = &mut self.state else {
+            unreachable!("set above")
+        };
+
+        let mut rows = Vec::with_capacity(1024);
+        while rows.len() < 1024
+            && let Some(keyed) = sorted.next()?
+        {
+            rows.push(keyed.row);
+        }
+        Ok((!rows.is_empty()).then_some(RecordBatch { rows }))
     }
 
     fn detail(&self) -> Option<String> {
-        match self.state {
-            SortState::Start => None,
-            SortState::Done { runs: 0 } => Some("sort: in memory".to_string()),
-            SortState::Merging { runs, .. } | SortState::Done { runs } => {
-                Some(format!("sort: external merge, {runs} runs"))
-            }
-        }
+        let SortState::Sorted(sorted) = &self.state else {
+            return None;
+        };
+        Some(match (sorted.runs, sorted.passes) {
+            (0, _) => "sort: in memory".to_string(),
+            (runs, 1) => format!("sort: external merge, {runs} runs"),
+            (runs, passes) => format!("sort: external merge, {runs} runs, {passes} passes"),
+        })
     }
 }
 
-/// Sorts rows by their keys, keeping rows with equal keys in input order.
-fn sort_rows(mut keyed_rows: Vec<(Vec<Value>, Row)>, keys: &[SortKey]) -> Vec<Row> {
-    keyed_rows.sort_by(|(a, _), (b, _)| compare_keys(a, b, keys));
-    keyed_rows.into_iter().map(|(_, row)| row).collect()
+/// A row and its ORDER BY values, as a sort holds it.
+struct KeyedRow {
+    key: Vec<Value>,
+    row: Row,
 }
 
-/// Sorts `keyed_rows` and writes them to a new spill file, keys first, as one sorted run.
-fn write_run(
-    mut keyed_rows: Vec<(Vec<Value>, Row)>,
-    keys: &[SortKey],
-    spill: &SortSpill,
-) -> Result<SpillReader> {
-    keyed_rows.sort_by(|(a, _), (b, _)| compare_keys(a, b, keys));
-
-    let mut writer = SpillWriter::create(&spill.dir)?;
-    for (mut key, row) in keyed_rows {
-        key.extend(row.values);
-        writer.write(&key)?;
+impl Record for KeyedRow {
+    fn encode(&self, out: &mut Vec<u8>) {
+        encode_values(&self.key, out);
+        encode_values(&self.row.values, out);
     }
-    writer.finish()
+
+    fn decode(mut record: &[u8]) -> Result<Self> {
+        Ok(KeyedRow {
+            key: decode_values(&mut record)?,
+            row: Row::new(decode_values(&mut record)?),
+        })
+    }
+
+    fn heap_size(&self) -> usize {
+        size_in_memory(&self.key) + size_in_memory(&self.row.values)
+    }
 }
 
 /// About how many bytes `values` take on the heap: the values themselves, plus the text
@@ -709,92 +664,6 @@ fn size_in_memory(values: &[Value]) -> usize {
         .sum();
     std::mem::size_of_val(values) + text
 }
-
-/// Merges sorted runs into one sorted stream.
-struct Merge {
-    runs: Vec<SpillReader>,
-
-    /// The first row not yet returned from each run that has rows left. The smallest is
-    /// on top.
-    heap: BinaryHeap<Reverse<RunHead>>,
-    keys: Rc<[SortKey]>,
-}
-
-impl std::fmt::Debug for Merge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Merge")
-            .field("runs", &self.runs.len())
-            .finish_non_exhaustive()
-    }
-}
-
-impl Merge {
-    fn new(runs: Vec<SpillReader>, keys: Rc<[SortKey]>) -> Result<Self> {
-        let mut merge = Self {
-            runs,
-            heap: BinaryHeap::new(),
-            keys,
-        };
-        for run in 0..merge.runs.len() {
-            merge.refill(run)?;
-        }
-        Ok(merge)
-    }
-
-    /// Up to `limit` rows, the smallest first. Empty once every run is used up.
-    fn next_rows(&mut self, limit: usize) -> Result<Vec<Row>> {
-        let mut rows = Vec::with_capacity(limit);
-        while rows.len() < limit
-            && let Some(Reverse(head)) = self.heap.pop()
-        {
-            self.refill(head.run)?;
-            rows.push(head.row);
-        }
-        Ok(rows)
-    }
-
-    /// Puts the next row of `run` on the heap, if it has one.
-    fn refill(&mut self, run: usize) -> Result<()> {
-        let Some(mut values) = self.runs[run].read()? else {
-            return Ok(());
-        };
-        let row = Row::new(values.split_off(self.keys.len()));
-        self.heap.push(Reverse(RunHead {
-            key: values,
-            row,
-            run,
-            keys: Rc::clone(&self.keys),
-        }));
-        Ok(())
-    }
-}
-
-/// The next row of one sorted run, ordered by its sort key.
-///
-/// Runs are written in input order, so on a tie the row from the earlier run came first in
-/// the input. Breaking ties by `run` keeps the sort stable.
-struct RunHead {
-    key: Vec<Value>,
-    row: Row,
-    run: usize,
-    keys: Rc<[SortKey]>,
-}
-impl Ord for RunHead {
-    fn cmp(&self, other: &Self) -> Ordering {
-        compare_keys(&self.key, &other.key, &self.keys).then(self.run.cmp(&other.run))
-    }
-}
-impl PartialOrd for RunHead {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl PartialEq for RunHead {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other).is_eq()
-    }
-}
-impl Eq for RunHead {}
 
 /// Orders two rows by their ORDER BY values, key by key, honoring DESC.
 fn compare_keys(a: &[Value], b: &[Value], keys: &[SortKey]) -> Ordering {

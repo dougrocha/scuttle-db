@@ -28,11 +28,12 @@ use crate::{
             explain,
             logical::LogicalPlan,
             optimizer,
-            physical::{DEFAULT_SORT_MEM, ExecCtx, PhysicalPlanner, SortSpill},
+            physical::{DEFAULT_SORT_MEM, ExecCtx, PhysicalPlanner},
         },
     },
     storage::{
         buffer_pool::{BufferPool, DEFAULT_CACHE_PAGES},
+        external_sort::Spill,
         page::{ItemId, PageId},
     },
 };
@@ -171,9 +172,9 @@ impl Database {
 
     /// Where a sort writes the runs that don't fit in memory, and how much it may hold
     /// first. `None` for an in-memory database, which never touches the disk.
-    pub(crate) fn sort_spill(&self) -> Option<SortSpill> {
+    pub(crate) fn sort_spill(&self) -> Option<Spill> {
         let dir = self.data_directory.as_ref()?;
-        Some(SortSpill {
+        Some(Spill {
             dir: dir.join("tmp"),
             budget: self.sort_mem,
         })
@@ -1940,6 +1941,16 @@ mod tests {
         assert!(sort.contains("sort: external merge, "), "{sort}");
         // The runs are deleted once merged
         assert_eq!(std::fs::read_dir(db.dir.join("tmp")).unwrap().count(), 0);
+
+        // More runs than are merged at once, so they are merged in more than one pass
+        db.db.set_sort_mem(4 * 1024);
+        for (order, expected) in orders.iter().zip(&in_memory) {
+            let sql = format!("SELECT * FROM item ORDER BY {order}");
+            assert_eq!(&db.query(&sql), expected, "{sql}");
+        }
+        let plan = db.query("EXPLAIN ANALYZE SELECT id FROM item ORDER BY grp");
+        let sort = plan[1][0].to_string();
+        assert!(sort.ends_with(" 2 passes"), "{sort}");
 
         db.db.set_sort_mem(DEFAULT_SORT_MEM);
         let plan = db.query("EXPLAIN ANALYZE SELECT id FROM item ORDER BY grp");
