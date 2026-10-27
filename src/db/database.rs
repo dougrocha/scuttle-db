@@ -344,17 +344,6 @@ impl Database {
         self.buffer_manager.flush()
     }
 
-    /// Inserts a row into a table.
-    ///
-    /// The row is validated against the table's schema, encoded to bytes,
-    /// and stored in a page managed by the buffer pool. The row is persisted
-    /// to disk immediately.
-    pub fn insert_row(&mut self, table_name: &str, row: Row) -> Result<(PageId, ItemId)> {
-        let location = self.append_row(table_name, row)?;
-        self.buffer_manager.flush()?;
-        Ok(location)
-    }
-
     /// Adds a row to the table's last page and marks the page dirty, without writing it.
     ///
     /// Statements call this for every row and leave the writing to the flush at the end of
