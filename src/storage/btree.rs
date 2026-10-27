@@ -1,377 +1,580 @@
-use core::fmt;
+//! A B+tree stored in the pages of one file, read and written through the buffer pool.
+//!
+//! Entries are byte strings, ordered by comparing bytes. An index encodes each (key, ctid)
+//! pair so that byte order is key order (see `IndexKey::encode`), which keeps this tree
+//! free of any knowledge of types.
+//!
+//! Page 0 is the metapage: where the root is and how many entries the tree holds. Every
+//! other page is a node:
+//! - A leaf holds entries in order, and the id of the leaf to its right, so a range scan
+//!   finds its first entry and then walks along the leaves.
+//! - An internal page holds items of (child page, lowest entry in that child). The first
+//!   item's entry is left empty: it stands for "anything smaller than the next one".
+//!
+//! Inserts split full nodes on the way down (the CLRS way), so a split always has room
+//! in its parent and the tree never needs to walk back up. A node counts as full when it
+//! has less than [`ROOM`] bytes free: enough for the longest item a split could add.
+//!
+//! Deletes take the entry out of its leaf and never merge pages, as in Postgres. The
+//! space comes back when the page is compacted.
 
-#[derive(Default)]
-pub struct InternalNode<K, V> {
-    keys: Vec<K>,
-    children: Vec<BTreeNode<K, V>>,
+use miette::{Result, miette};
+
+use crate::storage::{
+    buffer_pool::BufferPool,
+    page::{ItemPointer, Page, PageId, PageType},
+};
+
+/// The longest entry the tree takes, in bytes. Postgres caps index entries too (at about
+/// a third of a page) instead of spilling long keys to other pages.
+pub(crate) const MAX_ENTRY: usize = 1024;
+
+/// Bytes a child page id takes at the start of an internal item.
+const CHILD_LEN: usize = 4;
+
+/// Free space a node must have before an insert walks into it: one internal item with
+/// the longest entry, plus its item pointer. A child's split adds at most that to its
+/// parent.
+const ROOM: usize = CHILD_LEN + MAX_ENTRY + ItemPointer::SIZE;
+
+/// The metapage.
+const META: PageId = 0;
+
+/// A B+tree in the file `name`. It holds no pages itself: every call reads them from the
+/// pool, so the tree can be bigger than memory.
+#[derive(Debug, Clone)]
+pub(crate) struct BTree {
+    name: String,
 }
 
-#[derive(Default)]
-pub struct LeafNode<K, V> {
-    entries: Vec<(K, V)>,
-
-    next_node: Option<Box<LeafNode<K, V>>>,
+/// What the metapage stores.
+struct Meta {
+    root: PageId,
+    len: u64,
 }
 
-pub enum BTreeNode<K, V> {
-    Internal(InternalNode<K, V>),
-    LeafNode(LeafNode<K, V>),
-}
+impl BTree {
+    /// Creates the file `name` holding an empty tree: the metapage and one empty leaf.
+    pub(crate) fn create(pool: &mut BufferPool, name: &str) -> Result<Self> {
+        if pool.page_count(name) != 0 {
+            return Err(miette!("Index file {name} already exists"));
+        }
 
-pub struct BTree<K, V>
-where
-    K: PartialOrd + Clone,
-    V: Clone,
-{
-    root: Option<BTreeNode<K, V>>,
+        let tree = Self::open(name);
+        pool.allocate_page(name, PageType::BTreeMeta)?;
+        let root = pool.allocate_page(name, PageType::BTreeLeaf { next: None })?;
+        tree.write_meta(pool, Meta { root, len: 0 })?;
+        Ok(tree)
+    }
 
-    min_degree: usize,
-}
-
-impl<K, V> BTree<K, V>
-where
-    K: PartialOrd + Clone,
-    V: Clone,
-{
-    pub fn new(min_degree: usize) -> Self {
-        assert!(min_degree >= 3);
-
+    /// The tree already stored in the file `name`.
+    pub(crate) fn open(name: &str) -> Self {
         Self {
-            root: None,
-            min_degree,
+            name: name.to_string(),
         }
     }
 
-    pub fn insert(&mut self, key: K, val: V) {
-        if self.root.is_none() {
-            self.root = Some(BTreeNode::LeafNode(LeafNode {
-                entries: vec![(key, val)],
-                next_node: None,
-            }));
-            return;
-        }
-
-        let root_is_full = self.is_node_full(self.root.as_ref().unwrap());
-        if root_is_full {
-            let old_root = self.root.take().unwrap();
-            let mut new_root = InternalNode {
-                keys: Vec::new(),
-                children: vec![old_root],
-            };
-            self.split_child(&mut new_root, 0);
-            self.root = Some(BTreeNode::Internal(new_root));
-        }
-
-        Self::insert_non_full_helper(self.root.as_mut().unwrap(), key, val, self.min_degree);
+    pub(crate) fn name(&self) -> &str {
+        &self.name
     }
 
-    fn insert_non_full_helper(node: &mut BTreeNode<K, V>, key: K, val: V, min_degree: usize) {
-        match node {
-            BTreeNode::LeafNode(leaf) => {
-                let mut index = 0;
-                while index < leaf.entries.len() && leaf.entries[index].0 < key {
-                    index += 1;
-                }
-                leaf.entries.insert(index, (key, val));
-            }
-            BTreeNode::Internal(internal) => {
-                let mut index = 0;
-                while index < internal.keys.len() && internal.keys[index] <= key {
-                    index += 1;
-                }
+    /// How many entries the tree holds.
+    pub(crate) fn len(&self, pool: &mut BufferPool) -> Result<u64> {
+        Ok(self.meta(pool)?.len)
+    }
 
-                let max_keys = 2 * min_degree - 1;
-                let child_is_full = match &internal.children[index] {
-                    BTreeNode::LeafNode(leaf) => leaf.entries.len() == max_keys,
-                    BTreeNode::Internal(internal_child) => internal_child.keys.len() == max_keys,
+    /// Adds `entry`. Fails if the tree already holds it, or it is longer than [`MAX_ENTRY`].
+    pub(crate) fn insert(&self, pool: &mut BufferPool, entry: &[u8]) -> Result<()> {
+        if entry.len() > MAX_ENTRY {
+            return Err(miette!(
+                "An index entry of {} bytes is longer than the {MAX_ENTRY} an index allows",
+                entry.len()
+            ));
+        }
+
+        let mut meta = self.meta(pool)?;
+        if !self.make_room(pool, meta.root)? {
+            // The tree grows at the top: a new root with the old one as its only child,
+            // which then splits like any other full child
+            let new_root = pool.allocate_page(&self.name, PageType::BTreeInternal)?;
+            pool.get_page_mut(&self.name, new_root)?
+                .add_data(&internal_item(meta.root, &[]))?;
+            self.split_child(pool, new_root, 0)?;
+            meta.root = new_root;
+        }
+
+        self.insert_non_full(pool, meta.root, entry)?;
+        meta.len += 1;
+        self.write_meta(pool, meta)
+    }
+
+    /// Inserts into the subtree at `page_id`, which has room for one more item.
+    fn insert_non_full(&self, pool: &mut BufferPool, page_id: PageId, entry: &[u8]) -> Result<()> {
+        let page = pool.get_page(&self.name, page_id)?;
+        match page.header.page_type {
+            PageType::BTreeLeaf { .. } => {
+                let Err(pos) = search_leaf(page, entry) else {
+                    return Err(miette!("The index already holds this entry"));
                 };
+                pool.get_page_mut(&self.name, page_id)?
+                    .insert_at(pos, entry)
+            }
+            PageType::BTreeInternal => {
+                let mut index = child_index(page, entry);
+                let mut child = child_at(page, index);
 
-                if child_is_full {
-                    Self::split_child_helper(internal, index, min_degree);
-                    if internal.keys[index] <= key {
+                if !self.make_room(pool, child)? {
+                    self.split_child(pool, page_id, index)?;
+                    // The split put a new child right after this one. Its lowest entry
+                    // decides which of the two the entry belongs in.
+                    let page = pool.get_page(&self.name, page_id)?;
+                    if key_at(page, index + 1) <= entry {
                         index += 1;
                     }
+                    child = child_at(page, index);
                 }
 
-                Self::insert_non_full_helper(&mut internal.children[index], key, val, min_degree);
+                self.insert_non_full(pool, child, entry)
             }
+            other => Err(not_a_node(&self.name, page_id, other)),
         }
     }
 
-    fn split_child_helper(parent: &mut InternalNode<K, V>, child_index: usize, min_degree: usize) {
-        let mid_index = min_degree - 1;
-
-        match &mut parent.children[child_index] {
-            BTreeNode::LeafNode(full_leaf) => {
-                let new_leaf = LeafNode {
-                    entries: full_leaf.entries.split_off(mid_index),
-                    next_node: full_leaf.next_node.take(),
-                };
-
-                let mid_entry = new_leaf.entries[0].clone();
-
-                parent.keys.insert(child_index, mid_entry.0);
-                parent
-                    .children
-                    .insert(child_index + 1, BTreeNode::LeafNode(new_leaf));
-            }
-            BTreeNode::Internal(full_internal) => {
-                let new_internal = InternalNode {
-                    keys: full_internal.keys.split_off(mid_index + 1),
-                    children: full_internal.children.split_off(mid_index + 1),
-                };
-
-                let mid_key = full_internal.keys.pop().unwrap();
-
-                parent.keys.insert(child_index, mid_key);
-                parent
-                    .children
-                    .insert(child_index + 1, BTreeNode::Internal(new_internal));
-            }
-        }
-    }
-
-    fn is_node_full(&self, node: &BTreeNode<K, V>) -> bool {
-        let max_keys = 2 * self.min_degree - 1;
-        match node {
-            BTreeNode::LeafNode(leaf) => leaf.entries.len() == max_keys,
-            BTreeNode::Internal(internal) => internal.keys.len() == max_keys,
-        }
-    }
-
-    fn split_child(&mut self, parent: &mut InternalNode<K, V>, child_index: usize) {
-        let mid_index = self.min_degree - 1;
-
-        match &mut parent.children[child_index] {
-            BTreeNode::LeafNode(full_leaf) => {
-                let new_leaf = LeafNode {
-                    entries: full_leaf.entries.split_off(mid_index),
-                    next_node: full_leaf.next_node.take(),
-                };
-
-                let mid_entry = new_leaf.entries[0].clone();
-
-                parent.keys.insert(child_index, mid_entry.0);
-                parent
-                    .children
-                    .insert(child_index + 1, BTreeNode::LeafNode(new_leaf));
-            }
-            BTreeNode::Internal(full_internal) => {
-                let new_internal = InternalNode {
-                    keys: full_internal.keys.split_off(mid_index + 1),
-                    children: full_internal.children.split_off(mid_index + 1),
-                };
-
-                let mid_key = full_internal.keys.pop().unwrap();
-
-                parent.keys.insert(child_index, mid_key);
-                parent
-                    .children
-                    .insert(child_index + 1, BTreeNode::Internal(new_internal));
-            }
-        }
-    }
-
-    pub fn get(&self, key: &K) -> Option<&V> {
-        self.get_node(self.root.as_ref(), key)
-    }
-
-    pub fn contains_key(&self, key: &K) -> bool {
-        self.contains_key_node(self.root.as_ref(), key)
-    }
-
-    fn get_node<'a>(&'a self, node: Option<&'a BTreeNode<K, V>>, key: &K) -> Option<&'a V> {
-        match node {
-            Some(BTreeNode::LeafNode(leaf)) => {
-                for (k, v) in &leaf.entries {
-                    if k == key {
-                        return Some(v);
-                    }
-                }
-                None
-            }
-            Some(BTreeNode::Internal(internal)) => {
-                let mut index = 0;
-                while index < internal.keys.len() && internal.keys[index] <= *key {
-                    index += 1;
-                }
-                self.get_node(internal.children.get(index), key)
-            }
-            None => None,
-        }
-    }
-
-    fn contains_key_node(&self, node: Option<&BTreeNode<K, V>>, key: &K) -> bool {
-        match node {
-            Some(BTreeNode::LeafNode(leaf)) => {
-                for (k, _) in &leaf.entries {
-                    if k == key {
-                        return true;
-                    }
-                }
-                false
-            }
-            Some(BTreeNode::Internal(internal)) => {
-                let mut index = 0;
-                while index < internal.keys.len() && internal.keys[index] <= *key {
-                    index += 1;
-                }
-                self.contains_key_node(internal.children.get(index), key)
-            }
-            None => false,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.root.is_none()
-    }
-}
-
-impl<K, V> fmt::Debug for BTree<K, V>
-where
-    K: fmt::Debug + PartialOrd + Clone,
-    V: fmt::Debug + Clone,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(ref root) = self.root {
-            self.display_node(root, f, 0)
-        } else {
-            write!(f, "Empty BTree")
-        }
-    }
-}
-
-impl<K, V> BTree<K, V>
-where
-    K: fmt::Debug + PartialOrd + Clone,
-    V: fmt::Debug + Clone,
-{
-    fn display_node(
+    /// Splits the full child at `child_index` of `parent_id` in two, moving its upper
+    /// half to a new page right after it. The parent must have room for one more item.
+    fn split_child(
         &self,
-        node: &BTreeNode<K, V>,
-        f: &mut fmt::Formatter<'_>,
-        level: usize,
-    ) -> fmt::Result {
-        let indent = "  ".repeat(level);
-        match node {
-            BTreeNode::LeafNode(leaf) => {
-                write!(f, "{}Leaf: [", indent)?;
-                for (i, (key, value)) in leaf.entries.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{:?}:{:?}", key, value)?;
-                }
-                writeln!(f, "]")
-            }
-            BTreeNode::Internal(internal) => {
-                write!(f, "{}Internal: [", indent)?;
-                for (i, key) in internal.keys.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{:?}", key)?;
-                }
-                writeln!(f, "]")?;
+        pool: &mut BufferPool,
+        parent_id: PageId,
+        child_index: usize,
+    ) -> Result<()> {
+        let child_id = child_at(pool.get_page(&self.name, parent_id)?, child_index);
+        let child = pool.get_page(&self.name, child_id)?;
+        let page_type = child.header.page_type;
+        let mut items = items(child);
+        let mut right_items = items.split_off(items.len() / 2);
 
-                for child in &internal.children {
-                    self.display_node(child, f, level + 1)?;
-                }
-                Ok(())
+        let right_id = pool.allocate_page(&self.name, page_type)?;
+        let (left_type, right_type) = match page_type {
+            // The new leaf goes into the chain between the old one and its right neighbor
+            PageType::BTreeLeaf { next } => (
+                PageType::BTreeLeaf {
+                    next: Some(right_id),
+                },
+                PageType::BTreeLeaf { next },
+            ),
+            page_type => (page_type, page_type),
+        };
+
+        let separator = match page_type {
+            // A leaf's lowest entry is copied up: leaves hold every entry
+            PageType::BTreeLeaf { .. } => right_items[0].clone(),
+            // An internal page's lowest entry moves up. Its first item keeps only the child.
+            _ => right_items[0].split_off(CHILD_LEN),
+        };
+
+        self.write_node(pool, child_id, left_type, &items)?;
+        self.write_node(pool, right_id, right_type, &right_items)?;
+        pool.get_page_mut(&self.name, parent_id)?
+            .insert_at(child_index + 1, &internal_item(right_id, &separator))
+    }
+
+    /// Makes sure the node has [`ROOM`], compacting it if that frees enough. `false` means
+    /// it has to be split.
+    fn make_room(&self, pool: &mut BufferPool, page_id: PageId) -> Result<bool> {
+        let page = pool.get_page(&self.name, page_id)?;
+        if page.free_space() >= ROOM {
+            return Ok(true);
+        }
+        if page.free_space_if_compacted() < ROOM {
+            return Ok(false);
+        }
+
+        pool.get_page_mut(&self.name, page_id)?.compact();
+        Ok(true)
+    }
+
+    /// Takes `entry` out of the tree. Returns whether it was there.
+    pub(crate) fn remove(&self, pool: &mut BufferPool, entry: &[u8]) -> Result<bool> {
+        let mut meta = self.meta(pool)?;
+        let leaf = self.find_leaf(pool, meta.root, entry)?;
+        let Ok(pos) = search_leaf(pool.get_page(&self.name, leaf)?, entry) else {
+            return Ok(false);
+        };
+
+        pool.get_page_mut(&self.name, leaf)?.remove_at(pos);
+        meta.len -= 1;
+        self.write_meta(pool, meta)?;
+        Ok(true)
+    }
+
+    /// A cursor at the first entry that is `>= target`.
+    pub(crate) fn seek(&self, pool: &mut BufferPool, target: &[u8]) -> Result<Cursor> {
+        let root = self.meta(pool)?.root;
+        let leaf = self.find_leaf(pool, root, target)?;
+        let (Ok(pos) | Err(pos)) = search_leaf(pool.get_page(&self.name, leaf)?, target);
+
+        Ok(Cursor {
+            name: self.name.clone(),
+            page: Some(leaf),
+            pos,
+        })
+    }
+
+    /// The leaf where `target` is or would be.
+    fn find_leaf(
+        &self,
+        pool: &mut BufferPool,
+        mut page_id: PageId,
+        target: &[u8],
+    ) -> Result<PageId> {
+        loop {
+            let page = pool.get_page(&self.name, page_id)?;
+            match page.header.page_type {
+                PageType::BTreeLeaf { .. } => return Ok(page_id),
+                PageType::BTreeInternal => page_id = child_at(page, child_index(page, target)),
+                other => return Err(not_a_node(&self.name, page_id, other)),
             }
         }
     }
+
+    /// Replaces the page with a fresh one holding `items`, so a split leaves no gaps.
+    fn write_node(
+        &self,
+        pool: &mut BufferPool,
+        page_id: PageId,
+        page_type: PageType,
+        items: &[Vec<u8>],
+    ) -> Result<()> {
+        let page = pool.get_page_mut(&self.name, page_id)?;
+        *page = Page::new(page_id, page_type);
+        for item in items {
+            page.add_data(item)?;
+        }
+        Ok(())
+    }
+
+    fn meta(&self, pool: &mut BufferPool) -> Result<Meta> {
+        let bytes = pool.get_page(&self.name, META)?.get_item(0)?;
+        Ok(Meta {
+            root: PageId::from_le_bytes(bytes[0..4].try_into().unwrap()),
+            len: u64::from_le_bytes(bytes[4..12].try_into().unwrap()),
+        })
+    }
+
+    fn write_meta(&self, pool: &mut BufferPool, meta: Meta) -> Result<()> {
+        let mut bytes = meta.root.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&meta.len.to_le_bytes());
+        self.write_node(pool, META, PageType::BTreeMeta, &[bytes])
+    }
+}
+
+/// A position in the tree's entries, moved forward by [`Cursor::next`].
+///
+/// It keeps a page id and a position, not a borrowed page, so the pool stays free for
+/// other work between entries. The tree must not change while a cursor is in use.
+#[derive(Debug)]
+pub(crate) struct Cursor {
+    name: String,
+
+    /// The leaf being read. `None` once past the last leaf.
+    page: Option<PageId>,
+    pos: usize,
+}
+
+impl Cursor {
+    /// The entry at the cursor, which then moves to the next one. `None` at the end.
+    pub(crate) fn next(&mut self, pool: &mut BufferPool) -> Result<Option<Vec<u8>>> {
+        while let Some(page_id) = self.page {
+            let page = pool.get_page(&self.name, page_id)?;
+            if self.pos < page.header.item_count as usize {
+                self.pos += 1;
+                return Ok(Some(item_at(page, self.pos - 1).to_vec()));
+            }
+
+            let PageType::BTreeLeaf { next } = page.header.page_type else {
+                return Err(not_a_node(&self.name, page_id, page.header.page_type));
+            };
+            self.page = next;
+            self.pos = 0;
+        }
+        Ok(None)
+    }
+}
+
+/// Finds `target` in a leaf: `Ok` with its position, or `Err` with where it would go.
+fn search_leaf(page: &Page, target: &[u8]) -> std::result::Result<usize, usize> {
+    let (mut lo, mut hi) = (0, page.header.item_count as usize);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        match item_at(page, mid).cmp(target) {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => return Ok(mid),
+        }
+    }
+    Err(lo)
+}
+
+/// Which child of an internal page `target` belongs in: the last one whose lowest entry
+/// is `<= target`. The first child's empty entry is below everything, so there always is one.
+fn child_index(page: &Page, target: &[u8]) -> usize {
+    let (mut lo, mut hi) = (1, page.header.item_count as usize);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if key_at(page, mid) <= target {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo - 1
+}
+
+fn internal_item(child: PageId, key: &[u8]) -> Vec<u8> {
+    let mut item = child.to_be_bytes().to_vec();
+    item.extend_from_slice(key);
+    item
+}
+
+fn child_at(page: &Page, index: usize) -> PageId {
+    PageId::from_be_bytes(item_at(page, index)[..CHILD_LEN].try_into().unwrap())
+}
+
+fn key_at(page: &Page, index: usize) -> &[u8] {
+    &item_at(page, index)[CHILD_LEN..]
+}
+
+fn item_at(page: &Page, index: usize) -> &[u8] {
+    page.get_item(index as u16)
+        .expect("positions come from the page's item count")
+}
+
+fn items(page: &Page) -> Vec<Vec<u8>> {
+    (0..page.header.item_count as usize)
+        .map(|index| item_at(page, index).to_vec())
+        .collect()
+}
+
+fn not_a_node(name: &str, page_id: PageId, page_type: PageType) -> miette::Report {
+    miette!("Page {page_id} of {name} is a {page_type:?} page, not a B-tree node")
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
-    #[test]
-    fn test_empty_btree_creation() {
-        let tree: BTree<i32, String> = BTree::new(3);
-        assert!(tree.is_empty());
-        assert_eq!(tree.min_degree, 3);
-    }
-
-    #[test]
-    fn test_first_insertion_creates_leaf_root() {
-        let mut tree = BTree::new(3);
-
-        tree.insert(10, "ten".to_string());
-        tree.insert(20, "twenty".to_string());
-        tree.insert(5, "five".to_string());
-
-        assert!(!tree.is_empty());
-        assert!(matches!(tree.root, Some(BTreeNode::LeafNode(_))));
-    }
-
-    #[test]
-    fn test_leaf_node_splitting() {
-        let mut tree = BTree::new(3);
-
-        for i in 1..=6 {
-            tree.insert(i, format!("value_{}", i));
+    /// A fixed-seed generator, so a failure repeats.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
         }
 
-        assert!(matches!(tree.root, Some(BTreeNode::Internal(_))));
+        /// An entry of 1 to 40 bytes, or now and then a long one, so pages hold few.
+        fn entry(&mut self) -> Vec<u8> {
+            let len = match self.next() % 50 {
+                0 => MAX_ENTRY - (self.next() % 100) as usize,
+                _ => 1 + (self.next() % 40) as usize,
+            };
+            (0..len).map(|_| self.next() as u8).collect()
+        }
     }
 
-    #[test]
-    fn test_multiple_insertions_maintain_order() {
-        let mut tree = BTree::new(3);
-        let values = vec![50, 30, 70, 20, 40, 60, 80, 10, 25, 35, 45];
+    fn scan(tree: &BTree, pool: &mut BufferPool, from: &[u8]) -> Vec<Vec<u8>> {
+        let mut cursor = tree.seek(pool, from).unwrap();
+        let mut entries = Vec::new();
+        while let Some(entry) = cursor.next(pool).unwrap() {
+            entries.push(entry);
+        }
+        entries
+    }
 
-        for val in values {
-            tree.insert(val, format!("value_{}", val));
+    /// Checks the tree's shape:
+    /// - entries in each node are in order, and within the bounds its parent gives it
+    /// - every leaf is at the same depth
+    /// - the leaf chain visits every leaf, left to right
+    fn check(tree: &BTree, pool: &mut BufferPool) {
+        fn walk(
+            tree: &BTree,
+            pool: &mut BufferPool,
+            page_id: PageId,
+            bounds: (Option<Vec<u8>>, Option<Vec<u8>>),
+            depth: usize,
+            leaves: &mut Vec<(PageId, usize)>,
+        ) {
+            let page = pool.get_page(tree.name(), page_id).unwrap().clone();
+            let is_leaf = matches!(page.header.page_type, PageType::BTreeLeaf { .. });
+            let keys: Vec<Vec<u8>> = (0..page.header.item_count as usize)
+                .map(|i| match is_leaf {
+                    true => item_at(&page, i).to_vec(),
+                    false => key_at(&page, i).to_vec(),
+                })
+                .collect();
+
+            // An internal page's first key is empty and stands for its lower bound
+            let checked = if is_leaf { &keys[..] } else { &keys[1..] };
+            assert!(
+                checked.is_sorted_by(|a, b| a < b),
+                "page {page_id} out of order"
+            );
+            for key in checked {
+                assert!(
+                    bounds.0.as_ref().is_none_or(|lo| key >= lo),
+                    "page {page_id} below its bound"
+                );
+                assert!(
+                    bounds.1.as_ref().is_none_or(|hi| key < hi),
+                    "page {page_id} above its bound"
+                );
+            }
+
+            if is_leaf {
+                leaves.push((page_id, depth));
+                return;
+            }
+            for i in 0..keys.len() {
+                let lo = if i == 0 {
+                    bounds.0.clone()
+                } else {
+                    Some(keys[i].clone())
+                };
+                let hi = keys.get(i + 1).cloned().or(bounds.1.clone());
+                walk(tree, pool, child_at(&page, i), (lo, hi), depth + 1, leaves);
+            }
         }
 
-        assert!(!tree.is_empty());
-    }
+        let root = tree.meta(pool).unwrap().root;
+        let mut leaves = Vec::new();
+        walk(tree, pool, root, (None, None), 0, &mut leaves);
+        assert!(
+            leaves.iter().all(|&(_, depth)| depth == leaves[0].1),
+            "leaves at different depths"
+        );
 
-    #[test]
-    fn test_duplicate_insertions() {
-        let mut tree = BTree::new(3);
-
-        tree.insert(10, "first".to_string());
-        tree.insert(10, "second".to_string());
-        tree.insert(20, "twenty".to_string());
-        tree.insert(10, "third".to_string());
-
-        assert!(!tree.is_empty());
-    }
-    #[test]
-    fn test_contains_key() {
-        let mut tree = BTree::new(3);
-
-        tree.insert("key1".to_string(), "value1".to_string());
-        tree.insert("key2".to_string(), "value2".to_string());
-        tree.insert("key3".to_string(), "value3".to_string());
-
-        assert!(tree.contains_key(&"key1".to_string()));
-        assert!(tree.contains_key(&"key2".to_string()));
-        assert!(tree.contains_key(&"key3".to_string()));
-        assert!(!tree.contains_key(&"key4".to_string()));
-        assert!(!tree.contains_key(&"nonexistent".to_string()));
-    }
-
-    #[test]
-    fn test_every_inserted_key_can_be_found_after_splits() {
-        let mut tree = BTree::new(3);
-        // Ascending, then descending, then shuffled, so splits happen at both ends and the middle
-        let keys: Vec<i32> = (0..50)
-            .chain((50..100).rev())
-            .map(|i| (i * 37) % 100)
-            .collect();
-        for &key in &keys {
-            tree.insert(key, key * 10);
+        let mut chain = vec![leaves[0].0];
+        while let PageType::BTreeLeaf { next: Some(next) } = pool
+            .get_page(tree.name(), *chain.last().unwrap())
+            .unwrap()
+            .header
+            .page_type
+        {
+            chain.push(next);
         }
+        let in_order: Vec<PageId> = leaves.iter().map(|&(page_id, _)| page_id).collect();
+        assert_eq!(chain, in_order, "the leaf chain skips or repeats leaves");
+    }
 
-        let missing: Vec<i32> = keys
-            .iter()
-            .copied()
-            .filter(|key| tree.get(key) != Some(&(key * 10)))
-            .collect();
-        assert!(missing.is_empty(), "not found: {missing:?}\n{tree:?}");
+    #[test]
+    fn test_an_empty_tree_has_no_entries() {
+        let mut pool = BufferPool::in_memory();
+        let tree = BTree::create(&mut pool, "t.index").unwrap();
+        assert_eq!(tree.len(&mut pool).unwrap(), 0);
+        assert!(scan(&tree, &mut pool, &[]).is_empty());
+    }
+
+    #[test]
+    fn test_the_root_stays_a_leaf_until_it_fills() {
+        let mut pool = BufferPool::in_memory();
+        let tree = BTree::create(&mut pool, "t.index").unwrap();
+        let root_type = |pool: &mut BufferPool| {
+            let root = tree.meta(pool).unwrap().root;
+            pool.get_page(tree.name(), root).unwrap().header.page_type
+        };
+
+        for n in 0..10u32 {
+            tree.insert(&mut pool, &n.to_be_bytes()).unwrap();
+        }
+        assert!(matches!(root_type(&mut pool), PageType::BTreeLeaf { .. }));
+
+        for n in 10..1000u32 {
+            tree.insert(&mut pool, &n.to_be_bytes()).unwrap();
+        }
+        assert_eq!(root_type(&mut pool), PageType::BTreeInternal);
+        check(&tree, &mut pool);
+    }
+
+    #[test]
+    fn test_entries_come_back_in_order_after_inserts_and_removes() {
+        let mut pool = BufferPool::in_memory();
+        let tree = BTree::create(&mut pool, "t.index").unwrap();
+        let mut rng = Rng(0x5eed);
+        let mut expected = BTreeSet::new();
+
+        for _ in 0..20_000 {
+            let entry = rng.entry();
+            if expected.insert(entry.clone()) {
+                tree.insert(&mut pool, &entry).unwrap();
+            } else {
+                assert!(
+                    tree.insert(&mut pool, &entry).is_err(),
+                    "a duplicate went in"
+                );
+            }
+        }
+        check(&tree, &mut pool);
+        assert_eq!(
+            scan(&tree, &mut pool, &[]),
+            Vec::from_iter(expected.clone())
+        );
+
+        // Remove every other entry, then put some back, so pages are compacted and reused
+        let removed: Vec<Vec<u8>> = expected.iter().step_by(2).cloned().collect();
+        for entry in &removed {
+            assert!(tree.remove(&mut pool, entry).unwrap());
+            expected.remove(entry);
+        }
+        assert!(!tree.remove(&mut pool, &removed[0]).unwrap());
+        for entry in removed.iter().step_by(3) {
+            tree.insert(&mut pool, entry).unwrap();
+            expected.insert(entry.clone());
+        }
+        check(&tree, &mut pool);
+        assert_eq!(tree.len(&mut pool).unwrap(), expected.len() as u64);
+
+        for _ in 0..200 {
+            let from = rng.entry();
+            let want: Vec<Vec<u8>> = expected.range(from.clone()..).cloned().collect();
+            assert_eq!(scan(&tree, &mut pool, &from), want);
+        }
+    }
+
+    #[test]
+    fn test_an_entry_longer_than_the_limit_is_refused() {
+        let mut pool = BufferPool::in_memory();
+        let tree = BTree::create(&mut pool, "t.index").unwrap();
+        assert!(tree.insert(&mut pool, &[1; MAX_ENTRY]).is_ok());
+        assert!(tree.insert(&mut pool, &[1; MAX_ENTRY + 1]).is_err());
+    }
+
+    #[test]
+    fn test_the_tree_survives_eviction_and_reopening() {
+        let dir = std::env::temp_dir().join(format!("scuttle-btree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut rng = Rng(0xb7ee);
+        let entries: BTreeSet<Vec<u8>> = (0..5_000).map(|_| rng.entry()).collect();
+
+        // 4 cached pages, so nearly every step evicts and later reads pages back
+        let mut pool = BufferPool::with_capacity(&dir, 4);
+        let tree = BTree::create(&mut pool, "t.index").unwrap();
+        for entry in &entries {
+            tree.insert(&mut pool, entry).unwrap();
+        }
+        pool.flush().unwrap();
+
+        let mut pool = BufferPool::with_capacity(&dir, 4);
+        let tree = BTree::open("t.index");
+        check(&tree, &mut pool);
+        assert_eq!(scan(&tree, &mut pool, &[]), Vec::from_iter(entries));
+        assert!(dir.join("t.index").exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
