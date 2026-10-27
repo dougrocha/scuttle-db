@@ -144,11 +144,17 @@ page reads.
 | Copy-on-write B+tree (LMDB, BoltDB) | Never overwrite a page. Copy the leaf-to-root path, then swap the meta page. | Crash-safe without a log. It's a good second project. |
 | LSM tree (RocksDB) | Memtable, sorted files, compaction | Not page-based. Read about it for contrast. |
 
+**Starting point: `src/storage/btree.rs`.** This is the in-memory B+tree from the first commit. It was removed in Phase 0, then brought back and fixed (keys equal to a separator now go right). Phase 3 moves it onto pages instead of writing a new tree, and it replaces the `BTreeMap` in `TableIndex`:
+- A node becomes a page, and a `Box` child becomes a `PageId`.
+- `next_node` becomes the right sibling's page id. In memory it could never be set, because the parent already owns the sibling.
+- "Full" means the page has no room for the entry, instead of `2t - 1` keys, because text keys vary in size.
+- It splits full nodes on the way down (CLRS style). A split's separator always fits in the parent, so the tree needs neither parent pointers nor a stack of pages. The cost is that some nodes split before they had to.
+
 **Choices inside the design:**
 - **B+tree, not B-tree.** Values live only in leaves and leaves are chained, so a range scan is one descent and then a walk along the chain.
 - **Key = (key, ctid).** Every entry is unique, a delete finds exactly its entry, and non-unique indexes come free. Postgres has done this since version 12.
 - **Byte-comparable key encoding.** For i64, flip the sign bit and write big-endian. Text gets an escaped terminator. Comparing keys is then just comparing bytes.
-- **No parent pointers.** Keep a stack of pages while descending instead. The `parent_page_id` field already in `PageType` should go, because each split would have to rewrite every child's parent pointer.
+- **No parent pointers.** Splitting on the way down already makes them unnecessary. The `parent_page_id` field already in `PageType` should go, because each split would have to rewrite every child's parent pointer.
 - **Long keys.** Cap the key size (Postgres caps at about 1/3 of a page) instead of building overflow pages.
 - **Deletes.** Remove the entry right away and never merge pages. Postgres doesn't merge either.
 - **Crash safety without a WAL.** The index can always be rebuilt from the heap. Store a generation number in the metapage, and if it doesn't match on open, do a bulk rebuild.
