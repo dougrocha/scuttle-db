@@ -1294,6 +1294,20 @@ mod tests {
     }
 
     #[test]
+    fn test_group_by_puts_every_nan_in_one_group() {
+        let mut db = TestDb::new("group-nan");
+        db.execute("CREATE TABLE item (x FLOAT)");
+        db.execute("INSERT INTO item VALUES (10000000000.0), (10000000000.0), (1.0)");
+        // 1e10 to the 32nd overflows to infinity, and infinity minus itself is NaN
+        let power = vec!["x"; 32].join(" * ");
+        db.execute(&format!("UPDATE item SET x = {power}"));
+
+        let rows = db.query("SELECT x - x AS n, COUNT(*) FROM item GROUP BY x - x");
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows.iter().any(|row| row[1] == Value::Int64(2)), "{rows:?}");
+    }
+
+    #[test]
     fn test_group_by_order_by_aggregate() {
         let mut db = TestDb::new("group-order");
 
@@ -1824,15 +1838,28 @@ mod tests {
     fn test_a_float_index_finds_what_a_scan_finds() {
         let mut db = TestDb::new("float-index-agrees");
         db.execute("CREATE TABLE item (price FLOAT UNIQUE)");
-        db.execute("INSERT INTO item VALUES (0.0000000000000001), (0.0), (1.0)");
+        // Enough rows that the optimizer picks the index for a narrow range
+        let values: Vec<String> = (1..=100).map(|n| format!("({n}.0)")).collect();
+        db.execute(&format!("INSERT INTO item VALUES {}", values.join(", ")));
+        db.execute("INSERT INTO item VALUES (0.0000000000000001), (0.0)");
 
         // `price + 0.0` can't use the index, so each pair compares the index to a scan
-        for filter in ["= 0.0", "> 0.0", "< 0.0000000000000001", "= 1.0"] {
-            let indexed = db.query(&format!("SELECT price FROM item WHERE price {filter}"));
+        for filter in [
+            "= 0.0",
+            "< 0.0000000000000001",
+            "<= 0.0000000000000001",
+            "> 99.0",
+            "= 1.0",
+        ] {
+            let indexed = format!("SELECT price FROM item WHERE price {filter} ORDER BY price");
+            assert!(
+                db.db.explain(&indexed).unwrap().contains("IndexScan: item"),
+                "{filter}"
+            );
             let scanned = db.query(&format!(
-                "SELECT price FROM item WHERE price + 0.0 {filter}"
+                "SELECT price FROM item WHERE price + 0.0 {filter} ORDER BY price"
             ));
-            assert_eq!(indexed, scanned, "WHERE price {filter}");
+            assert_eq!(db.query(&indexed), scanned, "WHERE price {filter}");
         }
         assert_eq!(
             db.query("SELECT price FROM item WHERE price = 0.0"),
@@ -1945,6 +1972,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_a_table_can_be_made_again_over_the_files_a_failed_drop_left() {
         use std::os::unix::fs::PermissionsExt;
 

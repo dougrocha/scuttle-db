@@ -507,7 +507,14 @@ impl ExecutionNode for AggregateExec {
                     .map(|expr| evaluator.evaluate(expr, &row))
                     .collect::<Result<Vec<_>>>()?;
 
-                let index = match groups.iter().position(|(k, _)| *k == key) {
+                // Keys match as ORDER BY sees them, so all NULLs form one group, and so do
+                // all NaNs, and -0.0 and 0.0
+                let same = |k: &[Value]| {
+                    k.iter()
+                        .zip(&key)
+                        .all(|(a, b)| compare_values(a, b).is_eq())
+                };
+                let index = match groups.iter().position(|(k, _)| same(k)) {
                     Some(index) => index,
                     None => {
                         groups.push((key, self.new_accumulators()));
