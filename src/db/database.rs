@@ -261,6 +261,12 @@ impl Database {
                 )));
             }
         }
+        // The database keeps its own tables, such as the catalog, under names like these
+        if name.starts_with("__") {
+            return Err(DatabaseError::InvalidQuery(format!(
+                "invalid name \"{name}\": table names starting with __ are reserved"
+            )));
+        }
 
         let primary_keys = schema
             .columns
@@ -1742,6 +1748,32 @@ mod tests {
         db.db.set_sort_mem(1024);
         db.db.initialize().unwrap();
         lookups(&mut db);
+    }
+
+    #[test]
+    fn test_a_table_cannot_take_the_catalogs_name() {
+        // Before any table exists there is no catalog file, so nothing else stops this name
+        let dir = std::env::temp_dir().join(format!("scuttle-reserved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut db = Database::new(&dir);
+        db.initialize().unwrap();
+
+        assert!(
+            db.execute_query(r#"CREATE TABLE "__catalog__" (id INT)"#)
+                .is_err()
+        );
+        assert!(
+            db.execute_query(r#"CREATE TABLE "__mine" (id INT)"#)
+                .is_err()
+        );
+        db.execute_query("CREATE TABLE kept (id INT)").unwrap();
+        db.execute_query("INSERT INTO kept VALUES (1)").unwrap();
+
+        let mut db = Database::new(&dir);
+        db.initialize().unwrap();
+        let rows = db.execute_query("SELECT id FROM kept").unwrap().rows;
+        assert_eq!(rows.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
