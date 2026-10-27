@@ -62,7 +62,23 @@ pub struct BufferPool {
     data_directory: Option<PathBuf>,
 
     stats: CacheStats,
+
+    /// Whether the [`UNFLUSHED`] marker file exists: changed pages may be partly written.
+    unflushed: bool,
+
+    /// Whether the marker was already there when the pool was opened, see
+    /// [`BufferPool::was_left_unflushed`].
+    left_unflushed: bool,
 }
+
+/// A file that exists in the data directory while changed pages are waiting to be
+/// written, and is deleted once [`BufferPool::flush`] has written them all.
+///
+/// Finding it when the database opens means the last run stopped partway through: some
+/// of its changes may have reached their files and some not, so a table and its index can
+/// disagree. It covers a crash of the process. A power cut can lose writes the OS still
+/// held in memory, the marker's included, and only a write-ahead log with fsync covers that.
+pub(crate) const UNFLUSHED: &str = "unflushed";
 
 #[derive(Debug)]
 struct Frame {
@@ -89,11 +105,31 @@ impl BufferPool {
 
     /// A pool that caches at most `pages` pages (at least one).
     pub fn with_capacity(data_directory: impl Into<PathBuf>, pages: usize) -> Self {
+        let data_directory = data_directory.into();
+        let left_unflushed = data_directory.join(UNFLUSHED).exists();
         Self {
             capacity: Some(pages.max(1)),
-            data_directory: Some(data_directory.into()),
+            data_directory: Some(data_directory),
+            unflushed: left_unflushed,
+            left_unflushed,
             ..Self::default()
         }
+    }
+
+    /// Whether the last run left changes it never finished writing. See [`UNFLUSHED`].
+    pub(crate) fn was_left_unflushed(&self) -> bool {
+        self.left_unflushed
+    }
+
+    /// Creates the [`UNFLUSHED`] marker, before the first changed page can be written.
+    fn note_unflushed(&mut self) -> Result<()> {
+        if !self.unflushed
+            && let Some(dir) = &self.data_directory
+        {
+            File::create(dir.join(UNFLUSHED)).into_diagnostic()?;
+            self.unflushed = true;
+        }
+        Ok(())
     }
 
     pub fn in_memory() -> Self {
@@ -129,7 +165,7 @@ impl BufferPool {
     /// forgetting to say so.
     pub(crate) fn get_page_mut(&mut self, table_name: &str, page_id: PageId) -> Result<&mut Page> {
         let slot = self.load(table_name, page_id)?;
-        self.mark_dirty(slot);
+        self.mark_dirty(slot)?;
         Ok(&mut self.frame_mut(slot).page)
     }
 
@@ -159,6 +195,9 @@ impl BufferPool {
         page: Page,
         dirty: bool,
     ) -> Result<usize> {
+        if dirty {
+            self.note_unflushed()?;
+        }
         let slot = self.free_slot()?;
         let frame = Frame {
             table_name: table_name.to_string(),
@@ -217,12 +256,13 @@ impl BufferPool {
         }
     }
 
-    fn mark_dirty(&mut self, slot: usize) {
-        let frame = self.frame_mut(slot);
-        if !frame.dirty {
-            frame.dirty = true;
+    fn mark_dirty(&mut self, slot: usize) -> Result<()> {
+        if !self.frame(slot).dirty {
+            self.note_unflushed()?;
+            self.frame_mut(slot).dirty = true;
             self.dirty_slots.push(slot);
         }
+        Ok(())
     }
 
     fn frame(&self, slot: usize) -> &Frame {
@@ -321,6 +361,13 @@ impl BufferPool {
         dirty.dedup();
         for slot in dirty {
             self.write_frame(slot)?;
+        }
+
+        if self.unflushed
+            && let Some(dir) = &self.data_directory
+        {
+            std::fs::remove_file(dir.join(UNFLUSHED)).into_diagnostic()?;
+            self.unflushed = false;
         }
         Ok(())
     }
@@ -426,6 +473,31 @@ mod tests {
             assert_eq!(first_byte(&mut pool, page_id), page_id as u8);
         }
         assert!(pool.stats().reads >= 4, "{:?}", pool.stats());
+    }
+
+    #[test]
+    fn test_the_unflushed_marker_lasts_from_the_first_change_to_the_flush() {
+        let dir = temp_dir("marker");
+        let marker = dir.join(UNFLUSHED);
+        let mut pool = BufferPool::with_capacity(&dir, 2);
+
+        pool.allocate_page("t", PageType::Table).unwrap();
+        assert!(marker.exists());
+        pool.flush().unwrap();
+        assert!(!marker.exists());
+
+        // Reading doesn't change anything, so it leaves no marker
+        pool.get_page("t", 0).unwrap();
+        assert!(!marker.exists());
+        assert!(!BufferPool::with_capacity(&dir, 2).was_left_unflushed());
+
+        // A run that stops before flushing is seen by the next one
+        pool.get_page_mut("t", 0).unwrap();
+        drop(pool);
+        let mut pool = BufferPool::with_capacity(&dir, 2);
+        assert!(pool.was_left_unflushed());
+        pool.flush().unwrap();
+        assert!(!marker.exists());
     }
 
     #[test]
