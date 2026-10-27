@@ -4,6 +4,8 @@
 
 use std::{collections::BTreeMap, ops::Bound};
 
+use miette::Result;
+
 use crate::{
     Value,
     db::table::{
@@ -11,6 +13,7 @@ use crate::{
         table_def::TableDef,
     },
     sql::{analyzer::AnalyzedExpression, ast::operator::Operator, planner::logical::LogicalPlan},
+    storage::buffer_pool::BufferPool,
 };
 
 /// Above this share of an index's rows, fetching rows one at a time through the index
@@ -19,9 +22,16 @@ use crate::{
 const MAX_INDEX_FRACTION: f64 = 0.1;
 
 /// Runs every rewrite on a plan before it is executed or explained.
-pub(crate) fn optimize(plan: &mut LogicalPlan, tables: &BTreeMap<String, TableDef>) {
-    use_indexes(plan, tables);
+///
+/// Reads index pages through `pool`, to count how many rows an index would find.
+pub(crate) fn optimize(
+    plan: &mut LogicalPlan,
+    tables: &BTreeMap<String, TableDef>,
+    pool: &mut BufferPool,
+) -> Result<()> {
+    use_indexes(plan, tables, pool)?;
     use_top_n(plan);
+    Ok(())
 }
 
 /// Turns the Sort under a `LIMIT n OFFSET m` into a TopN that keeps only `n + m` rows.
@@ -61,7 +71,11 @@ fn bound_sort(plan: &mut LogicalPlan, k: u64) {
 ///
 /// The Filter stays in place and still checks each row, so the index only has to find
 /// a superset of the matching rows.
-pub(crate) fn use_indexes(plan: &mut LogicalPlan, tables: &BTreeMap<String, TableDef>) {
+pub(crate) fn use_indexes(
+    plan: &mut LogicalPlan,
+    tables: &BTreeMap<String, TableDef>,
+    pool: &mut BufferPool,
+) -> Result<()> {
     match plan {
         LogicalPlan::Filter { input, condition } => {
             if let LogicalPlan::Scan {
@@ -69,40 +83,47 @@ pub(crate) fn use_indexes(plan: &mut LogicalPlan, tables: &BTreeMap<String, Tabl
             } = input.as_mut()
             {
                 if let Some(table) = tables.get(table_name.as_str()) {
-                    *index = pick_index(condition, &table.indexes);
+                    *index = pick_index(condition, &table.indexes, pool)?;
                 }
+                Ok(())
             } else {
-                use_indexes(input, tables);
+                use_indexes(input, tables, pool)
             }
         }
         LogicalPlan::Projection { input, .. }
         | LogicalPlan::Aggregate { input, .. }
         | LogicalPlan::Sort { input, .. }
         | LogicalPlan::TopN { input, .. }
-        | LogicalPlan::Limit { input, .. } => use_indexes(input, tables),
+        | LogicalPlan::Limit { input, .. } => use_indexes(input, tables, pool),
         LogicalPlan::Join { left, right, .. } => {
-            use_indexes(left, tables);
-            use_indexes(right, tables);
+            use_indexes(left, tables, pool)?;
+            use_indexes(right, tables, pool)
         }
-        _ => {}
+        _ => Ok(()),
     }
 }
 
 /// The range of the index that finds the fewest rows, if any finds few enough.
-fn pick_index(condition: &AnalyzedExpression, indexes: &[TableIndex]) -> Option<IndexRange> {
+fn pick_index(
+    condition: &AnalyzedExpression,
+    indexes: &[TableIndex],
+    pool: &mut BufferPool,
+) -> Result<Option<IndexRange>> {
     let mut conjuncts = Vec::new();
     split_and(condition, &mut conjuncts);
 
-    indexes
-        .iter()
-        .filter_map(|index| {
-            let range = narrow(index, &conjuncts)?;
-            let limit = (index.len as f64 * MAX_INDEX_FRACTION) as usize + 1;
-            let rows = index.count_up_to(&range, limit);
-            (rows < limit).then_some((rows, range))
-        })
-        .min_by_key(|(rows, _)| *rows)
-        .map(|(_, range)| range)
+    let mut best: Option<(usize, IndexRange)> = None;
+    for index in indexes {
+        let Some(range) = narrow(index, &conjuncts) else {
+            continue;
+        };
+        let limit = (index.len(pool)? as f64 * MAX_INDEX_FRACTION) as usize + 1;
+        let rows = index.count_up_to(pool, &range, limit)?;
+        if rows < limit && best.as_ref().is_none_or(|(fewest, _)| rows < *fewest) {
+            best = Some((rows, range));
+        }
+    }
+    Ok(best.map(|(_, range)| range))
 }
 
 /// The keys of `index` that the conditions allow, or `None` if none of them is about

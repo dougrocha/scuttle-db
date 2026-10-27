@@ -14,7 +14,7 @@ use crate::{
     Schema, Value,
     db::table::{
         cursor::{TableCursor, fetch_row},
-        index::Ctid,
+        index::IndexCursor,
         row::Row,
     },
     sql::{
@@ -87,17 +87,22 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                 index: Some(range),
                 ..
             } => {
-                let table = self.context.get_table(&table_name)?;
-                let index = table
-                    .indexes
-                    .iter()
-                    .find(|index| index.column == range.column)
+                let db = &mut *self.context.database;
+                let index = db
+                    .tables
+                    .get(&table_name)
+                    .and_then(|table| {
+                        table
+                            .indexes
+                            .iter()
+                            .find(|index| index.column == range.column)
+                    })
                     .ok_or_else(|| {
                         miette!("No index on column {} of {table_name}", range.column)
                     })?;
 
                 Ok(Box::new(IndexScanExec {
-                    ctids: index.range(&range).into_iter(),
+                    ctids: index.scan(&mut db.buffer_manager, &range)?,
                     table_name,
                     schema,
                 }))
@@ -303,23 +308,24 @@ impl ExecutionNode for ScanExec {
     }
 }
 
-/// Reads only the rows an index found, in key order.
+/// Reads only the rows an index finds, in key order.
 ///
-/// The index lookup happens when the plan is built, which costs little: it is a list of
-/// row locations, not rows. Rows are fetched from the heap as batches are asked for.
+/// Building the plan finds the range's first leaf. After that, the leaves are read and the
+/// rows fetched from the heap only as batches are asked for, so a scan that stops early
+/// (under a LIMIT) reads no further.
 #[derive(Debug)]
 pub struct IndexScanExec {
     table_name: String,
     schema: Schema,
-    ctids: std::vec::IntoIter<Ctid>,
+    ctids: IndexCursor,
 }
 impl ExecutionNode for IndexScanExec {
     fn next(&mut self, ctx: &mut ExecCtx<'_>) -> Result<Option<RecordBatch>> {
         let batch_size = 1024;
 
-        let mut rows = Vec::with_capacity(batch_size.min(self.ctids.len()));
+        let mut rows = Vec::new();
         while rows.len() < batch_size
-            && let Some(ctid) = self.ctids.next()
+            && let Some(ctid) = self.ctids.next(ctx.pool)?
         {
             // The index drops a row when it is deleted, so this only skips rows deleted
             // after the lookup

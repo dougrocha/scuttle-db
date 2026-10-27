@@ -197,7 +197,7 @@ impl Database {
             for (name, schema) in tables {
                 self.tables
                     .insert(name.clone(), TableDef::new(name.clone(), schema));
-                self.rebuild_indexes(&name)?;
+                self.open_indexes(&name)?;
             }
         } else {
             println!("No catalog exists. Creates when adding a table");
@@ -248,6 +248,11 @@ impl Database {
             .save_table_metadata(&mut self.buffer_manager, name, &schema, 0);
 
         let table = TableDef::new(name.to_string(), schema);
+        for index in &table.indexes {
+            index
+                .create(&mut self.buffer_manager)
+                .map_err(|error| DatabaseError::InvalidQuery(error.to_string()))?;
+        }
         self.tables.insert(name.to_string(), table);
 
         Ok(())
@@ -309,6 +314,9 @@ impl Database {
 
         self.catalog.remove_table(&mut self.buffer_manager, name)?;
         self.buffer_manager.drop_table(name)?;
+        for index in &table_def(&self.tables, name)?.indexes {
+            self.buffer_manager.drop_table(index.file_name())?;
+        }
         self.tables.remove(name);
         self.buffer_manager.flush()
     }
@@ -344,8 +352,9 @@ impl Database {
         let page_id = free_page.header.page_id;
         let item_id = free_page.add_data(&encoded_data)?;
 
-        for index in &mut self.get_table_mut(table_name)?.indexes {
-            index.insert(&row, (page_id, item_id));
+        // Borrows only the tables, so the pool can be borrowed at the same time
+        for index in &table_def(&self.tables, table_name)?.indexes {
+            index.insert(&mut self.buffer_manager, &row, (page_id, item_id))?;
         }
 
         Ok((page_id, item_id))
@@ -359,8 +368,8 @@ impl Database {
             .get_page_mut(table_name, page_id)?
             .delete_item(item_id)?;
 
-        for index in &mut self.get_table_mut(table_name)?.indexes {
-            index.remove(row, ctid);
+        for index in &table_def(&self.tables, table_name)?.indexes {
+            index.remove(&mut self.buffer_manager, row, ctid)?;
         }
 
         Ok(())
@@ -371,15 +380,15 @@ impl Database {
     /// `replacing` holds the rows the statement deletes first (an UPDATE's old versions).
     /// Checked before anything is written, so a failing statement changes nothing.
     fn check_unique(
-        &self,
+        &mut self,
         table_name: &str,
         new_rows: &[Row],
         replacing: &BTreeSet<Ctid>,
     ) -> Result<()> {
-        let table = self.get_table(table_name)?;
+        let table = table_def(&self.tables, table_name)?;
         for index in &table.indexes {
             let column_name = &table.schema.columns[index.column].name;
-            index.check_unique(column_name, new_rows, replacing)?;
+            index.check_unique(&mut self.buffer_manager, column_name, new_rows, replacing)?;
         }
 
         Ok(())
@@ -394,18 +403,28 @@ impl Database {
         }
     }
 
-    fn rebuild_indexes(&mut self, table_name: &str) -> Result<()> {
-        if self.get_table(table_name)?.indexes.is_empty() {
+    /// Opens a table's indexes, building any whose file is missing from the table's rows.
+    /// That covers a database written before indexes were stored on disk.
+    fn open_indexes(&mut self, table_name: &str) -> Result<()> {
+        let mut missing = Vec::new();
+        for index in &table_def(&self.tables, table_name)?.indexes {
+            if !index.exists(&mut self.buffer_manager) {
+                missing.push(index.clone());
+            }
+        }
+        if missing.is_empty() {
             return Ok(());
         }
 
+        for index in &missing {
+            index.create(&mut self.buffer_manager)?;
+        }
         for (page_id, item_id, row) in self.get_rows_with_location(table_name)? {
-            for index in &mut self.get_table_mut(table_name)?.indexes {
-                index.insert(&row, (page_id, item_id));
+            for index in &missing {
+                index.insert(&mut self.buffer_manager, &row, (page_id, item_id))?;
             }
         }
-
-        Ok(())
+        self.buffer_manager.flush()
     }
 
     /// Every live row of a table, with where it is stored.
@@ -559,7 +578,8 @@ impl Database {
     fn explain_analyze(&mut self, select_stmt: statement::SelectStatement) -> Result<String> {
         let mut context = CatalogContext::new(self);
         let mut plan = Analyzer::new(&context).analyze_select(select_stmt)?;
-        optimizer::optimize(&mut plan, &context.database.tables);
+        let db = &mut *context.database;
+        optimizer::optimize(&mut plan, &db.tables, &mut db.buffer_manager)?;
         let tree = explain::explain(&plan);
 
         // Building the plan includes the index lookup, so it is timed apart from running it
@@ -614,7 +634,8 @@ impl Database {
             }
         };
 
-        optimizer::optimize(&mut plan, &context.database.tables);
+        let db = &mut *context.database;
+        optimizer::optimize(&mut plan, &db.tables, &mut db.buffer_manager)?;
         Ok(explain::explain(&plan))
     }
 
@@ -655,7 +676,8 @@ impl Database {
         let mut context = CatalogContext::new(self);
         let analyzer = Analyzer::new(&context);
         let mut anayzed_plan = analyzer.analyze_select(select_stmt)?;
-        optimizer::optimize(&mut anayzed_plan, &context.database.tables);
+        let db = &mut *context.database;
+        optimizer::optimize(&mut anayzed_plan, &db.tables, &mut db.buffer_manager)?;
         let columns = anayzed_plan.output_schema().names();
 
         // TODO: Eventually add a optimizer here for logical_plan.
@@ -836,6 +858,17 @@ impl Database {
             ..QueryResponse::default()
         })
     }
+}
+
+/// The table called `name`. Takes only the tables, unlike [`Database::get_table`], so the
+/// buffer pool can be borrowed mutably at the same time.
+fn table_def<'a>(
+    tables: &'a std::collections::BTreeMap<String, TableDef>,
+    name: &str,
+) -> Result<&'a TableDef, DatabaseError> {
+    tables
+        .get(name)
+        .ok_or_else(|| DatabaseError::TableNotFound(name.to_string()))
 }
 
 #[cfg(test)]
@@ -1544,6 +1577,7 @@ mod tests {
 
         db.db.drop_table("item").unwrap();
         assert!(!db.dir.join("item.table").exists());
+        assert!(!db.dir.join("item_id.index").exists());
         db.reopen();
 
         assert!(db.db.execute_query("SELECT * FROM item").is_err());
@@ -1557,6 +1591,51 @@ mod tests {
         db.execute("INSERT INTO item VALUES (1)");
         assert_eq!(db.query("SELECT * FROM item"), [[Value::Int64(1)]]);
         assert!(db.db.drop_table("nope").is_err());
+    }
+
+    #[test]
+    fn test_an_index_is_kept_in_its_own_file_and_rebuilt_if_it_goes_missing() {
+        let mut db = TestDb::new("index-file");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, tag TEXT UNIQUE)");
+        let values: Vec<String> = (0..2000).map(|id| format!("({id}, 't{id}')")).collect();
+        db.execute(&format!("INSERT INTO item VALUES {}", values.join(", ")));
+        db.execute("DELETE FROM item WHERE id < 1000");
+        db.execute("UPDATE item SET id = id + 5000 WHERE id >= 1990");
+
+        let lookups = |db: &mut TestDb| {
+            assert_eq!(
+                db.query("SELECT tag FROM item WHERE id = 1500"),
+                [[Value::Text("t1500".into())]]
+            );
+            assert_eq!(
+                db.query("SELECT id FROM item WHERE id = 500"),
+                Vec::<Vec<Value>>::new()
+            );
+            assert_eq!(
+                db.query("SELECT count(*) FROM item WHERE id >= 6990"),
+                [[Value::Int64(10)]]
+            );
+            assert_eq!(
+                db.query("SELECT id FROM item WHERE tag = 't1995'"),
+                [[Value::Int64(6995)]]
+            );
+            // The index still knows which keys are taken
+            assert!(db.fails("INSERT INTO item VALUES (1500, 'new')"));
+            assert!(db.fails("INSERT INTO item VALUES (1, 't1600')"));
+        };
+
+        let index = db.dir.join("item_id.index");
+        assert!(index.exists() && db.dir.join("item_tag.index").exists());
+        lookups(&mut db);
+
+        db.reopen();
+        lookups(&mut db);
+
+        // Without its file, the index is built again from the table when the database opens
+        std::fs::remove_file(&index).unwrap();
+        db.reopen();
+        assert!(index.exists());
+        lookups(&mut db);
     }
 
     #[test]

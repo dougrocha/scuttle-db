@@ -1,14 +1,15 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::Bound,
-};
+use std::{collections::BTreeSet, ops::Bound};
 
 use miette::Result;
 
 use crate::{
     DataType, DatabaseError, Value,
     db::table::{column_def::ColumnConstraint, row::Row, schema::Schema},
-    storage::page::{ItemId, PageId},
+    storage::{
+        btree::{BTree, Cursor},
+        buffer_pool::BufferPool,
+        page::{ItemId, PageId},
+    },
 };
 
 /// Where a row is stored: its heap page and item (PostgreSQL's `ctid`).
@@ -86,25 +87,23 @@ pub(crate) fn entry_ctid(entry: &[u8]) -> Ctid {
     )
 }
 
-/// An in-memory index over one column: every key, in order, with the rows that hold it.
+/// An index over one column, stored as a B+tree in its own file, `<table>_<column>.index`.
 ///
-/// Only the index's existence is stored, as the column's PRIMARY KEY or UNIQUE constraint
-/// in the schema. The entries are rebuilt from the table when the database opens.
+/// Each entry is the column's key followed by the row's ctid (see [`encode_entry`]), so
+/// rows sharing a key are separate entries and a delete finds exactly its own.
 ///
 /// NULLs are not indexed, so a UNIQUE column may hold any number of them, as in SQL.
 #[derive(Debug, Clone)]
 pub(crate) struct TableIndex {
     pub(crate) column: usize,
     data_type: DataType,
-    entries: BTreeMap<IndexKey, Vec<Ctid>>,
-
-    /// Rows in the index. NULLs aren't indexed, so this can be less than the table's rows.
-    pub(crate) len: usize,
+    tree: BTree,
 }
 
 impl TableIndex {
-    /// One index per PRIMARY KEY or UNIQUE column whose type can be indexed, all empty.
-    pub(crate) fn for_schema(schema: &Schema) -> Vec<Self> {
+    /// One index per PRIMARY KEY or UNIQUE column whose type can be indexed. Their files
+    /// aren't touched: see [`TableIndex::exists`] and [`TableIndex::create`].
+    pub(crate) fn for_schema(table_name: &str, schema: &Schema) -> Vec<Self> {
         schema
             .columns
             .iter()
@@ -124,10 +123,29 @@ impl TableIndex {
             .map(|(column, def)| Self {
                 column,
                 data_type: def.data_type,
-                entries: BTreeMap::new(),
-                len: 0,
+                tree: BTree::open(&format!("{table_name}_{}.index", def.name)),
             })
             .collect()
+    }
+
+    /// The name of the index's file, which is also its name in the buffer pool.
+    pub(crate) fn file_name(&self) -> &str {
+        self.tree.name()
+    }
+
+    /// Whether the index's file has been created.
+    pub(crate) fn exists(&self, pool: &mut BufferPool) -> bool {
+        pool.page_count(self.tree.name()) > 0
+    }
+
+    /// Creates the index's file, holding no entries.
+    pub(crate) fn create(&self, pool: &mut BufferPool) -> Result<()> {
+        BTree::create(pool, self.tree.name()).map(|_| ())
+    }
+
+    /// Rows in the index. NULLs aren't indexed, so this can be less than the table's rows.
+    pub(crate) fn len(&self, pool: &mut BufferPool) -> Result<u64> {
+        self.tree.len(pool)
     }
 
     fn key(&self, row: &Row) -> Option<IndexKey> {
@@ -139,58 +157,67 @@ impl TableIndex {
         IndexKey::for_column(&self.data_type, value)
     }
 
-    /// The rows whose key is within `range`, in key order.
-    pub(crate) fn range(&self, range: &IndexRange) -> Vec<Ctid> {
-        self.ctids_in(range).collect()
+    /// The rows whose key is within `range`, in key order, read as they are asked for.
+    pub(crate) fn scan(&self, pool: &mut BufferPool, range: &IndexRange) -> Result<IndexCursor> {
+        let encode = |key: &IndexKey| {
+            let mut bytes = Vec::new();
+            key.encode(&mut bytes);
+            bytes
+        };
+        let lower = match &range.lower {
+            Bound::Included(key) => Bound::Included(encode(key)),
+            Bound::Excluded(key) => Bound::Excluded(encode(key)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let upper = match &range.upper {
+            Bound::Included(key) => Bound::Included(encode(key)),
+            Bound::Excluded(key) => Bound::Excluded(encode(key)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+
+        // Every entry of a key starts with the key's bytes, so they all sort at or after it
+        let start = match &lower {
+            Bound::Included(key) | Bound::Excluded(key) => key.as_slice(),
+            Bound::Unbounded => &[],
+        };
+        Ok(IndexCursor {
+            cursor: self.tree.seek(pool, start)?,
+            lower,
+            upper,
+        })
     }
 
     /// How many rows fall in `range`, counting no further than `limit`.
     ///
-    /// A `BTreeMap` can't count a range without walking it, so the limit keeps the cost
-    /// of asking "is this range small?" small even when the answer is no.
-    pub(crate) fn count_up_to(&self, range: &IndexRange, limit: usize) -> usize {
-        self.ctids_in(range).take(limit).count()
+    /// The tree doesn't know how many entries a range holds without walking it, so the
+    /// limit keeps the cost of asking "is this range small?" small even when the answer
+    /// is no.
+    pub(crate) fn count_up_to(
+        &self,
+        pool: &mut BufferPool,
+        range: &IndexRange,
+        limit: usize,
+    ) -> Result<usize> {
+        let mut cursor = self.scan(pool, range)?;
+        let mut count = 0;
+        while count < limit && cursor.next(pool)?.is_some() {
+            count += 1;
+        }
+        Ok(count)
     }
 
-    fn ctids_in<'a>(&'a self, range: &'a IndexRange) -> impl Iterator<Item = Ctid> + 'a {
-        // `BTreeMap::range` panics on bounds that cross, such as `id > 5 AND id < 3`.
-        // No key can match those, so there is nothing to read.
-        let crossed = match (&range.lower, &range.upper) {
-            (Bound::Included(lo), Bound::Included(hi)) => lo > hi,
-            (
-                Bound::Included(lo) | Bound::Excluded(lo),
-                Bound::Included(hi) | Bound::Excluded(hi),
-            ) => lo >= hi,
-            _ => false,
-        };
-
-        (!crossed)
-            .then(|| {
-                self.entries
-                    .range::<IndexKey, _>((range.lower.as_ref(), range.upper.as_ref()))
-            })
-            .into_iter()
-            .flatten()
-            .flat_map(|(_, ctids)| ctids.iter().copied())
+    pub(crate) fn insert(&self, pool: &mut BufferPool, row: &Row, ctid: Ctid) -> Result<()> {
+        match self.key(row) {
+            Some(key) => self.tree.insert(pool, &encode_entry(&key, ctid)),
+            None => Ok(()),
+        }
     }
 
-    pub(crate) fn insert(&mut self, row: &Row, ctid: Ctid) {
+    pub(crate) fn remove(&self, pool: &mut BufferPool, row: &Row, ctid: Ctid) -> Result<()> {
         if let Some(key) = self.key(row) {
-            self.entries.entry(key).or_default().push(ctid);
-            self.len += 1;
+            self.tree.remove(pool, &encode_entry(&key, ctid))?;
         }
-    }
-
-    pub(crate) fn remove(&mut self, row: &Row, ctid: Ctid) {
-        let Some(key) = self.key(row) else { return };
-        if let Some(ctids) = self.entries.get_mut(&key) {
-            let before = ctids.len();
-            ctids.retain(|&c| c != ctid);
-            self.len -= before - ctids.len();
-            if ctids.is_empty() {
-                self.entries.remove(&key);
-            }
-        }
+        Ok(())
     }
 
     /// Fails if writing `new_rows` would give two live rows the same key.
@@ -199,6 +226,7 @@ impl TableIndex {
     /// versions), so a row may keep its own key.
     pub(crate) fn check_unique(
         &self,
+        pool: &mut BufferPool,
         column_name: &str,
         new_rows: &[Row],
         replacing: &BTreeSet<Ctid>,
@@ -206,10 +234,19 @@ impl TableIndex {
         let mut seen = BTreeSet::new();
 
         for key in new_rows.iter().filter_map(|row| self.key(row)) {
-            let taken = self
-                .entries
-                .get(&key)
-                .is_some_and(|ctids| ctids.iter().any(|ctid| !replacing.contains(ctid)));
+            let range = IndexRange {
+                column: self.column,
+                lower: Bound::Included(key.clone()),
+                upper: Bound::Included(key.clone()),
+            };
+            let mut taken = false;
+            let mut rows = self.scan(pool, &range)?;
+            while let Some(ctid) = rows.next(pool)? {
+                if !replacing.contains(&ctid) {
+                    taken = true;
+                    break;
+                }
+            }
 
             if taken || !seen.insert(key.clone()) {
                 return Err(DatabaseError::ConstraintViolation(format!(
@@ -220,6 +257,42 @@ impl TableIndex {
         }
 
         Ok(())
+    }
+}
+
+/// The rows of one index range, read from the tree a row at a time.
+#[derive(Debug)]
+pub(crate) struct IndexCursor {
+    cursor: Cursor,
+
+    /// The range's bounds, as encoded keys. The cursor starts at the lower bound, but
+    /// still has to skip a key the lower bound excludes.
+    lower: Bound<Vec<u8>>,
+    upper: Bound<Vec<u8>>,
+}
+
+impl IndexCursor {
+    /// The next row in the range, or `None` past its end.
+    pub(crate) fn next(&mut self, pool: &mut BufferPool) -> Result<Option<Ctid>> {
+        while let Some(entry) = self.cursor.next(pool)? {
+            let key = &entry[..entry.len() - CTID_LEN];
+            if let Bound::Excluded(lower) = &self.lower
+                && key == lower.as_slice()
+            {
+                continue;
+            }
+
+            let past_end = match &self.upper {
+                Bound::Included(upper) => key > upper.as_slice(),
+                Bound::Excluded(upper) => key >= upper.as_slice(),
+                Bound::Unbounded => false,
+            };
+            if past_end {
+                return Ok(None);
+            }
+            return Ok(Some(entry_ctid(&entry)));
+        }
+        Ok(None)
     }
 }
 
