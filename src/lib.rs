@@ -17,4 +17,5 @@ pub use db::{
     },
 };
 pub use repl::run_repl;
+pub use sql::planner::physical::DEFAULT_SORT_MEM;
 pub use storage::buffer_pool::DEFAULT_CACHE_PAGES;

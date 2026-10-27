@@ -2,21 +2,26 @@ use std::io::{ErrorKind, IsTerminal, stderr, stdin, stdout};
 use std::process::ExitCode;
 
 use miette::{IntoDiagnostic, Result};
-use scuttle_db::{DEFAULT_CACHE_PAGES, Database, run_repl};
+use scuttle_db::{DEFAULT_CACHE_PAGES, DEFAULT_SORT_MEM, Database, run_repl};
 
 const USAGE: &str = "\
-Usage: scuttle-db [--data <dir> [--cache-pages <n>] | --in-memory]
+Usage: scuttle-db [--data <dir> [--cache-pages <n>] [--sort-mem <mb>] | --in-memory]
 
 Options:
   -d, --data <dir>         Store tables in <dir> (default: ./db)
       --cache-pages <n>    Keep at most <n> 8 KB pages in memory (default: 16384, 128 MB)
+      --sort-mem <mb>      Let a sort hold <mb> MB of rows before writing them to disk (default: 64)
       --in-memory          Keep all data in memory; nothing is written to disk
   -h, --help               Print this help
 ";
 
 /// Where the database keeps its tables, as chosen on the command line.
 enum Storage {
-    Dir { dir: String, cache_pages: usize },
+    Dir {
+        dir: String,
+        cache_pages: usize,
+        sort_mem: usize,
+    },
     InMemory,
 }
 
@@ -25,6 +30,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Storage>,
     let mut data = None;
     let mut in_memory = false;
     let mut cache_pages = None;
+    let mut sort_mem = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
@@ -41,6 +47,13 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Storage>,
                     _ => return Err(format!("{arg} needs a positive number, got {n}")),
                 }
             }
+            "--sort-mem" => {
+                let mb = args.next().ok_or_else(|| format!("{arg} needs a number"))?;
+                match mb.parse::<usize>() {
+                    Ok(mb) if mb > 0 => sort_mem = Some(mb * 1024 * 1024),
+                    _ => return Err(format!("{arg} needs a positive number, got {mb}")),
+                }
+            }
             "--in-memory" => in_memory = true,
             _ => return Err(format!("unknown argument: {arg}")),
         }
@@ -50,10 +63,14 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Storage>,
         (None, true) if cache_pages.is_some() => {
             Err("--cache-pages has no effect with --in-memory, which caches every page".to_string())
         }
+        (None, true) if sort_mem.is_some() => Err(
+            "--sort-mem has no effect with --in-memory, which always sorts in memory".to_string(),
+        ),
         (None, true) => Ok(Some(Storage::InMemory)),
         (data, false) => Ok(Some(Storage::Dir {
             dir: data.unwrap_or_else(|| "./db".to_string()),
             cache_pages: cache_pages.unwrap_or(DEFAULT_CACHE_PAGES),
+            sort_mem: sort_mem.unwrap_or(DEFAULT_SORT_MEM),
         })),
     }
 }
@@ -86,7 +103,15 @@ fn main() -> Result<ExitCode> {
     miette::set_panic_hook();
 
     let mut db = match storage {
-        Storage::Dir { dir, cache_pages } => Database::with_cache_pages(dir, cache_pages),
+        Storage::Dir {
+            dir,
+            cache_pages,
+            sort_mem,
+        } => {
+            let mut db = Database::with_cache_pages(dir, cache_pages);
+            db.set_sort_mem(sort_mem);
+            db
+        }
         Storage::InMemory => Database::in_memory(),
     };
     db.initialize().expect("Failed to init catalog");
