@@ -16,24 +16,21 @@ pub(crate) struct ResultTable {
 impl ResultTable {
     /// Writes the header to `out`, with columns sized to fit `columns` and `first_rows`.
     pub(crate) fn new(columns: &[String], first_rows: &[Row], out: &mut String) -> Self {
-        let cells = cells(first_rows);
-        let widths = columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                cells
-                    .iter()
-                    .filter_map(|row| row.get(i))
-                    .chain([name])
-                    .map(|cell| cell.chars().count())
-                    .max()
-                    .unwrap_or(0)
-            })
-            .collect();
+        // Measured one row at a time, so a big batch is never held as text all at once
+        let mut widths: Vec<usize> = columns.iter().map(|name| name.chars().count()).collect();
+        for row in first_rows {
+            for (width, value) in widths.iter_mut().zip(&row.values) {
+                *width = (*width).max(value.to_string().chars().count());
+            }
+        }
 
         let table = Self { widths, rows: 0 };
         table.write_line(columns, out);
-        let rule: Vec<String> = table.widths.iter().map(|width| "-".repeat(width + 2)).collect();
+        let rule: Vec<String> = table
+            .widths
+            .iter()
+            .map(|width| "-".repeat(width + 2))
+            .collect();
         out.push_str(&rule.join("+"));
         out.push('\n');
         table
@@ -41,8 +38,9 @@ impl ResultTable {
 
     /// Writes `rows` to `out`, one line each.
     pub(crate) fn push(&mut self, rows: &[Row], out: &mut String) {
-        for row in cells(rows) {
-            self.write_line(&row, out);
+        for row in rows {
+            let cells: Vec<String> = row.values.iter().map(Value::to_string).collect();
+            self.write_line(&cells, out);
         }
         self.rows += rows.len();
     }
@@ -62,10 +60,4 @@ impl ResultTable {
         out.push_str(padded.join("|").trim_end());
         out.push('\n');
     }
-}
-
-fn cells(rows: &[Row]) -> Vec<Vec<String>> {
-    rows.iter()
-        .map(|row| row.values.iter().map(Value::to_string).collect())
-        .collect()
 }

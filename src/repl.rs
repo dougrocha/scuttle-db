@@ -5,7 +5,9 @@
 
 use std::io::{self, BufRead, Write};
 
-use crate::Database;
+use miette::IntoDiagnostic;
+
+use crate::{Database, db::result_table::ResultTable};
 
 /// Prompt printed before each line of input.
 const PROMPT: &str = "DB: ";
@@ -78,7 +80,23 @@ pub fn run_repl<R: BufRead, W: Write, E: Write>(
             break;
         }
 
-        match db.execute_query(statement) {
+        // Rows are printed as each batch arrives, so a big result never sits in memory
+        let mut table: Option<ResultTable> = None;
+        let mut text = String::new();
+        let result = db.execute_query_streaming(statement, |columns, rows| {
+            let table = table.get_or_insert_with(|| ResultTable::new(columns, &rows, &mut text));
+            table.push(&rows, &mut text);
+            out.write_all(text.as_bytes()).into_diagnostic()?;
+            text.clear();
+            Ok(())
+        });
+
+        match result {
+            Ok(_) if let Some(table) = table => {
+                table.finish(&mut text);
+                writeln!(out, "{text}")?;
+            }
+            // Writes, and queries that returned no rows
             Ok(response) => writeln!(out, "{response}")?,
             Err(error) => {
                 failed += 1;
@@ -138,6 +156,25 @@ mod tests {
     fn test_run_repl_exits_on_empty_input() {
         let s = run("");
         assert_eq!(s.out, "DB: Exiting Scuttle\n");
+    }
+
+    #[test]
+    fn test_run_repl_prints_a_result_that_arrives_in_several_batches() {
+        // 3,000 rows come out of the scan in more than one batch
+        let values: Vec<String> = (1..=3000).map(|id| format!("({id})")).collect();
+        let s = run(&format!(
+            "CREATE TABLE t (id INT)\nINSERT INTO t VALUES {}\nSELECT id FROM t\nSELECT id FROM t WHERE id = 0\n",
+            values.join(", ")
+        ));
+
+        let table = s.out.split("DB: ").nth(3).unwrap();
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines[..3], [" id", "------", " 1"]);
+        assert_eq!(lines[lines.len() - 2..], [" 3000", "(3000 rows)"]);
+        assert_eq!(lines.len(), 3000 + 3);
+
+        // No rows: the header is still printed
+        assert_eq!(s.out.split("DB: ").nth(4).unwrap(), " id\n----\n(0 rows)\n");
     }
 
     #[test]
