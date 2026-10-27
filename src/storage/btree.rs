@@ -22,7 +22,7 @@ use miette::{Result, miette};
 
 use crate::storage::{
     buffer_pool::BufferPool,
-    page::{ItemPointer, Page, PageId, PageType},
+    page::{ItemPointer, Page, PageHeader, PageId, PageType},
 };
 
 /// The longest entry the tree takes, in bytes. Postgres caps index entries too (at about
@@ -170,17 +170,24 @@ impl BTree {
             let new_root = pool.allocate_page(&self.name, PageType::BTreeInternal)?;
             pool.get_page_mut(&self.name, new_root)?
                 .add_data(&internal_item(meta.root, &[]))?;
-            self.split_child(pool, new_root, 0)?;
+            self.split_child(pool, new_root, 0, entry, true)?;
             meta.root = new_root;
         }
 
-        self.insert_non_full(pool, meta.root, entry)?;
+        self.insert_non_full(pool, meta.root, entry, true)?;
         meta.len += 1;
         self.write_meta(pool, meta)
     }
 
     /// Inserts into the subtree at `page_id`, which has room for one more item.
-    fn insert_non_full(&self, pool: &mut BufferPool, page_id: PageId, entry: &[u8]) -> Result<()> {
+    /// `rightmost` says the subtree is the tree's right edge: nothing sorts after it.
+    fn insert_non_full(
+        &self,
+        pool: &mut BufferPool,
+        page_id: PageId,
+        entry: &[u8],
+        rightmost: bool,
+    ) -> Result<()> {
         let page = pool.get_page(&self.name, page_id)?;
         match page.header.page_type {
             PageType::BTreeLeaf { .. } => {
@@ -193,9 +200,11 @@ impl BTree {
             PageType::BTreeInternal => {
                 let mut index = child_index(page, entry);
                 let mut child = child_at(page, index);
+                let last = page.header.item_count as usize - 1;
 
                 if !self.make_room(pool, child)? {
-                    self.split_child(pool, page_id, index)?;
+                    let child_rightmost = rightmost && index == last;
+                    self.split_child(pool, page_id, index, entry, child_rightmost)?;
                     // The split put a new child right after this one. Its lowest entry
                     // decides which of the two the entry belongs in.
                     let page = pool.get_page(&self.name, page_id)?;
@@ -205,7 +214,9 @@ impl BTree {
                     child = child_at(page, index);
                 }
 
-                self.insert_non_full(pool, child, entry)
+                // After a split the parent has one more child, so the last is one further
+                let last = pool.get_page(&self.name, page_id)?.header.item_count as usize - 1;
+                self.insert_non_full(pool, child, entry, rightmost && index == last)
             }
             other => Err(not_a_node(&self.name, page_id, other)),
         }
@@ -213,17 +224,40 @@ impl BTree {
 
     /// Splits the full child at `child_index` of `parent_id` in two, moving its upper
     /// half to a new page right after it. The parent must have room for one more item.
+    ///
+    /// When the child is on the tree's right edge (`rightmost`) and `entry` sorts after
+    /// everything in it, keys are probably being inserted in order, like a SERIAL id. An
+    /// even split would leave the left half empty forever, since every later key goes
+    /// right. So the left page keeps all it can short of [`FILL_SLACK`], as Postgres does.
     fn split_child(
         &self,
         pool: &mut BufferPool,
         parent_id: PageId,
         child_index: usize,
+        entry: &[u8],
+        rightmost: bool,
     ) -> Result<()> {
         let child_id = child_at(pool.get_page(&self.name, parent_id)?, child_index);
         let child = pool.get_page(&self.name, child_id)?;
         let page_type = child.header.page_type;
+        let at_end = rightmost && sorts_after_all(child, entry);
         let mut items = items(child);
-        let mut right_items = items.split_off(items.len() / 2);
+
+        let split = if at_end {
+            let mut used = 0;
+            let fits = items
+                .iter()
+                .take_while(|item| {
+                    used += item.len() + ItemPointer::SIZE;
+                    used <= Page::SIZE - PageHeader::SIZE - FILL_SLACK
+                })
+                .count();
+            // Both pages keep at least one item
+            fits.clamp(1, items.len() - 1)
+        } else {
+            items.len() / 2
+        };
+        let mut right_items = items.split_off(split);
 
         let right_id = pool.allocate_page(&self.name, page_type)?;
         let (left_type, right_type) = match page_type {
@@ -370,6 +404,15 @@ impl Cursor {
             self.pos = 0;
         }
         Ok(None)
+    }
+}
+
+/// Whether `entry` sorts after every key in the node.
+fn sorts_after_all(page: &Page, entry: &[u8]) -> bool {
+    let count = page.header.item_count as usize;
+    match page.header.page_type {
+        PageType::BTreeLeaf { .. } => count == 0 || item_at(page, count - 1) < entry,
+        _ => count <= 1 || key_at(page, count - 1) <= entry,
     }
 }
 
@@ -646,21 +689,37 @@ mod tests {
     }
 
     #[test]
-    fn test_a_built_tree_fills_its_pages() {
-        let entries = (0..100_000u64).map(|n| n.to_be_bytes().to_vec());
-        let mut pool = BufferPool::in_memory();
-        BTree::build(&mut pool, "built.index", entries.clone()).unwrap();
-        let inserted = BTree::create(&mut pool, "inserted.index").unwrap();
-        for entry in entries {
-            inserted.insert(&mut pool, &entry).unwrap();
-        }
+    fn test_in_order_inserts_fill_pages_as_well_as_a_build() {
+        let pages = |entries: Vec<u64>, build: bool| {
+            let mut pool = BufferPool::in_memory();
+            let entries = entries.into_iter().map(|n| n.to_be_bytes().to_vec());
+            if build {
+                let mut sorted: Vec<Vec<u8>> = entries.collect();
+                sorted.sort();
+                BTree::build(&mut pool, "t.index", sorted).unwrap();
+            } else {
+                let tree = BTree::create(&mut pool, "t.index").unwrap();
+                for entry in entries {
+                    tree.insert(&mut pool, &entry).unwrap();
+                }
+                check(&tree, &mut pool);
+            }
+            pool.page_count("t.index")
+        };
 
-        // In order, inserts leave every page half full. A build fills them to 90%.
-        let built_pages = pool.page_count("built.index");
-        let inserted_pages = pool.page_count("inserted.index");
+        let built = pages((0..30_000).collect(), true);
+        let ascending = pages((0..30_000).collect(), false);
+        // Random order splits evenly, leaving pages about 3/4 full on average
+        let mut rng = Rng(0xa5c);
+        let random = pages((0..30_000).map(|_| rng.next()).collect(), false);
+
         assert!(
-            built_pages * 3 < inserted_pages * 2,
-            "{built_pages} vs {inserted_pages}"
+            ascending * 10 < built * 11,
+            "ascending {ascending} vs built {built}"
+        );
+        assert!(
+            random > ascending,
+            "random {random} vs ascending {ascending}"
         );
     }
 
