@@ -225,15 +225,10 @@ impl Database {
 
     /// Checks if a table exists in the database.
     ///
-    /// Looks both in-memory (loaded tables) and on-disk (table files).
+    /// Every table in the catalog is loaded when the database opens, so a table file that
+    /// isn't loaded is one a failed drop left behind, not a table.
     fn table_exists(&self, name: &str) -> bool {
-        if self.tables.contains_key(name) {
-            true
-        } else {
-            self.data_directory
-                .as_ref()
-                .is_some_and(|dir| dir.join(format!("{name}.table")).exists())
-        }
+        self.tables.contains_key(name)
     }
 
     /// Creates a new table with the given schema.
@@ -1936,6 +1931,8 @@ mod tests {
 
         // The table is gone, though its files are still there
         assert!(db.fails("SELECT * FROM item"));
+        assert!(db.db.drop_table("item").is_err());
+        assert!(db.fails("INSERT INTO item VALUES (2)"));
         assert!(db.dir.join("item.table").exists());
 
         // Opening the database deletes the files no table owns
@@ -1945,6 +1942,30 @@ mod tests {
         assert!(!db.dir.join("item.id.index").exists());
         db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
         assert_eq!(db.query("SELECT * FROM item"), Vec::<Vec<Value>>::new());
+    }
+
+    #[test]
+    fn test_a_table_can_be_made_again_over_the_files_a_failed_drop_left() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut db = TestDb::new("drop-fails-create");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
+        db.execute("INSERT INTO item VALUES (1)");
+        std::fs::File::create(db.dir.join(UNFLUSHED)).unwrap();
+        std::fs::set_permissions(&db.dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let dropped = db.db.drop_table("item");
+        std::fs::set_permissions(&db.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(dropped.is_err());
+
+        // Without reopening, the old rows and index entries must not come back
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
+        assert_eq!(db.query("SELECT * FROM item"), Vec::<Vec<Value>>::new());
+        db.execute("INSERT INTO item VALUES (1)");
+        db.reopen();
+        assert_eq!(
+            db.query("SELECT * FROM item WHERE id = 1"),
+            [[Value::Int64(1)]]
+        );
     }
 
     #[test]
