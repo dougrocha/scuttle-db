@@ -591,16 +591,26 @@ impl Database {
     fn explain_analyze(&mut self, select_stmt: statement::SelectStatement) -> Result<String> {
         let mut context = CatalogContext::new(self);
         let mut plan = Analyzer::new(&context).analyze_select(select_stmt)?;
+
+        // Planning counts the optimizer, which walks an index to see how many rows it
+        // finds, and building the plan, which finds the index range's first leaf
+        let start = Instant::now();
         let db = &mut *context.database;
         optimizer::optimize(&mut plan, &db.tables, &mut db.buffer_manager)?;
         let tree = explain::explain(&plan);
-
-        // Building the plan includes the index lookup, so it is timed apart from running it
-        let start = Instant::now();
         let mut planner = PhysicalPlanner::profiled(&mut context);
         let mut executor = planner.create_physical_plan(plan)?;
         let profile = planner.into_profile();
         let planning = start.elapsed();
+
+        // Each line of the tree is one node, in the order the planner built them
+        if tree.lines().count() != profile.len() {
+            return Err(miette::miette!(
+                "EXPLAIN ANALYZE has {} plan lines but stats for {} nodes",
+                tree.lines().count(),
+                profile.len()
+            ));
+        }
 
         let start = Instant::now();
         while executor.next(&mut self.exec_ctx())?.is_some() {}
