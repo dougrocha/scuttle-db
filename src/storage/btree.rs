@@ -255,19 +255,7 @@ impl BTree {
             // Both pages keep at least one item
             fits.clamp(1, items.len() - 1)
         } else {
-            // Half the bytes, not half the items: with keys of different lengths, half the
-            // items could leave one side with no room. Each side ends up with at most half
-            // the page plus one item, so both have room for another.
-            let total: usize = items.iter().map(Vec::len).sum();
-            let mut used = 0;
-            let half = items
-                .iter()
-                .take_while(|item| {
-                    used += item.len();
-                    used <= total / 2
-                })
-                .count();
-            half.clamp(1, items.len() - 1)
+            even_split(&items)
         };
         let mut right_items = items.split_off(split);
 
@@ -417,6 +405,25 @@ impl Cursor {
         }
         Ok(None)
     }
+}
+
+/// Where to split a full node's items so each side uses about half the page.
+///
+/// It splits by bytes, item pointers included, not by item count: with keys of different
+/// lengths, half the items could leave one side with no room. Each side ends up with at
+/// most half the page plus one item, so both have [`ROOM`] for another.
+fn even_split(items: &[Vec<u8>]) -> usize {
+    let size = |item: &Vec<u8>| item.len() + ItemPointer::SIZE;
+    let total: usize = items.iter().map(size).sum();
+    let mut used = 0;
+    let half = items
+        .iter()
+        .take_while(|item| {
+            used += size(item);
+            used <= total / 2
+        })
+        .count();
+    half.clamp(1, items.len() - 1)
 }
 
 /// Whether `entry` sorts after every key in the node.
@@ -753,6 +760,35 @@ mod tests {
         tree.insert(&mut pool, &long(5)).unwrap();
         check(&tree, &mut pool);
         assert_eq!(tree.len(&mut pool).unwrap(), 308);
+    }
+
+    #[test]
+    fn test_an_even_split_leaves_room_on_both_sides() {
+        let capacity = Page::SIZE - PageHeader::SIZE;
+        let used = |items: &[Vec<u8>]| -> usize {
+            items
+                .iter()
+                .map(|item| item.len() + ItemPointer::SIZE)
+                .sum()
+        };
+        // Long entries, then as many tiny ones as fit. Splitting by key bytes alone left
+        // the tiny half one byte short of room, because each tiny entry's pointer is
+        // bigger than the entry.
+        for (longs, tiny) in [(3, 1), (3, 2), (1, 1), (7, 1), (5, 14)] {
+            let mut items = vec![vec![0; MAX_ENTRY]; longs];
+            while capacity - used(&items) >= tiny + ItemPointer::SIZE {
+                items.push(vec![0; tiny]);
+            }
+
+            let split = even_split(&items);
+            let (left, right) = items.split_at(split);
+            for side in [left, right] {
+                assert!(
+                    capacity - used(side) >= ROOM,
+                    "{longs} long, {tiny}-byte entries"
+                );
+            }
+        }
     }
 
     #[test]
