@@ -1732,6 +1732,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_a_rebuild_that_stops_partway_leaves_the_marker() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut db = TestDb::new("rebuild-stops");
+        db.execute("CREATE TABLE first (id INT PRIMARY KEY)");
+        db.execute("CREATE TABLE second (id INT PRIMARY KEY)");
+        db.execute("INSERT INTO first VALUES (1)");
+        db.execute("INSERT INTO second VALUES (1)");
+
+        // A crash left the marker, and the second table can't be read, so the rebuild
+        // stops after the first table, as another crash there would
+        std::fs::File::create(db.dir.join(UNFLUSHED)).unwrap();
+        let second = db.dir.join("second.table");
+        std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let mut reopened = Database::new(&db.dir);
+        let failed = reopened.initialize().is_err();
+        std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(failed);
+        assert!(db.dir.join(UNFLUSHED).exists());
+    }
+
+    #[test]
     fn test_top_n_returns_the_same_rows_as_a_full_sort() {
         let mut db = TestDb::new("top-n");
         db.execute("CREATE TABLE item (id INT, grp INT, tag TEXT)");
