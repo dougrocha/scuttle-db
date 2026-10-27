@@ -11,6 +11,7 @@ use crate::{
     ColumnConstraint, ColumnDef, DatabaseError, Value,
     db::{
         catalog::system_catalog::SystemCatalog,
+        result_table::ResultTable,
         table::{
             Table, cursor::TableCursor, index::Ctid, row::Row, schema::Schema, table_def::TableDef,
         },
@@ -63,45 +64,12 @@ impl std::fmt::Display for QueryResponse {
             return write!(f, "OK");
         }
 
-        // Laid out like psql: each column as wide as its widest value
-        let cells: Vec<Vec<String>> = self
-            .rows
-            .iter()
-            .map(|row| row.values.iter().map(Value::to_string).collect())
-            .collect();
-        let widths: Vec<usize> = self
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                cells
-                    .iter()
-                    .filter_map(|row| row.get(i))
-                    .chain([name])
-                    .map(|cell| cell.chars().count())
-                    .max()
-                    .unwrap_or(0)
-            })
-            .collect();
-
-        let write_line = |f: &mut std::fmt::Formatter<'_>, cells: &[String]| {
-            let padded: Vec<String> = cells
-                .iter()
-                .zip(&widths)
-                .map(|(cell, &width)| format!(" {cell:<width$} "))
-                .collect();
-            writeln!(f, "{}", padded.join("|").trim_end())
-        };
-
-        write_line(f, &self.columns)?;
-        let rule: Vec<String> = widths.iter().map(|width| "-".repeat(width + 2)).collect();
-        writeln!(f, "{}", rule.join("+"))?;
-        for row in &cells {
-            write_line(f, row)?;
-        }
-
-        let noun = if cells.len() == 1 { "row" } else { "rows" };
-        write!(f, "({} {noun})", cells.len())
+        // One batch holds every row, so each column fits its widest value
+        let mut out = String::new();
+        let mut table = ResultTable::new(&self.columns, &self.rows, &mut out);
+        table.push(&self.rows, &mut out);
+        table.finish(&mut out);
+        f.write_str(&out)
     }
 }
 
