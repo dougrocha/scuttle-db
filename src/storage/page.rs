@@ -5,16 +5,21 @@ use crate::core::serialization::Serializable;
 pub type PageId = u32;
 pub type ItemId = u16;
 
+/// Stands for "no page" where a page id is stored, as in a last leaf's `next`.
+const NO_PAGE: PageId = PageId::MAX;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PageType {
-    BTreeInternal {
-        parent_page_id: Option<PageId>,
-        level: u16,
-    },
+    /// A B-tree page above the leaves. Item `i` is a child page and the lowest key in it.
+    BTreeInternal,
+
+    /// A B-tree page holding keys. `next` is the leaf to its right, for walking a range.
     BTreeLeaf {
-        next_leaf_page: Option<PageId>,
-        prev_leaf_page: Option<PageId>,
+        next: Option<PageId>,
     },
+
+    /// Page 0 of an index file: where the root is, and how many keys the tree holds.
+    BTreeMeta,
     Table,
     Catalog,
 }
@@ -53,12 +58,17 @@ impl Serializable<{ PageHeader::SIZE }> for PageHeader {
         data[4] = match this.page_type {
             PageType::Table => 0,
             PageType::Catalog => 1,
-            _ => panic!("Unsupported page type"),
+            PageType::BTreeInternal => 2,
+            PageType::BTreeLeaf { .. } => 3,
+            PageType::BTreeMeta => 4,
         };
         data[5..7].copy_from_slice(&this.lower.to_le_bytes());
         data[7..9].copy_from_slice(&this.upper.to_le_bytes());
         data[9..11].copy_from_slice(&this.item_count.to_le_bytes());
         data[11..13].copy_from_slice(&this.special.to_le_bytes());
+        if let PageType::BTreeLeaf { next } = this.page_type {
+            data[13..17].copy_from_slice(&next.unwrap_or(NO_PAGE).to_le_bytes());
+        }
         data
     }
 
@@ -67,7 +77,14 @@ impl Serializable<{ PageHeader::SIZE }> for PageHeader {
         let page_type = match data[4] {
             0 => PageType::Table,
             1 => PageType::Catalog,
-            2 | 3 => panic!("BTree is not supported yet"),
+            2 => PageType::BTreeInternal,
+            3 => {
+                let next = u32::from_le_bytes(data[13..17].try_into().unwrap());
+                PageType::BTreeLeaf {
+                    next: (next != NO_PAGE).then_some(next),
+                }
+            }
+            4 => PageType::BTreeMeta,
             _ => panic!("Unknown page type"),
         };
         let lower = u16::from_le_bytes(data[5..7].try_into().unwrap());
@@ -215,6 +232,55 @@ impl Page {
 
         self.data[start..end].copy_from_slice(&item_pointer.to_bytes());
         Ok(())
+    }
+
+    /// Adds an item so that it becomes item `pos`, moving the items from `pos` on up by
+    /// one. A B-tree page keeps its items in key order this way.
+    pub fn insert_at(&mut self, pos: usize, data: &[u8]) -> Result<()> {
+        let count = self.header.item_count as usize;
+        assert!(pos <= count, "insert at {pos} past the {count} items");
+
+        self.add_data(data)?;
+        // `add_data` put the new pointer last. Rotate it down into place.
+        self.data[pos * ItemPointer::SIZE..(count + 1) * ItemPointer::SIZE]
+            .rotate_right(ItemPointer::SIZE);
+        Ok(())
+    }
+
+    /// Takes out item `pos`, moving the items after it down by one.
+    ///
+    /// Its bytes stay where they were until [`Page::compact`], so the free space doesn't
+    /// grow until then.
+    pub fn remove_at(&mut self, pos: usize) {
+        let count = self.header.item_count as usize;
+        assert!(pos < count, "remove at {pos} past the {count} items");
+
+        self.data[pos * ItemPointer::SIZE..count * ItemPointer::SIZE]
+            .rotate_left(ItemPointer::SIZE);
+        self.header.item_count -= 1;
+        self.header.lower -= ItemPointer::SIZE as u16;
+    }
+
+    /// Rewrites the items back to back, so the bytes of removed items become free space.
+    pub fn compact(&mut self) {
+        let items: Vec<Vec<u8>> = (0..self.header.item_count)
+            .map(|id| self.get_item(id).expect("counted above").to_vec())
+            .collect();
+
+        let mut page = Page::new(self.header.page_id, self.header.page_type);
+        for item in &items {
+            page.add_data(item).expect("the items fit before");
+        }
+        *self = page;
+    }
+
+    /// The free space there would be after [`Page::compact`].
+    pub fn free_space_if_compacted(&self) -> usize {
+        let used: usize = self
+            .item_pointers()
+            .map(|pointer| pointer.length as usize + ItemPointer::SIZE)
+            .sum();
+        Page::SIZE - PageHeader::SIZE - used
     }
 
     pub fn item_pointers(&self) -> impl Iterator<Item = ItemPointer> {
@@ -440,5 +506,45 @@ mod test {
             .get_item(item_id)
             .expect("Should retrieve item");
         assert_eq!(retrieved_data, test_data);
+    }
+
+    #[test]
+    pub fn test_btree_page_types_round_trip() {
+        for page_type in [
+            PageType::BTreeInternal,
+            PageType::BTreeLeaf { next: None },
+            PageType::BTreeLeaf { next: Some(7) },
+            PageType::BTreeMeta,
+        ] {
+            let page = Page::new(3, page_type);
+            assert_eq!(
+                Page::from_bytes(page.to_bytes()).header.page_type,
+                page_type
+            );
+        }
+    }
+
+    #[test]
+    pub fn test_insert_at_and_remove_at_keep_items_in_position() {
+        let mut page = Page::new(0, PageType::BTreeLeaf { next: None });
+        for (pos, item) in [(0, "c"), (0, "a"), (1, "b"), (3, "d")] {
+            page.insert_at(pos, item.as_bytes()).unwrap();
+        }
+        let items = |page: &Page| -> Vec<String> {
+            (0..page.header.item_count)
+                .map(|id| String::from_utf8(page.get_item(id).unwrap().to_vec()).unwrap())
+                .collect()
+        };
+        assert_eq!(items(&page), ["a", "b", "c", "d"]);
+
+        page.remove_at(1);
+        page.remove_at(2);
+        assert_eq!(items(&page), ["a", "c"]);
+
+        let free = page.free_space();
+        assert_eq!(page.free_space_if_compacted(), free + 2);
+        page.compact();
+        assert_eq!(page.free_space(), free + 2);
+        assert_eq!(items(&page), ["a", "c"]);
     }
 }
