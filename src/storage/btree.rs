@@ -255,7 +255,19 @@ impl BTree {
             // Both pages keep at least one item
             fits.clamp(1, items.len() - 1)
         } else {
-            items.len() / 2
+            // Half the bytes, not half the items: with keys of different lengths, half the
+            // items could leave one side with no room. Each side ends up with at most half
+            // the page plus one item, so both have room for another.
+            let total: usize = items.iter().map(Vec::len).sum();
+            let mut used = 0;
+            let half = items
+                .iter()
+                .take_while(|item| {
+                    used += item.len();
+                    used <= total / 2
+                })
+                .count();
+            half.clamp(1, items.len() - 1)
         };
         let mut right_items = items.split_off(split);
 
@@ -721,6 +733,26 @@ mod tests {
             random > ascending,
             "random {random} vs ascending {ascending}"
         );
+    }
+
+    #[test]
+    fn test_a_split_leaves_room_on_both_sides_when_entry_sizes_differ() {
+        // Seven long entries, then short ones, fill the first leaf, and more short ones fill
+        // the leaves after it. Split in half by count, the first leaf's long half would
+        // have no room for one more long entry.
+        let long = |n: u8| {
+            let mut entry = vec![1, n];
+            entry.resize(MAX_ENTRY, 0);
+            entry
+        };
+        let short = (0..300u16).map(|n| vec![2, (n >> 8) as u8, n as u8]);
+        let entries = (0..7).map(|n| long(n * 2)).chain(short);
+
+        let mut pool = BufferPool::in_memory();
+        let tree = BTree::build(&mut pool, "t.index", entries).unwrap();
+        tree.insert(&mut pool, &long(5)).unwrap();
+        check(&tree, &mut pool);
+        assert_eq!(tree.len(&mut pool).unwrap(), 308);
     }
 
     #[test]
