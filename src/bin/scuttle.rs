@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, stderr, stdin, stdout};
+use std::io::{ErrorKind, IsTerminal, stderr, stdin, stdout};
 use std::process::ExitCode;
 
 use miette::{IntoDiagnostic, Result};
@@ -93,14 +93,18 @@ fn main() -> Result<ExitCode> {
 
     let stdin = stdin();
     let interactive = stdin.is_terminal();
-    let failed = run_repl(
+    let failed = match run_repl(
         &mut db,
         stdin.lock(),
         stdout().lock(),
         stderr().lock(),
         interactive,
-    )
-    .into_diagnostic()?;
+    ) {
+        Ok(failed) => failed,
+        // Whatever read the output stopped early, as `| head` does. Exit quietly, like psql.
+        Err(error) if error.kind() == ErrorKind::BrokenPipe => return Ok(ExitCode::SUCCESS),
+        Err(error) => return Err(error).into_diagnostic(),
+    };
     // A script that fails a statement should fail the run. A person at a terminal has already
     // seen the error, so the exit code stays 0 there.
     Ok(if failed > 0 && !interactive {

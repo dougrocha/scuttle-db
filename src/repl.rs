@@ -5,7 +5,7 @@
 
 use std::io::{self, BufRead, Write};
 
-use miette::IntoDiagnostic;
+use miette::miette;
 
 use crate::{Database, db::result_table::ResultTable};
 
@@ -83,13 +83,22 @@ pub fn run_repl<R: BufRead, W: Write, E: Write>(
         // Rows are printed as each batch arrives, so a big result never sits in memory
         let mut table: Option<ResultTable> = None;
         let mut text = String::new();
+        let mut write_error = None;
         let result = db.execute_query_streaming(statement, |columns, rows| {
             let table = table.get_or_insert_with(|| ResultTable::new(columns, &rows, &mut text));
             table.push(&rows, &mut text);
-            out.write_all(text.as_bytes()).into_diagnostic()?;
+            if let Err(error) = out.write_all(text.as_bytes()) {
+                write_error = Some(error);
+                return Err(miette!("the output was closed"));
+            }
             text.clear();
             Ok(())
         });
+        // The output going away (`| head` closing the pipe) is not the query's fault. Stop and
+        // let the caller decide, instead of reporting it as a failed statement.
+        if let Some(error) = write_error {
+            return Err(error);
+        }
 
         match result {
             Ok(_) if let Some(table) = table => {
@@ -175,6 +184,47 @@ mod tests {
 
         // No rows: the header is still printed
         assert_eq!(s.out.split("DB: ").nth(4).unwrap(), " id\n----\n(0 rows)\n");
+    }
+
+    /// Accepts `room` bytes, then fails like a pipe whose reader has gone away.
+    struct ClosingPipe {
+        room: usize,
+    }
+
+    impl Write for ClosingPipe {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.room < buf.len() {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            self.room -= buf.len();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_run_repl_stops_quietly_when_the_output_closes() {
+        let values: Vec<String> = (1..=3000).map(|id| format!("({id})")).collect();
+        let input = format!(
+            "CREATE TABLE t (id INT)\nINSERT INTO t VALUES {}\nSELECT id FROM t\nSELECT id FROM t\n",
+            values.join(", ")
+        );
+        let mut db = Database::in_memory();
+        let mut err = Vec::new();
+
+        let result = run_repl(
+            &mut db,
+            input.as_bytes(),
+            ClosingPipe { room: 200 },
+            &mut err,
+            false,
+        );
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
     }
 
     #[test]
