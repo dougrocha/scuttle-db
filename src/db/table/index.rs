@@ -17,14 +17,18 @@ pub(crate) type Ctid = (PageId, ItemId);
 
 /// A value as an index orders it.
 ///
-/// `Value` can't be ordered as a whole (`Float64` has NaN), so only the types an index
-/// supports get a key. Every key in one index has the same variant, because the column
-/// has one type.
+/// `Value` can't be ordered as a whole (`Float64` has NaN), so a key stores a float as
+/// bits that can be. Every key in one index has the same variant, because the column has
+/// one type.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum IndexKey {
     Int(i64),
     Text(String),
     Timestamp(i64),
+    Bool(bool),
+
+    /// A float as bits that sort in number order, see [`IndexKey::float`].
+    Float(u64),
 }
 
 impl IndexKey {
@@ -35,8 +39,39 @@ impl IndexKey {
             (DataType::Int64, Value::Int64(n)) => Some(Self::Int(*n)),
             (DataType::Text | DataType::VarChar(_), Value::Text(s)) => Some(Self::Text(s.clone())),
             (DataType::Timestamp, Value::Timestamp(t)) => Some(Self::Timestamp(*t)),
+            (DataType::Bool, Value::Bool(b)) => Some(Self::Bool(*b)),
+            (DataType::Float64, Value::Float64(f)) => Some(Self::float(*f)),
             _ => None,
         }
+    }
+
+    /// The key for a float. Its bits sort as the numbers do once the sign bit is set on a
+    /// positive number and every bit is flipped on a negative one (which makes the more
+    /// negative one smaller). `-0.0` becomes `0.0`, since they are equal, and every NaN
+    /// becomes one NaN that sorts after all numbers, as in Postgres.
+    fn float(f: f64) -> Self {
+        let f = if f == 0.0 {
+            0.0
+        } else if f.is_nan() {
+            f64::NAN
+        } else {
+            f
+        };
+        let bits = f.to_bits();
+        Self::Float(if bits >> 63 == 1 {
+            !bits
+        } else {
+            bits | 1 << 63
+        })
+    }
+
+    /// The float a [`IndexKey::Float`] holds.
+    fn float_value(key: u64) -> f64 {
+        f64::from_bits(if key >> 63 == 1 {
+            key & !(1 << 63)
+        } else {
+            !key
+        })
     }
 }
 
@@ -52,6 +87,8 @@ impl IndexKey {
             IndexKey::Int(n) | IndexKey::Timestamp(n) => {
                 out.extend_from_slice(&((*n as u64) ^ (1 << 63)).to_be_bytes());
             }
+            IndexKey::Float(bits) => out.extend_from_slice(&bits.to_be_bytes()),
+            IndexKey::Bool(b) => out.push(u8::from(*b)),
             IndexKey::Text(text) => {
                 for &byte in text.as_bytes() {
                     out.push(byte);
@@ -101,7 +138,7 @@ pub(crate) struct TableIndex {
 }
 
 impl TableIndex {
-    /// One index per PRIMARY KEY or UNIQUE column whose type can be indexed. Their files
+    /// One index per PRIMARY KEY or UNIQUE column. Their files
     /// aren't touched: see [`TableIndex::exists`] and [`TableIndex::create`].
     pub(crate) fn for_schema(table_name: &str, schema: &Schema) -> Vec<Self> {
         schema
@@ -113,12 +150,6 @@ impl TableIndex {
                     .constraints
                     .iter()
                     .any(|c| matches!(c, ColumnConstraint::PrimaryKey | ColumnConstraint::Unique))
-            })
-            .filter(|(_, column)| {
-                matches!(
-                    column.data_type,
-                    DataType::Int64 | DataType::Text | DataType::VarChar(_) | DataType::Timestamp
-                )
             })
             .map(|(column, def)| Self {
                 column,
@@ -338,6 +369,8 @@ impl std::fmt::Display for IndexKey {
             IndexKey::Int(n) => write!(f, "{n}"),
             IndexKey::Text(s) => write!(f, "'{s}'"),
             IndexKey::Timestamp(t) => write!(f, "TIMESTAMP '{}'", Value::Timestamp(*t)),
+            IndexKey::Bool(b) => write!(f, "{b}"),
+            IndexKey::Float(bits) => write!(f, "{}", Self::float_value(*bits)),
         }
     }
 }
@@ -355,6 +388,42 @@ mod tests {
             self.0 ^= self.0 << 17;
             self.0
         }
+    }
+
+    #[test]
+    fn test_float_and_bool_keys_sort_like_their_values() {
+        let floats = [
+            f64::NEG_INFINITY,
+            -1e300,
+            -2.5,
+            -f64::MIN_POSITIVE,
+            0.0,
+            f64::MIN_POSITIVE,
+            1.5,
+            1e300,
+            f64::INFINITY,
+            f64::NAN,
+        ];
+        let bytes = |key: IndexKey| {
+            let mut out = Vec::new();
+            key.encode(&mut out);
+            out
+        };
+        let encoded: Vec<Vec<u8>> = floats.iter().map(|&f| bytes(IndexKey::float(f))).collect();
+        assert!(encoded.is_sorted_by(|a, b| a < b), "floats out of order");
+        assert_eq!(IndexKey::float(-0.0), IndexKey::float(0.0));
+        assert_eq!(IndexKey::float(-f64::NAN), IndexKey::float(f64::NAN));
+        for f in floats.into_iter().filter(|f| !f.is_nan()) {
+            assert_eq!(
+                IndexKey::float_value(match IndexKey::float(f) {
+                    IndexKey::Float(bits) => bits,
+                    _ => unreachable!(),
+                }),
+                f
+            );
+        }
+
+        assert!(bytes(IndexKey::Bool(false)) < bytes(IndexKey::Bool(true)));
     }
 
     #[test]

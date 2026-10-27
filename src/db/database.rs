@@ -1687,6 +1687,31 @@ mod tests {
     }
 
     #[test]
+    fn test_unique_float_and_boolean_columns_refuse_duplicates() {
+        let mut db = TestDb::new("unique-float-bool");
+        db.execute("CREATE TABLE item (price FLOAT UNIQUE, done BOOLEAN UNIQUE)");
+        db.execute("INSERT INTO item VALUES (1.5, true), (0 - 2.25, false)");
+
+        assert!(db.fails("INSERT INTO item VALUES (1.5, NULL)"));
+        assert!(db.fails("INSERT INTO item VALUES (NULL, true)"));
+        // -0.0 and 0.0 are the same number
+        db.execute("INSERT INTO item VALUES (0.0, NULL)");
+        assert!(db.fails("INSERT INTO item VALUES (0.0 * (0 - 1), NULL)"));
+        db.execute("INSERT INTO item VALUES (3.0, NULL)");
+
+        db.reopen();
+        assert!(db.fails("INSERT INTO item VALUES (1.5, NULL)"));
+        assert_eq!(
+            db.query("SELECT price FROM item WHERE price < 1.0 ORDER BY price"),
+            [[Value::Float64(-2.25)], [Value::Float64(0.0)]]
+        );
+        assert_eq!(
+            db.query("SELECT price FROM item WHERE done = true"),
+            [[Value::Float64(1.5)]]
+        );
+    }
+
+    #[test]
     fn test_a_value_too_long_for_its_index_changes_nothing() {
         let mut db = TestDb::new("long-key");
         db.execute("CREATE TABLE item (id INT, tag TEXT UNIQUE)");
