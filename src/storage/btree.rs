@@ -76,7 +76,7 @@ where
             }
             BTreeNode::Internal(internal) => {
                 let mut index = 0;
-                while index < internal.keys.len() && internal.keys[index] < key {
+                while index < internal.keys.len() && internal.keys[index] <= key {
                     index += 1;
                 }
 
@@ -88,7 +88,7 @@ where
 
                 if child_is_full {
                     Self::split_child_helper(internal, index, min_degree);
-                    if internal.keys[index] < key {
+                    if internal.keys[index] <= key {
                         index += 1;
                     }
                 }
@@ -192,7 +192,7 @@ where
             }
             Some(BTreeNode::Internal(internal)) => {
                 let mut index = 0;
-                while index < internal.keys.len() && internal.keys[index] < *key {
+                while index < internal.keys.len() && internal.keys[index] <= *key {
                     index += 1;
                 }
                 self.get_node(internal.children.get(index), key)
@@ -213,7 +213,7 @@ where
             }
             Some(BTreeNode::Internal(internal)) => {
                 let mut index = 0;
-                while index < internal.keys.len() && internal.keys[index] < *key {
+                while index < internal.keys.len() && internal.keys[index] <= *key {
                     index += 1;
                 }
                 self.contains_key_node(internal.children.get(index), key)
@@ -353,5 +353,25 @@ mod tests {
         assert!(tree.contains_key(&"key3".to_string()));
         assert!(!tree.contains_key(&"key4".to_string()));
         assert!(!tree.contains_key(&"nonexistent".to_string()));
+    }
+
+    #[test]
+    fn test_every_inserted_key_can_be_found_after_splits() {
+        let mut tree = BTree::new(3);
+        // Ascending, then descending, then shuffled, so splits happen at both ends and the middle
+        let keys: Vec<i32> = (0..50)
+            .chain((50..100).rev())
+            .map(|i| (i * 37) % 100)
+            .collect();
+        for &key in &keys {
+            tree.insert(key, key * 10);
+        }
+
+        let missing: Vec<i32> = keys
+            .iter()
+            .copied()
+            .filter(|key| tree.get(key) != Some(&(key * 10)))
+            .collect();
+        assert!(missing.is_empty(), "not found: {missing:?}\n{tree:?}");
     }
 }
