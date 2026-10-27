@@ -280,6 +280,8 @@ Today's join compares every left row with every right row: 1M × 10K = 10^10 com
 - `drop_table` isn't safe if a step fails partway, and the test only covers the success path.
 - EXPLAIN ANALYZE: "Planning time" leaves out the optimizer's index count, and stats are matched to plan lines by position with no length check.
 - `Database::insert_row` skips every check that SQL INSERT does, and nothing calls it.
+- The external sort keeps every run open while merging. A tiny `--sort-mem` on a big table could run out of file descriptors, and each open run holds a read buffer outside the budget. A multi-pass merge, a few runs at a time, would bound both.
+- An index's bulk build sorts all of its entries in memory, about 40 bytes per INT entry. It runs when an index file is missing and after a crash, so it should use the external sort.
 
 ## Suggested pace
 
