@@ -446,7 +446,36 @@ impl Database {
     /// 3. **Logical Planning** - Convert AST to logical query plan
     /// 4. **Physical Planning** - Convert to executable physical plan
     /// 5. **Execution** - Execute the plan and return rows
+    ///
+    /// Every row is held in memory at once. Use [`Database::execute_query_streaming`] to
+    /// handle rows a batch at a time instead.
     pub fn execute_query(&mut self, query: &str) -> Result<QueryResponse> {
+        let mut rows = Vec::new();
+        let mut response = self.execute_query_streaming(query, |_, batch| {
+            rows.extend(batch);
+            Ok(())
+        })?;
+        response.rows = rows;
+        Ok(response)
+    }
+
+    /// Executes a SQL query, passing the rows it returns to `on_rows` a batch at a time,
+    /// along with the column names.
+    ///
+    /// A SELECT's rows arrive in the batches the plan produces, so only one batch has to be
+    /// in memory at a time. A scan's batches hold about 1,024 rows. A sort holds every row
+    /// anyway and passes them in one batch. Empty batches are skipped. The response holds the column names and,
+    /// for writes, the number of rows written. Its `rows` are always empty.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Database::execute_query`] does. An error from `on_rows` stops the query
+    /// and is returned.
+    pub fn execute_query_streaming(
+        &mut self,
+        query: &str,
+        mut on_rows: impl FnMut(&[String], Vec<Row>) -> Result<()>,
+    ) -> Result<QueryResponse> {
         let mut parser = SqlParser::new(query);
         let statement = parser
             .parse()
@@ -454,19 +483,23 @@ impl Database {
 
         let response = match statement {
             Statement::Create(create_stmt) => self.handle_create(create_stmt),
-            Statement::Select(select_stmt) => self.handle_select(select_stmt),
+            Statement::Select(select_stmt) => self.handle_select(select_stmt, &mut on_rows),
             Statement::Insert(insert_stmt) => self.handle_insert(insert_stmt),
             Statement::Update(update_stmt) => self.handle_update(update_stmt),
             Statement::Delete(delete_stmt) => self.handle_delete(delete_stmt),
             Statement::Explain { statement, analyze } => self
                 .explain_statement(*statement, analyze)
-                .map(|plan| QueryResponse {
-                    columns: vec!["QUERY PLAN".to_string()],
-                    rows: plan
+                .and_then(|plan| {
+                    let columns = vec!["QUERY PLAN".to_string()];
+                    let rows = plan
                         .lines()
                         .map(|line| Row::new(vec![Value::Text(line.to_string())]))
-                        .collect(),
-                    rows_affected: None,
+                        .collect();
+                    on_rows(&columns, rows)?;
+                    Ok(QueryResponse {
+                        columns,
+                        ..QueryResponse::default()
+                    })
                 }),
         };
 
@@ -621,7 +654,11 @@ impl Database {
         Ok(())
     }
 
-    fn handle_select(&mut self, select_stmt: statement::SelectStatement) -> Result<QueryResponse> {
+    fn handle_select(
+        &mut self,
+        select_stmt: statement::SelectStatement,
+        on_rows: &mut impl FnMut(&[String], Vec<Row>) -> Result<()>,
+    ) -> Result<QueryResponse> {
         let mut context = CatalogContext::new(self);
         let analyzer = Analyzer::new(&context);
         let mut anayzed_plan = analyzer.analyze_select(select_stmt)?;
@@ -638,15 +675,15 @@ impl Database {
         let mut physical_planner = PhysicalPlanner::new(&mut context);
         let mut executor = physical_planner.create_physical_plan(anayzed_plan)?;
 
-        let mut rows = Vec::new();
         while let Some(batch) = executor.next(&mut self.exec_ctx())? {
-            rows.extend(batch.rows);
+            if !batch.rows.is_empty() {
+                on_rows(&columns, batch.rows)?;
+            }
         }
 
         Ok(QueryResponse {
             columns,
-            rows,
-            rows_affected: None,
+            ..QueryResponse::default()
         })
     }
 
@@ -1619,6 +1656,45 @@ mod tests {
             "{:?}",
             db.buffer_manager.stats()
         );
+    }
+
+    #[test]
+    fn test_streaming_passes_rows_in_batches_and_stops_on_error() {
+        let mut db = TestDb::new("streaming");
+        db.execute("CREATE TABLE item (id INT)");
+        let values: Vec<String> = (0..3000).map(|id| format!("({id})")).collect();
+        db.execute(&format!("INSERT INTO item VALUES {}", values.join(", ")));
+
+        let mut batches = Vec::new();
+        let response = db
+            .db
+            .execute_query_streaming("SELECT id FROM item", |columns, rows| {
+                assert_eq!(columns, ["id"]);
+                batches.push(rows);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(response.columns, ["id"]);
+        assert!(response.rows.is_empty());
+        assert!(batches.len() > 1 && batches.iter().all(|rows| !rows.is_empty()));
+        let streamed: Vec<_> = batches
+            .into_iter()
+            .flatten()
+            .map(|row| row.values)
+            .collect();
+        assert_eq!(streamed, db.query("SELECT id FROM item"));
+
+        // An error from the callback ends the query after the first batch
+        let mut calls = 0;
+        let result = db
+            .db
+            .execute_query_streaming("SELECT id FROM item", |_, _| {
+                calls += 1;
+                Err(miette::miette!("output closed"))
+            });
+        assert!(result.unwrap_err().to_string().contains("output closed"));
+        assert_eq!(calls, 1);
     }
 
     #[test]
