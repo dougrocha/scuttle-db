@@ -433,7 +433,9 @@ impl Database {
                 .map(|(page_id, item_id, row)| (row, (*page_id, *item_id)));
             index.build(&mut self.buffer_manager, rows)?;
         }
-        self.buffer_manager.flush()
+        // Not flushed here: `initialize` flushes once every table's indexes are open, so a
+        // crash partway through a rebuild still leaves the marker for the next run
+        Ok(())
     }
 
     /// Every live row of a table, with where it is stored.
