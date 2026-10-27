@@ -40,6 +40,10 @@ const ROOM: usize = CHILD_LEN + MAX_ENTRY + ItemPointer::SIZE;
 /// The metapage.
 const META: PageId = 0;
 
+/// Space [`BTree::build`] leaves free in each page, so the next inserts don't split every
+/// page at once. A tenth of the page, the same as Postgres' default fillfactor of 90.
+const FILL_SLACK: usize = Page::SIZE / 10;
+
 /// A B+tree in the file `name`. It holds no pages itself: every call reads them from the
 /// pool, so the tree can be bigger than memory.
 #[derive(Debug, Clone)]
@@ -64,6 +68,73 @@ impl BTree {
         pool.allocate_page(name, PageType::BTreeMeta)?;
         let root = pool.allocate_page(name, PageType::BTreeLeaf { next: None })?;
         tree.write_meta(pool, Meta { root, len: 0 })?;
+        Ok(tree)
+    }
+
+    /// Creates the file `name` holding `entries`, which must be sorted and unique.
+    ///
+    /// Much faster than inserting them one by one, and the pages come out full instead of
+    /// half full. Leaves are filled left to right, leaving [`FILL_SLACK`] free in each for
+    /// later inserts. Then each level above is built from the first entries of the level
+    /// below, until one page is left: the root.
+    pub(crate) fn build(
+        pool: &mut BufferPool,
+        name: &str,
+        entries: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Result<Self> {
+        let tree = Self::create(pool, name)?;
+        let first_leaf = tree.meta(pool)?.root;
+
+        // Each node of the level being built, with the lowest entry under it
+        let mut level: Vec<(PageId, Vec<u8>)> = Vec::new();
+        let mut leaf = first_leaf;
+        let mut len = 0;
+        for entry in entries {
+            if entry.len() > MAX_ENTRY {
+                return Err(miette!(
+                    "An index entry of {} bytes is longer than the {MAX_ENTRY} an index allows",
+                    entry.len()
+                ));
+            }
+            if !pool
+                .get_page(name, leaf)?
+                .has_room_for(entry.len() + FILL_SLACK)
+            {
+                let next = pool.allocate_page(name, PageType::BTreeLeaf { next: None })?;
+                pool.get_page_mut(name, leaf)?.header.page_type =
+                    PageType::BTreeLeaf { next: Some(next) };
+                leaf = next;
+            }
+            if level.last().is_none_or(|&(page_id, _)| page_id != leaf) {
+                level.push((leaf, entry.clone()));
+            }
+            pool.get_page_mut(name, leaf)?.add_data(&entry)?;
+            len += 1;
+        }
+
+        while level.len() > 1 {
+            let mut above: Vec<(PageId, Vec<u8>)> = Vec::new();
+            for (child, low) in level {
+                let room = above.last().is_some_and(|&(page_id, _)| {
+                    pool.get_page(name, page_id)
+                        .is_ok_and(|page| page.has_room_for(CHILD_LEN + low.len() + FILL_SLACK))
+                });
+                // A page's first item leaves its entry empty, so the entry moves up
+                let item = if room {
+                    internal_item(child, &low)
+                } else {
+                    let page_id = pool.allocate_page(name, PageType::BTreeInternal)?;
+                    above.push((page_id, low));
+                    internal_item(child, &[])
+                };
+                let page_id = above.last().expect("pushed above").0;
+                pool.get_page_mut(name, page_id)?.add_data(&item)?;
+            }
+            level = above;
+        }
+
+        let root = level.first().map_or(first_leaf, |&(page_id, _)| page_id);
+        tree.write_meta(pool, Meta { root, len })?;
         Ok(tree)
     }
 
@@ -542,6 +613,55 @@ mod tests {
             let want: Vec<Vec<u8>> = expected.range(from.clone()..).cloned().collect();
             assert_eq!(scan(&tree, &mut pool, &from), want);
         }
+    }
+
+    #[test]
+    fn test_a_built_tree_matches_one_made_by_inserts() {
+        let mut rng = Rng(0xb01d);
+        for count in [0, 1, 300, 20_000] {
+            let entries: BTreeSet<Vec<u8>> = (0..count).map(|_| rng.entry()).collect();
+
+            let mut pool = BufferPool::in_memory();
+            let tree = BTree::build(&mut pool, "t.index", entries.iter().cloned()).unwrap();
+            check(&tree, &mut pool);
+            assert_eq!(tree.len(&mut pool).unwrap(), entries.len() as u64);
+            assert_eq!(scan(&tree, &mut pool, &[]), Vec::from_iter(entries.clone()));
+
+            // Later inserts and removes still work on the built pages
+            let mut expected = entries;
+            for _ in 0..2_000 {
+                let entry = rng.entry();
+                if expected.insert(entry.clone()) {
+                    tree.insert(&mut pool, &entry).unwrap();
+                }
+            }
+            let removed: Vec<Vec<u8>> = expected.iter().step_by(3).cloned().collect();
+            for entry in &removed {
+                assert!(tree.remove(&mut pool, entry).unwrap());
+                expected.remove(entry);
+            }
+            check(&tree, &mut pool);
+            assert_eq!(scan(&tree, &mut pool, &[]), Vec::from_iter(expected));
+        }
+    }
+
+    #[test]
+    fn test_a_built_tree_fills_its_pages() {
+        let entries = (0..100_000u64).map(|n| n.to_be_bytes().to_vec());
+        let mut pool = BufferPool::in_memory();
+        BTree::build(&mut pool, "built.index", entries.clone()).unwrap();
+        let inserted = BTree::create(&mut pool, "inserted.index").unwrap();
+        for entry in entries {
+            inserted.insert(&mut pool, &entry).unwrap();
+        }
+
+        // In order, inserts leave every page half full. A build fills them to 90%.
+        let built_pages = pool.page_count("built.index");
+        let inserted_pages = pool.page_count("inserted.index");
+        assert!(
+            built_pages * 3 < inserted_pages * 2,
+            "{built_pages} vs {inserted_pages}"
+        );
     }
 
     #[test]
