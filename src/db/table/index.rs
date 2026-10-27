@@ -39,6 +39,53 @@ impl IndexKey {
     }
 }
 
+impl IndexKey {
+    /// Writes the key as bytes that sort in the same order as the keys.
+    ///
+    /// - A number flips its sign bit and is written big-endian, so negative numbers sort
+    ///   first and comparing bytes is comparing numbers.
+    /// - Text ends with `00 00`, and a `00` inside it is written `00 FF`. That way text
+    ///   that is a prefix of other text ("ab" before "abc") still sorts first.
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            IndexKey::Int(n) | IndexKey::Timestamp(n) => {
+                out.extend_from_slice(&((*n as u64) ^ (1 << 63)).to_be_bytes());
+            }
+            IndexKey::Text(text) => {
+                for &byte in text.as_bytes() {
+                    out.push(byte);
+                    if byte == 0 {
+                        out.push(0xFF);
+                    }
+                }
+                out.extend_from_slice(&[0, 0]);
+            }
+        }
+    }
+}
+
+/// Bytes a ctid adds to the end of an index entry.
+pub(crate) const CTID_LEN: usize = 6;
+
+/// An index entry as the B-tree stores it: the key, then the ctid. Two rows with the same
+/// key differ in their ctids, so every entry is unique and a delete finds exactly its own.
+pub(crate) fn encode_entry(key: &IndexKey, (page, item): Ctid) -> Vec<u8> {
+    let mut out = Vec::new();
+    key.encode(&mut out);
+    out.extend_from_slice(&page.to_be_bytes());
+    out.extend_from_slice(&item.to_be_bytes());
+    out
+}
+
+/// The ctid at the end of an entry made by [`encode_entry`].
+pub(crate) fn entry_ctid(entry: &[u8]) -> Ctid {
+    let ctid = &entry[entry.len() - CTID_LEN..];
+    (
+        PageId::from_be_bytes(ctid[..4].try_into().unwrap()),
+        ItemId::from_be_bytes(ctid[4..].try_into().unwrap()),
+    )
+}
+
 /// An in-memory index over one column: every key, in order, with the rows that hold it.
 ///
 /// Only the index's existence is stored, as the column's PRIMARY KEY or UNIQUE constraint
@@ -190,6 +237,69 @@ impl std::fmt::Display for IndexKey {
             IndexKey::Int(n) => write!(f, "{n}"),
             IndexKey::Text(s) => write!(f, "'{s}'"),
             IndexKey::Timestamp(t) => write!(f, "TIMESTAMP '{}'", Value::Timestamp(*t)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fixed-seed generator, so a failure repeats.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    #[test]
+    fn test_entry_bytes_sort_like_key_then_ctid() {
+        let mut rng = Rng(0x5eed);
+        let ints = [i64::MIN, -300, -1, 0, 1, 255, 256, i64::MAX];
+        let texts = ["", "\0", "\0\0", "a", "a\0", "a\0b", "ab", "abc", "b", "é"];
+        let ctids = [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (256, 3),
+            (PageId::MAX - 1, ItemId::MAX),
+        ];
+
+        let mut entries: Vec<(IndexKey, Ctid)> = Vec::new();
+        for &n in &ints {
+            entries.extend(ctids.iter().map(|&ctid| (IndexKey::Int(n), ctid)));
+        }
+        for text in texts {
+            entries.extend(
+                ctids
+                    .iter()
+                    .map(|&ctid| (IndexKey::Text(text.to_string()), ctid)),
+            );
+        }
+        for _ in 0..500 {
+            let ctid = (rng.next() as PageId % 5, rng.next() as ItemId % 3);
+            entries.push((IndexKey::Int(rng.next() as i64), ctid));
+            let len = rng.next() % 4;
+            let text: String = (0..len)
+                .map(|_| ['\0', 'a', 'b'][rng.next() as usize % 3])
+                .collect();
+            entries.push((IndexKey::Text(text), ctid));
+        }
+
+        for a in &entries {
+            for b in &entries {
+                // An index holds one type, so only keys of the same type are compared
+                if std::mem::discriminant(&a.0) != std::mem::discriminant(&b.0) {
+                    continue;
+                }
+                let (ea, eb) = (encode_entry(&a.0, a.1), encode_entry(&b.0, b.1));
+                assert_eq!(ea.cmp(&eb), a.cmp(b), "{a:?} vs {b:?}");
+                assert_eq!(entry_ctid(&ea), a.1);
+            }
         }
     }
 }
