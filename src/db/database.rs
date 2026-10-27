@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use miette::Result;
+use miette::{IntoDiagnostic, Result};
 use web_time::{Duration, Instant};
 
 use crate::{
@@ -209,6 +209,7 @@ impl Database {
             }
             // Deletes the marker, even when there was no index to rebuild
             self.buffer_manager.flush()?;
+            self.remove_orphan_files()?;
         } else {
             println!("No catalog exists. Creates when adding a table");
         }
@@ -271,6 +272,14 @@ impl Database {
             .save_table_metadata(&mut self.buffer_manager, name, &schema, 0);
 
         let table = TableDef::new(name.to_string(), schema);
+        // A drop that failed partway may have left files under these names. Their old rows
+        // must not show up in the new table.
+        let leftovers = std::iter::once(name).chain(table.indexes.iter().map(|i| i.file_name()));
+        for file in leftovers {
+            self.buffer_manager
+                .drop_table(file)
+                .map_err(|error| DatabaseError::InvalidQuery(error.to_string()))?;
+        }
         for index in &table.indexes {
             index
                 .create(&mut self.buffer_manager)
@@ -329,19 +338,64 @@ impl Database {
         Ok(())
     }
 
-    /// Drops a table: its catalog row, its pages and its file.
+    /// Drops a table: its catalog row, its pages and its files.
+    ///
+    /// The table leaves the catalog and memory first, and the catalog is written before
+    /// any file is deleted. So if a later step fails, the table is still gone, and its
+    /// files are left behind until the next open deletes them (see
+    /// [`Database::remove_orphan_files`]). If the database stops before the catalog is
+    /// written, the table is still there, files and all.
     pub fn drop_table(&mut self, name: &str) -> Result<()> {
         if !self.table_exists(name) {
             return Err(DatabaseError::TableNotFound(name.to_string()).into());
         }
 
         self.catalog.remove_table(&mut self.buffer_manager, name)?;
+        let table = self.tables.remove(name).expect("checked above");
+        self.buffer_manager.flush()?;
+
         self.buffer_manager.drop_table(name)?;
-        for index in &table_def(&self.tables, name)?.indexes {
+        for index in &table.indexes {
             self.buffer_manager.drop_table(index.file_name())?;
         }
-        self.tables.remove(name);
-        self.buffer_manager.flush()
+        Ok(())
+    }
+
+    /// Deletes the table and index files no table owns, which a failed drop can leave,
+    /// and any sort runs a stopped query left in `tmp`.
+    fn remove_orphan_files(&mut self) -> Result<()> {
+        let Some(dir) = &self.data_directory else {
+            return Ok(());
+        };
+
+        let mut owned = BTreeSet::from([format!("{}.table", self.catalog.name())]);
+        for table in self.tables.values() {
+            owned.insert(format!("{}.table", table.name));
+            owned.extend(
+                table
+                    .indexes
+                    .iter()
+                    .map(|index| index.file_name().to_string()),
+            );
+        }
+
+        for entry in std::fs::read_dir(dir).into_diagnostic()? {
+            let path = entry.into_diagnostic()?.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let ours = file_name.ends_with(".table") || file_name.ends_with(".index");
+            if ours && !owned.contains(file_name) {
+                std::fs::remove_file(&path).into_diagnostic()?;
+            }
+        }
+
+        match std::fs::remove_dir_all(dir.join("tmp")) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(error).into_diagnostic()
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Adds a row to the table's last page and marks the page dirty, without writing it.
@@ -1777,6 +1831,40 @@ mod tests {
         std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(failed);
         assert!(db.dir.join(UNFLUSHED).exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_a_drop_that_fails_partway_still_drops_the_table() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut db = TestDb::new("drop-fails");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
+        db.execute("INSERT INTO item VALUES (1)");
+
+        // A read-only directory: files in it can be written but not created or deleted. The
+        // drop writes the catalog, then fails deleting the unflushed marker, made here
+        // because it couldn't be created. Deleting the table's files would fail the same way.
+        let mode = |db: &TestDb, mode| {
+            std::fs::set_permissions(&db.dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        std::fs::File::create(db.dir.join(UNFLUSHED)).unwrap();
+        mode(&db, 0o555);
+        let dropped = db.db.drop_table("item");
+        mode(&db, 0o755);
+        assert!(dropped.is_err());
+
+        // The table is gone, though its files are still there
+        assert!(db.fails("SELECT * FROM item"));
+        assert!(db.dir.join("item.table").exists());
+
+        // Opening the database deletes the files no table owns
+        db.reopen();
+        assert!(db.fails("SELECT * FROM item"));
+        assert!(!db.dir.join("item.table").exists());
+        assert!(!db.dir.join("item.id.index").exists());
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
+        assert_eq!(db.query("SELECT * FROM item"), Vec::<Vec<Value>>::new());
     }
 
     #[test]
