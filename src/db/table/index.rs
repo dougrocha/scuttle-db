@@ -8,6 +8,7 @@ use crate::{
     storage::{
         btree::{BTree, Cursor, MAX_ENTRY},
         buffer_pool::BufferPool,
+        external_sort::Sorted,
         page::{ItemId, PageId},
     },
 };
@@ -174,19 +175,16 @@ impl TableIndex {
         BTree::create(pool, self.tree.name()).map(|_| ())
     }
 
-    /// Creates the index's file holding `rows`, sorting their entries and building the
-    /// tree from the bottom up (see [`BTree::build`]).
-    ///
-    /// The entries are sorted in memory, about 40 bytes each for an INT key.
-    pub(crate) fn build<'a>(
-        &self,
-        pool: &mut BufferPool,
-        rows: impl Iterator<Item = (&'a Row, Ctid)>,
-    ) -> Result<()> {
-        let mut entries: Vec<Vec<u8>> = rows
-            .filter_map(|(row, ctid)| Some(encode_entry(&self.key(row)?, ctid)))
-            .collect();
-        entries.sort_unstable();
+    /// The entry this index stores for `row`, or `None` if it doesn't index the row (a NULL).
+    pub(crate) fn entry(&self, row: &Row, ctid: Ctid) -> Option<Vec<u8>> {
+        Some(encode_entry(&self.key(row)?, ctid))
+    }
+
+    /// Creates the index's file holding `entries`, building the tree from the bottom up
+    /// (see [`BTree::build`]). The entries come sorted, from an external sort of
+    /// [`TableIndex::entry`] for each row.
+    pub(crate) fn build(&self, pool: &mut BufferPool, mut entries: Sorted<Vec<u8>>) -> Result<()> {
+        let entries = std::iter::from_fn(|| entries.next().transpose());
         BTree::build(pool, self.tree.name(), entries).map(|_| ())
     }
 

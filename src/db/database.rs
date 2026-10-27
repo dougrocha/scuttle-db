@@ -13,7 +13,12 @@ use crate::{
         catalog::system_catalog::SystemCatalog,
         result_table::ResultTable,
         table::{
-            Table, cursor::TableCursor, index::Ctid, row::Row, schema::Schema, table_def::TableDef,
+            Table,
+            cursor::TableCursor,
+            index::{Ctid, TableIndex},
+            row::Row,
+            schema::Schema,
+            table_def::TableDef,
         },
     },
     sql::{
@@ -33,7 +38,7 @@ use crate::{
     },
     storage::{
         buffer_pool::{BufferPool, DEFAULT_CACHE_PAGES},
-        external_sort::Spill,
+        external_sort::{ExternalSort, Spill},
         page::{ItemId, PageId},
     },
 };
@@ -483,12 +488,27 @@ impl Database {
             return Ok(());
         }
 
-        let rows = self.get_rows_with_location(table_name)?;
-        for index in &missing {
-            let rows = rows
-                .iter()
-                .map(|(page_id, item_id, row)| (row, (*page_id, *item_id)));
-            index.build(&mut self.buffer_manager, rows)?;
+        // One pass over the table feeds every missing index's entries to its own sort,
+        // which writes runs to disk past the sort budget. Nothing holds the whole table.
+        let spill = self.sort_spill();
+        let mut sorts: Vec<(TableIndex, ExternalSort<Vec<u8>>)> = missing
+            .into_iter()
+            .map(|index| (index, ExternalSort::new(Vec::cmp, spill.clone())))
+            .collect();
+        let schema = self.get_table(table_name)?.schema().clone();
+        let mut cursor =
+            TableCursor::open(&mut self.buffer_manager, table_name.to_string(), schema);
+        while cursor.read_next_page(&mut self.buffer_manager, |page_id, item_id, row| {
+            for (index, sort) in &mut sorts {
+                if let Some(entry) = index.entry(&row, (page_id, item_id)) {
+                    sort.push(entry)?;
+                }
+            }
+            Ok(())
+        })? {}
+
+        for (index, sort) in sorts {
+            index.build(&mut self.buffer_manager, sort.finish()?)?;
         }
         // Not flushed here: `initialize` flushes once every table's indexes are open, so a
         // crash partway through a rebuild still leaves the marker for the next run
@@ -1714,6 +1734,13 @@ mod tests {
         std::fs::remove_file(&index).unwrap();
         db.reopen();
         assert!(index.exists());
+        lookups(&mut db);
+
+        // Again with a sort budget small enough that the entries are sorted in runs on disk
+        std::fs::remove_file(&index).unwrap();
+        db.db = Database::new(&db.dir);
+        db.db.set_sort_mem(1024);
+        db.db.initialize().unwrap();
         lookups(&mut db);
     }
 

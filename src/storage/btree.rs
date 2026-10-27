@@ -80,7 +80,7 @@ impl BTree {
     pub(crate) fn build(
         pool: &mut BufferPool,
         name: &str,
-        entries: impl IntoIterator<Item = Vec<u8>>,
+        entries: impl IntoIterator<Item = Result<Vec<u8>>>,
     ) -> Result<Self> {
         let tree = Self::create(pool, name)?;
         let first_leaf = tree.meta(pool)?.root;
@@ -90,6 +90,7 @@ impl BTree {
         let mut leaf = first_leaf;
         let mut len = 0;
         for entry in entries {
+            let entry = entry?;
             if entry.len() > MAX_ENTRY {
                 return Err(miette!(
                     "An index entry of {} bytes is longer than the {MAX_ENTRY} an index allows",
@@ -684,7 +685,7 @@ mod tests {
             let entries: BTreeSet<Vec<u8>> = (0..count).map(|_| rng.entry()).collect();
 
             let mut pool = BufferPool::in_memory();
-            let tree = BTree::build(&mut pool, "t.index", entries.iter().cloned()).unwrap();
+            let tree = BTree::build(&mut pool, "t.index", entries.iter().cloned().map(Ok)).unwrap();
             check(&tree, &mut pool);
             assert_eq!(tree.len(&mut pool).unwrap(), entries.len() as u64);
             assert_eq!(scan(&tree, &mut pool, &[]), Vec::from_iter(entries.clone()));
@@ -715,7 +716,7 @@ mod tests {
             if build {
                 let mut sorted: Vec<Vec<u8>> = entries.collect();
                 sorted.sort();
-                BTree::build(&mut pool, "t.index", sorted).unwrap();
+                BTree::build(&mut pool, "t.index", sorted.into_iter().map(Ok)).unwrap();
             } else {
                 let tree = BTree::create(&mut pool, "t.index").unwrap();
                 for entry in entries {
@@ -756,7 +757,7 @@ mod tests {
         let entries = (0..7).map(|n| long(n * 2)).chain(short);
 
         let mut pool = BufferPool::in_memory();
-        let tree = BTree::build(&mut pool, "t.index", entries).unwrap();
+        let tree = BTree::build(&mut pool, "t.index", entries.map(Ok)).unwrap();
         tree.insert(&mut pool, &long(5)).unwrap();
         check(&tree, &mut pool);
         assert_eq!(tree.len(&mut pool).unwrap(), 308);
