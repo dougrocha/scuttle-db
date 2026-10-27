@@ -416,13 +416,12 @@ impl Database {
             return Ok(());
         }
 
+        let rows = self.get_rows_with_location(table_name)?;
         for index in &missing {
-            index.create(&mut self.buffer_manager)?;
-        }
-        for (page_id, item_id, row) in self.get_rows_with_location(table_name)? {
-            for index in &missing {
-                index.insert(&mut self.buffer_manager, &row, (page_id, item_id))?;
-            }
+            let rows = rows
+                .iter()
+                .map(|(page_id, item_id, row)| (row, (*page_id, *item_id)));
+            index.build(&mut self.buffer_manager, rows)?;
         }
         self.buffer_manager.flush()
     }

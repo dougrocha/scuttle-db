@@ -143,6 +143,22 @@ impl TableIndex {
         BTree::create(pool, self.tree.name()).map(|_| ())
     }
 
+    /// Creates the index's file holding `rows`, sorting their entries and building the
+    /// tree from the bottom up (see [`BTree::build`]).
+    ///
+    /// The entries are sorted in memory, about 40 bytes each for an INT key.
+    pub(crate) fn build<'a>(
+        &self,
+        pool: &mut BufferPool,
+        rows: impl Iterator<Item = (&'a Row, Ctid)>,
+    ) -> Result<()> {
+        let mut entries: Vec<Vec<u8>> = rows
+            .filter_map(|(row, ctid)| Some(encode_entry(&self.key(row)?, ctid)))
+            .collect();
+        entries.sort_unstable();
+        BTree::build(pool, self.tree.name(), entries).map(|_| ())
+    }
+
     /// Rows in the index. NULLs aren't indexed, so this can be less than the table's rows.
     pub(crate) fn len(&self, pool: &mut BufferPool) -> Result<u64> {
         self.tree.len(pool)
