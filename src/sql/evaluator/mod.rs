@@ -87,9 +87,9 @@ pub fn values_equal(left: &Value, right: &Value) -> Value {
 
     let result = match (left, right) {
         (Value::Int64(a), Value::Int64(b)) => a == b,
-        (Value::Float64(a), Value::Float64(b)) => (a - b).abs() < f64::EPSILON,
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64 - b).abs() < f64::EPSILON,
-        (Value::Float64(a), Value::Int64(b)) => (a - *b as f64).abs() < f64::EPSILON,
+        (Value::Float64(a), Value::Float64(b)) => compare_floats(*a, *b).is_eq(),
+        (Value::Int64(a), Value::Float64(b)) => compare_floats(*a as f64, *b).is_eq(),
+        (Value::Float64(a), Value::Int64(b)) => compare_floats(*a, *b as f64).is_eq(),
         (Value::Text(a), Value::Text(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
@@ -105,9 +105,9 @@ pub fn values_greater_than(left: &Value, right: &Value) -> Value {
 
     let result = match (left, right) {
         (Value::Int64(a), Value::Int64(b)) => a > b,
-        (Value::Float64(a), Value::Float64(b)) => a > b,
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64) > *b,
-        (Value::Float64(a), Value::Int64(b)) => *a > (*b as f64),
+        (Value::Float64(a), Value::Float64(b)) => compare_floats(*a, *b).is_gt(),
+        (Value::Int64(a), Value::Float64(b)) => compare_floats(*a as f64, *b).is_gt(),
+        (Value::Float64(a), Value::Int64(b)) => compare_floats(*a, *b as f64).is_gt(),
         (Value::Timestamp(a), Value::Timestamp(b)) => a > b,
         (Value::Text(a), Value::Text(b)) => a > b,
         (Value::Bool(a), Value::Bool(b)) => a > b,
@@ -123,9 +123,9 @@ pub fn values_less_than(left: &Value, right: &Value) -> Value {
 
     let result = match (left, right) {
         (Value::Int64(a), Value::Int64(b)) => a < b,
-        (Value::Float64(a), Value::Float64(b)) => a < b,
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64) < *b,
-        (Value::Float64(a), Value::Int64(b)) => *a < (*b as f64),
+        (Value::Float64(a), Value::Float64(b)) => compare_floats(*a, *b).is_lt(),
+        (Value::Int64(a), Value::Float64(b)) => compare_floats(*a as f64, *b).is_lt(),
+        (Value::Float64(a), Value::Int64(b)) => compare_floats(*a, *b as f64).is_lt(),
         (Value::Timestamp(a), Value::Timestamp(b)) => a < b,
         (Value::Text(a), Value::Text(b)) => a < b,
         (Value::Bool(a), Value::Bool(b)) => a < b,
@@ -145,14 +145,22 @@ pub fn compare_values(left: &Value, right: &Value) -> Ordering {
         (Value::Null, _) => Ordering::Greater,
         (_, Value::Null) => Ordering::Less,
         (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
-        (Value::Float64(a), Value::Float64(b)) => a.total_cmp(b),
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64).total_cmp(b),
-        (Value::Float64(a), Value::Int64(b)) => a.total_cmp(&(*b as f64)),
+        (Value::Float64(a), Value::Float64(b)) => compare_floats(*a, *b),
+        (Value::Int64(a), Value::Float64(b)) => compare_floats(*a as f64, *b),
+        (Value::Float64(a), Value::Int64(b)) => compare_floats(*a, *b as f64),
         (Value::Text(a), Value::Text(b)) => a.cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
         _ => Ordering::Equal,
     }
+}
+
+/// How every comparison orders floats, the same way an index sorts them (and as
+/// PostgreSQL does): exactly, with -0.0 equal to 0.0, and NaN equal to itself and greater
+/// than every other number.
+pub fn compare_floats(a: f64, b: f64) -> Ordering {
+    a.partial_cmp(&b)
+        .unwrap_or_else(|| a.is_nan().cmp(&b.is_nan()))
 }
 
 #[cfg(test)]

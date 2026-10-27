@@ -1794,6 +1794,26 @@ mod tests {
     }
 
     #[test]
+    fn test_a_float_index_finds_what_a_scan_finds() {
+        let mut db = TestDb::new("float-index-agrees");
+        db.execute("CREATE TABLE item (price FLOAT UNIQUE)");
+        db.execute("INSERT INTO item VALUES (0.0000000000000001), (0.0), (1.0)");
+
+        // `price + 0.0` can't use the index, so each pair compares the index to a scan
+        for filter in ["= 0.0", "> 0.0", "< 0.0000000000000001", "= 1.0"] {
+            let indexed = db.query(&format!("SELECT price FROM item WHERE price {filter}"));
+            let scanned = db.query(&format!(
+                "SELECT price FROM item WHERE price + 0.0 {filter}"
+            ));
+            assert_eq!(indexed, scanned, "WHERE price {filter}");
+        }
+        assert_eq!(
+            db.query("SELECT price FROM item WHERE price = 0.0"),
+            [[Value::Float64(0.0)]]
+        );
+    }
+
+    #[test]
     fn test_a_value_too_long_for_its_index_changes_nothing() {
         let mut db = TestDb::new("long-key");
         db.execute("CREATE TABLE item (id INT, tag TEXT UNIQUE)");

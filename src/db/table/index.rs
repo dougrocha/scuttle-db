@@ -411,6 +411,18 @@ mod tests {
         assert!(encoded.is_sorted_by(|a, b| a < b), "floats out of order");
         assert_eq!(IndexKey::float(-0.0), IndexKey::float(0.0));
         assert_eq!(IndexKey::float(-f64::NAN), IndexKey::float(f64::NAN));
+        // SQL compares floats in the same order, or a filter that uses the index would
+        // find different rows than one that doesn't
+        let more = [-0.0, -f64::NAN];
+        for a in floats.iter().chain(&more) {
+            for b in floats.iter().chain(&more) {
+                assert_eq!(
+                    bytes(IndexKey::float(*a)).cmp(&bytes(IndexKey::float(*b))),
+                    crate::sql::evaluator::compare_floats(*a, *b),
+                    "{a} vs {b}"
+                );
+            }
+        }
         for f in floats.into_iter().filter(|f| !f.is_nan()) {
             assert_eq!(
                 IndexKey::float_value(match IndexKey::float(f) {
