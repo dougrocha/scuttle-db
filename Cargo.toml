@@ -6,6 +6,7 @@ authors = ["Douglas Rocha"]
 description = "A learning project: building a relational database from scratch in Rust"
 readme = "README.md"
 license = "MIT"
+default-run = "scuttle-db"
 keywords = ["database", "sql", "learning"]
 categories = ["database-implementations", "development-tools"]
 
