@@ -98,6 +98,8 @@ A table bigger than RAM crashes on the first scan. This phase puts a cap on each
 
 ### 2.2 Stream results out of `execute_query`
 
+**Done.** `execute_query_streaming` hands rows to a callback a batch at a time, and the REPL prints each batch as it arrives, with columns sized from the first batch like psql with `FETCH_COUNT`. `SELECT *` on 1M rows went from 356 MB to 4 MB peak, and printing it from 0.63 s to 0.43 s. `ORDER BY` still holds every row in the Sort until 2.3.
+
 Pass batches to a callback, or return an iterator, instead of building a `Vec`. Keep the current `execute_query` as a wrapper that collects, for the browser build and the tests.
 
 **Verify:** `SELECT *` on 1M rows no longer adds 290 MB, and the CLI prints the first rows before the scan finishes.
