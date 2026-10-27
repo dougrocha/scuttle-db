@@ -359,8 +359,13 @@ impl BufferPool {
 
         // A slot evicted and filled again with another dirty page is listed twice
         dirty.dedup();
-        for slot in dirty {
-            self.write_frame(slot)?;
+        for (written, &slot) in dirty.iter().enumerate() {
+            if let Err(error) = self.write_frame(slot) {
+                // Keep the unwritten pages listed, so a later flush writes them before it
+                // deletes the marker
+                self.dirty_slots.extend_from_slice(&dirty[written..]);
+                return Err(error);
+            }
         }
 
         if self.unflushed
@@ -498,6 +503,42 @@ mod tests {
         assert!(pool.was_left_unflushed());
         pool.flush().unwrap();
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn test_a_failed_flush_keeps_its_pages_and_the_marker() {
+        let dir = temp_dir("failed-flush");
+        let mut pool = BufferPool::with_capacity(&dir, 4);
+        for _ in 0..2 {
+            pool.allocate_page("t", PageType::Table).unwrap();
+        }
+        pool.flush().unwrap();
+
+        pool.get_page_mut("t", 0)
+            .unwrap()
+            .add_data(b"zero")
+            .unwrap();
+        pool.get_page_mut("t", 1).unwrap().add_data(b"one").unwrap();
+        // A handle opened for reading only, so every write to the file fails
+        let path = dir.join("t.table");
+        pool.files
+            .insert("t".to_string(), File::open(&path).unwrap());
+        assert!(pool.flush().is_err());
+        assert!(dir.join(UNFLUSHED).exists());
+
+        // Once writes work again, the next flush still writes both pages
+        pool.files.remove("t");
+        pool.flush().unwrap();
+        assert!(!dir.join(UNFLUSHED).exists());
+        let mut reopened = BufferPool::with_capacity(&dir, 4);
+        assert_eq!(
+            reopened.get_page("t", 0).unwrap().get_item(0).unwrap(),
+            b"zero"
+        );
+        assert_eq!(
+            reopened.get_page("t", 1).unwrap().get_item(0).unwrap(),
+            b"one"
+        );
     }
 
     #[test]
