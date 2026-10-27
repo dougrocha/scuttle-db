@@ -242,6 +242,19 @@ impl Database {
             return Err(DatabaseError::TableAlreadyExists(name.to_string()));
         }
 
+        // Names become file names, `<table>.table` and `<table>.<column>.index`. Letters,
+        // digits and `_` keep them inside the data directory, and keep two different names
+        // from making the same file.
+        let names = std::iter::once(name).chain(schema.columns.iter().map(|c| c.name.as_str()));
+        for name in names {
+            if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return Err(DatabaseError::InvalidQuery(format!(
+                    "invalid name \"{name}\": table and column names may only use letters, \
+                     digits and _"
+                )));
+            }
+        }
+
         let primary_keys = schema
             .columns
             .iter()
@@ -1589,7 +1602,7 @@ mod tests {
 
         db.db.drop_table("item").unwrap();
         assert!(!db.dir.join("item.table").exists());
-        assert!(!db.dir.join("item_id.index").exists());
+        assert!(!db.dir.join("item.id.index").exists());
         db.reopen();
 
         assert!(db.db.execute_query("SELECT * FROM item").is_err());
@@ -1636,8 +1649,8 @@ mod tests {
             assert!(db.fails("INSERT INTO item VALUES (1, 't1600')"));
         };
 
-        let index = db.dir.join("item_id.index");
-        assert!(index.exists() && db.dir.join("item_tag.index").exists());
+        let index = db.dir.join("item.id.index");
+        assert!(index.exists() && db.dir.join("item.tag.index").exists());
         lookups(&mut db);
 
         db.reopen();
@@ -1648,6 +1661,30 @@ mod tests {
         db.reopen();
         assert!(index.exists());
         lookups(&mut db);
+    }
+
+    #[test]
+    fn test_names_that_would_make_unsafe_or_clashing_files_are_refused() {
+        let mut db = TestDb::new("names");
+        assert!(db.fails(r#"CREATE TABLE "../escape" (id INT)"#));
+        assert!(db.fails(r#"CREATE TABLE "a.b" (id INT)"#));
+        assert!(db.fails(r#"CREATE TABLE ok (".." INT)"#));
+        assert!(!db.dir.join("../escape.table").exists());
+
+        // These once both named their index file a_b_c.index
+        db.execute("CREATE TABLE a_b (c INT PRIMARY KEY)");
+        db.execute("CREATE TABLE a (b_c INT PRIMARY KEY)");
+        db.execute("INSERT INTO a_b VALUES (1)");
+        db.execute("INSERT INTO a VALUES (1)");
+        db.reopen();
+        assert_eq!(
+            db.query("SELECT c FROM a_b WHERE c = 1"),
+            [[Value::Int64(1)]]
+        );
+        assert_eq!(
+            db.query("SELECT b_c FROM a WHERE b_c = 1"),
+            [[Value::Int64(1)]]
+        );
     }
 
     #[test]
@@ -1676,7 +1713,7 @@ mod tests {
         let mut db = TestDb::new("stale-index");
         db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
         db.execute("INSERT INTO item VALUES (1), (2)");
-        let index = db.dir.join("item_id.index");
+        let index = db.dir.join("item.id.index");
         let old_index = std::fs::read(&index).unwrap();
 
         // A crash after the table's pages were written but before the index's: the table

@@ -87,7 +87,7 @@ pub(crate) fn entry_ctid(entry: &[u8]) -> Ctid {
     )
 }
 
-/// An index over one column, stored as a B+tree in its own file, `<table>_<column>.index`.
+/// An index over one column, stored as a B+tree in its own file, `<table>.<column>.index`.
 ///
 /// Each entry is the column's key followed by the row's ctid (see [`encode_entry`]), so
 /// rows sharing a key are separate entries and a delete finds exactly its own.
@@ -123,7 +123,7 @@ impl TableIndex {
             .map(|(column, def)| Self {
                 column,
                 data_type: def.data_type,
-                tree: BTree::open(&format!("{table_name}_{}.index", def.name)),
+                tree: BTree::open(&format!("{table_name}.{}.index", def.name)),
             })
             .collect()
     }

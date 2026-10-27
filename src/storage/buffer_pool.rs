@@ -142,7 +142,7 @@ impl BufferPool {
     }
 
     /// The file holding `name`: `<name>.table` for a table. A name with an extension,
-    /// such as an index's `users_id.index`, is the file name. Table names can't contain a
+    /// such as an index's `users.id.index`, is the file name. Table names can't contain a
     /// dot, so the two never clash.
     fn table_path(&self, name: &str) -> Option<PathBuf> {
         self.data_directory.as_ref().map(|dir| {

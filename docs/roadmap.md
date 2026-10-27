@@ -159,7 +159,7 @@ page reads.
 - **Deletes.** Remove the entry right away and never merge pages. Postgres doesn't merge either.
 - **Crash safety without a WAL.** The index can always be rebuilt from the heap. Store a generation number in the metapage, and if it doesn't match on open, do a bulk rebuild.
 
-**Done.** Each PRIMARY KEY or UNIQUE column has its own `<table>_<column>.index` file, read through the buffer pool. On the 1M-row bench:
+**Done.** Each PRIMARY KEY or UNIQUE column has its own `<table>.<column>.index` file, read through the buffer pool. On the 1M-row bench:
 - Opening the database no longer rebuilds anything. A run with one index lookup takes 0.6 ms and 3.4 MB, down from about 200 ms and 210 MB.
 - A point lookup reads 4 pages: the metapage, the root, a leaf, then the heap page.
 - A missing index file is built from the table with a bulk build: 0.23 s and 22 MB. Inserting the rows one at a time instead took 0.67 s and 46 MB, because in-order inserts leave every leaf half full.
