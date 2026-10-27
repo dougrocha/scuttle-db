@@ -105,10 +105,17 @@ impl BufferPool {
         self.stats
     }
 
-    fn table_path(&self, table_name: &str) -> Option<PathBuf> {
-        self.data_directory
-            .as_ref()
-            .map(|dir| dir.join(format!("{table_name}.table")))
+    /// The file holding `name`: `<name>.table` for a table. A name with an extension,
+    /// such as an index's `users_id.index`, is the file name. Table names can't contain a
+    /// dot, so the two never clash.
+    fn table_path(&self, name: &str) -> Option<PathBuf> {
+        self.data_directory.as_ref().map(|dir| {
+            if name.contains('.') {
+                dir.join(name)
+            } else {
+                dir.join(format!("{name}.table"))
+            }
+        })
     }
 
     /// A page to read, loaded from its file the first time.
@@ -247,7 +254,7 @@ impl BufferPool {
     /// Number of pages the table has, counting pages created but not yet written to disk.
     ///
     /// Seeded from the size of the table file the first time it is asked for, then kept
-    /// up to date by [`BufferPool::get_free_page`], which is the only place pages are created.
+    /// up to date by [`BufferPool::allocate_page`], which is the only place pages are created.
     pub fn page_count(&mut self, table_name: &str) -> PageId {
         if let Some(&count) = self.page_counts.get(table_name) {
             return count;
@@ -275,15 +282,21 @@ impl BufferPool {
             return self.get_page_mut(table_name, last_page_id);
         }
 
-        let page = Page::new(page_count, PageType::Table);
-        if !page.has_room_for(size) {
+        if !Page::new(page_count, PageType::Table).has_room_for(size) {
             return Err(miette!("A tuple of {size} bytes does not fit in a page."));
         }
 
-        let slot = self.insert(table_name, page_count, page, true)?;
-        self.page_counts
-            .insert(table_name.to_string(), page_count + 1);
-        Ok(&mut self.frame_mut(slot).page)
+        let page_id = self.allocate_page(table_name, PageType::Table)?;
+        self.get_page_mut(table_name, page_id)
+    }
+
+    /// Adds an empty page to the end of `name`'s file and returns its id. It is written
+    /// to the file by the next flush or when evicted.
+    pub(crate) fn allocate_page(&mut self, name: &str, page_type: PageType) -> Result<PageId> {
+        let page_id = self.page_count(name);
+        self.insert(name, page_id, Page::new(page_id, page_type), true)?;
+        self.page_counts.insert(name.to_string(), page_id + 1);
+        Ok(page_id)
     }
 
     /// Writes one page to disk now. Used for the catalog, whose rows must be saved
