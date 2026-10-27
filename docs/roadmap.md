@@ -106,6 +106,8 @@ Pass batches to a callback, or return an iterator, instead of building a `Vec`. 
 
 ### 2.3 External merge sort
 
+**Done.** `SortExec` writes a sorted run to a temp file in `<data>/tmp` each time its rows reach the budget (`--sort-mem`, default 64 MB), then merges the runs with a min-heap and streams the result a batch at a time. Runs use their own tagged encoding, not the table page format, because a sort's rows may come from a join or an aggregate and match no table. Ties go to the earlier run, so the sort stays stable. EXPLAIN ANALYZE ends the Sort line with `sort: in memory` or `sort: external merge, N runs`. On 1M rows, `ORDER BY age` used about 333 MB above the startup floor before. It now uses about 130 MB at 64 MB, 39 MB at 16 MB, and 8 MB at 1 MB, and runs slightly faster (1.19 s down to 1.03 s at 1 MB). The budget is an estimate that misses malloc's overhead, so the real use is about twice the budget. The output matches the in-memory sort row for row.
+
 1. Sort until the rows held reach a memory budget (Postgres calls it `work_mem`).
 2. Write each sorted run to a temporary file, using the same row encoding as the table pages.
 3. Merge the runs with a min-heap of each run's next row, holding one page per run.
