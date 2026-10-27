@@ -28,7 +28,7 @@ use crate::{
             explain,
             logical::LogicalPlan,
             optimizer,
-            physical::{ExecCtx, PhysicalPlanner},
+            physical::{DEFAULT_SORT_MEM, ExecCtx, PhysicalPlanner, SortSpill},
         },
     },
     storage::{
@@ -103,6 +103,10 @@ pub struct Database {
 
     /// Directory where database files are stored. `None` for an in-memory database.
     data_directory: Option<PathBuf>,
+
+    /// Roughly how many bytes of rows a sort may hold in memory. A bigger sort writes
+    /// sorted runs to disk and merges them. An in-memory database always sorts in memory.
+    sort_mem: usize,
 }
 
 impl Database {
@@ -127,6 +131,7 @@ impl Database {
             catalog: SystemCatalog::new(),
 
             data_directory: Some(data_dir),
+            sort_mem: DEFAULT_SORT_MEM,
         }
     }
 
@@ -155,7 +160,23 @@ impl Database {
             catalog: SystemCatalog::new(),
 
             data_directory: None,
+            sort_mem: DEFAULT_SORT_MEM,
         }
+    }
+
+    /// Lets a sort hold about `bytes` of rows in memory before it writes them to disk.
+    pub fn set_sort_mem(&mut self, bytes: usize) {
+        self.sort_mem = bytes;
+    }
+
+    /// Where a sort writes the runs that don't fit in memory, and how much it may hold
+    /// first. `None` for an in-memory database, which never touches the disk.
+    pub(crate) fn sort_spill(&self) -> Option<SortSpill> {
+        let dir = self.data_directory.as_ref()?;
+        Some(SortSpill {
+            dir: dir.join("tmp"),
+            budget: self.sort_mem,
+        })
     }
 
     /// Initializes the database.
@@ -557,13 +578,17 @@ impl Database {
             .lines()
             .zip(&profile)
             .map(|(line, stats)| {
-                format!(
+                let mut line = format!(
                     "{line} (rows={} time={:.3} ms pages: hit={} read={})",
                     stats.rows.get(),
                     ms(stats.time.get()),
                     stats.hits.get(),
                     stats.reads.get()
-                )
+                );
+                if let Some(detail) = &*stats.detail.borrow() {
+                    line.push_str(&format!(" {detail}"));
+                }
+                line
             })
             .collect();
         lines.push(format!("Planning time: {:.3} ms", ms(planning)));
@@ -1570,6 +1595,47 @@ mod tests {
                 assert_eq!(db.query(&sql), expected, "{sql}");
             }
         }
+    }
+
+    #[test]
+    fn test_a_sort_past_its_memory_budget_returns_the_same_rows() {
+        let mut db = TestDb::new("external-sort");
+        db.execute("CREATE TABLE item (id INT, grp INT, tag TEXT)");
+        // Few distinct values, so most rows tie and only input order tells them apart
+        let values: Vec<String> = (0..3000)
+            .map(|id| {
+                let tag = if id % 5 == 0 {
+                    "NULL".to_string()
+                } else {
+                    format!("'t{}'", id % 3)
+                };
+                format!("({id}, {}, {tag})", (id * 7) % 4)
+            })
+            .collect();
+        db.execute(&format!("INSERT INTO item VALUES {}", values.join(", ")));
+
+        let orders = ["grp", "grp DESC", "tag", "tag DESC, grp", "id DESC"];
+        let in_memory: Vec<_> = orders
+            .iter()
+            .map(|order| db.query(&format!("SELECT * FROM item ORDER BY {order}")))
+            .collect();
+
+        // Small enough to write dozens of runs
+        db.db.set_sort_mem(16 * 1024);
+        for (order, expected) in orders.iter().zip(&in_memory) {
+            let sql = format!("SELECT * FROM item ORDER BY {order}");
+            assert_eq!(&db.query(&sql), expected, "{sql}");
+        }
+
+        let plan = db.query("EXPLAIN ANALYZE SELECT id FROM item ORDER BY grp");
+        let sort = plan[1][0].to_string();
+        assert!(sort.contains("sort: external merge, "), "{sort}");
+        // The runs are deleted once merged
+        assert_eq!(std::fs::read_dir(db.dir.join("tmp")).unwrap().count(), 0);
+
+        db.db.set_sort_mem(DEFAULT_SORT_MEM);
+        let plan = db.query("EXPLAIN ANALYZE SELECT id FROM item ORDER BY grp");
+        assert!(plan[1][0].to_string().ends_with("sort: in memory"));
     }
 
     #[test]
