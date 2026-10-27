@@ -111,7 +111,7 @@ pub struct ItemPointer {
 }
 
 impl ItemPointer {
-    const SIZE: usize = std::mem::size_of::<ItemPointer>();
+    pub(crate) const SIZE: usize = std::mem::size_of::<ItemPointer>();
 
     const DELETED_FLAG: u8 = 0b0000_0001; // Bit 0
     const LIVE_FLAG: u8 = 0b0000_0000; // Default state
@@ -201,10 +201,12 @@ impl Page {
     }
 
     pub fn get_item(&self, item_id: ItemId) -> Result<&[u8]> {
-        let item_pointer = self
-            .item_pointers()
-            .nth(item_id as usize)
-            .ok_or_else(|| miette!("Item not found."))?;
+        if item_id >= self.header.item_count {
+            return Err(miette!("Item not found."));
+        }
+        let at = item_id as usize * ItemPointer::SIZE;
+        let item_pointer =
+            ItemPointer::from_bytes(self.data[at..at + ItemPointer::SIZE].try_into().unwrap());
 
         let start = item_pointer.offset as usize - PageHeader::SIZE;
         let end = start + item_pointer.length as usize;
