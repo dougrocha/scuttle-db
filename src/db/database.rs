@@ -192,13 +192,23 @@ impl Database {
         let path = data_directory.join(format!("{}.table", self.catalog.name()));
 
         if Path::new(&path).exists() {
+            // The last run stopped with changes half written, so an index may not match
+            // its table. Indexes can be built again from the tables, so they are.
+            let rebuild = self.buffer_manager.was_left_unflushed();
             let tables = self.catalog.load_all_tables(&mut self.buffer_manager)?;
 
             for (name, schema) in tables {
-                self.tables
-                    .insert(name.clone(), TableDef::new(name.clone(), schema));
+                let table = TableDef::new(name.clone(), schema);
+                if rebuild {
+                    for index in &table.indexes {
+                        self.buffer_manager.drop_table(index.file_name())?;
+                    }
+                }
+                self.tables.insert(name.clone(), table);
                 self.open_indexes(&name)?;
             }
+            // Deletes the marker, even when there was no index to rebuild
+            self.buffer_manager.flush()?;
         } else {
             println!("No catalog exists. Creates when adding a table");
         }
@@ -873,6 +883,7 @@ fn table_def<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::buffer_pool::UNFLUSHED;
 
     /// A database in a fresh temp directory, removed again on drop.
     struct TestDb {
@@ -1635,6 +1646,29 @@ mod tests {
         db.reopen();
         assert!(index.exists());
         lookups(&mut db);
+    }
+
+    #[test]
+    fn test_indexes_are_rebuilt_after_a_run_that_stopped_partway() {
+        let mut db = TestDb::new("stale-index");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
+        db.execute("INSERT INTO item VALUES (1), (2)");
+        let index = db.dir.join("item_id.index");
+        let old_index = std::fs::read(&index).unwrap();
+
+        // A crash after the table's pages were written but before the index's: the table
+        // has row 3, the index doesn't, and the marker was never deleted
+        db.execute("INSERT INTO item VALUES (3)");
+        std::fs::write(&index, old_index).unwrap();
+        std::fs::File::create(db.dir.join(UNFLUSHED)).unwrap();
+
+        db.reopen();
+        assert_eq!(
+            db.query("SELECT id FROM item WHERE id = 3"),
+            [[Value::Int64(3)]]
+        );
+        assert!(db.fails("INSERT INTO item VALUES (3)"));
+        assert!(!db.dir.join(UNFLUSHED).exists());
     }
 
     #[test]
