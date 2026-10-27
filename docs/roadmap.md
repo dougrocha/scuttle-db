@@ -159,7 +159,7 @@ page reads.
 - **Deletes.** Remove the entry right away and never merge pages. Postgres doesn't merge either.
 - **Crash safety without a WAL.** The index can always be rebuilt from the heap. Store a generation number in the metapage, and if it doesn't match on open, do a bulk rebuild.
 
-**Progress: steps 1–8 done, 9 left.** Each PRIMARY KEY or UNIQUE column has its own `<table>_<column>.index` file, read through the buffer pool. On the 1M-row bench:
+**Done.** Each PRIMARY KEY or UNIQUE column has its own `<table>_<column>.index` file, read through the buffer pool. On the 1M-row bench:
 - Opening the database no longer rebuilds anything. A run with one index lookup takes 0.6 ms and 3.4 MB, down from about 200 ms and 210 MB.
 - A point lookup reads 4 pages: the metapage, the root, a leaf, then the heap page.
 - A missing index file is built from the table with a bulk build: 0.23 s and 22 MB. Inserting the rows one at a time instead took 0.67 s and 46 MB, because in-order inserts leave every leaf half full.
@@ -170,12 +170,12 @@ Where it differs from the steps below:
 - The bulk build sorts entries in memory, about 40 bytes per INT entry. It doesn't use the external sort yet.
 - Entries are capped at 1,024 bytes (`MAX_ENTRY`). A node splits when it has less room than one more entry, so a split always fits in its parent.
 
-Not done yet:
-- **Step 9.** fsync, and noticing an index left stale by a crash.
-- **Splits for in-order inserts.** Inserts with rising keys (a SERIAL id) still leave leaves half full. Postgres splits the rightmost page unevenly for this.
+After step 8:
+- **Inserts in key order.** When the rightmost page splits and the new key sorts after everything in it, the left page keeps about 90% instead of half, as Postgres does. Inserting 200K rising ids makes a 4.6 MB index, against 4.5 MB from a bulk build. With even splits it was about twice that.
+- **Step 9 used a marker file instead of a generation number.** The pool creates `<data>/unflushed` when the first page changes and deletes it after a complete flush. If the database opens and finds the file, the last run stopped partway, so every index is rebuilt from its table. It costs about 3.5 µs per writing statement, for the file's create and delete.
+- **No fsync yet.** Without a write-ahead log, fsync alone can't make a statement atomic: a crash can still land between two page writes. It would cost about 1 ms on every statement. It belongs with a WAL, where one fsync of the log can commit a batch of statements together (group commit). Until then, the marker covers a crash of the process, but not a power cut.
 
-**Steps:**
-1. **Page plumbing.**
+g.**
    - Serialize the B-tree page types. Today `PageHeader::to_bytes` panics on them.
    - Store sibling links in a special area at the end of the page.
    - Add `Page::insert_at(pos)`.
