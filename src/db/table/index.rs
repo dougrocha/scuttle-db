@@ -6,7 +6,7 @@ use crate::{
     DataType, DatabaseError, Value,
     db::table::{column_def::ColumnConstraint, row::Row, schema::Schema},
     storage::{
-        btree::{BTree, Cursor},
+        btree::{BTree, Cursor, MAX_ENTRY},
         buffer_pool::BufferPool,
         page::{ItemId, PageId},
     },
@@ -236,7 +236,9 @@ impl TableIndex {
         Ok(())
     }
 
-    /// Fails if writing `new_rows` would give two live rows the same key.
+    /// Fails if writing `new_rows` would give two live rows the same key, or a key is too
+    /// long for the index. Called before anything is written, so a failing statement
+    /// changes nothing.
     ///
     /// `replacing` holds the rows the statement removes before writing (an UPDATE's old
     /// versions), so a row may keep its own key.
@@ -250,6 +252,16 @@ impl TableIndex {
         let mut seen = BTreeSet::new();
 
         for key in new_rows.iter().filter_map(|row| self.key(row)) {
+            // Any ctid makes an entry of the same length
+            let len = encode_entry(&key, (0, 0)).len();
+            if len > MAX_ENTRY {
+                return Err(DatabaseError::ConstraintViolation(format!(
+                    "a value in indexed column {column_name} takes {len} bytes in the index, \
+                     more than the {MAX_ENTRY} it allows"
+                ))
+                .into());
+            }
+
             let range = IndexRange {
                 column: self.column,
                 lower: Bound::Included(key.clone()),

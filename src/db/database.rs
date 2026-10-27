@@ -1651,6 +1651,27 @@ mod tests {
     }
 
     #[test]
+    fn test_a_value_too_long_for_its_index_changes_nothing() {
+        let mut db = TestDb::new("long-key");
+        db.execute("CREATE TABLE item (id INT, tag TEXT UNIQUE)");
+        db.execute("INSERT INTO item VALUES (1, 'short')");
+        let long = "x".repeat(2000);
+
+        assert!(db.fails(&format!("INSERT INTO item VALUES (2, '{long}')")));
+        assert!(db.fails(&format!("UPDATE item SET tag = '{long}' WHERE id = 1")));
+
+        db.reopen();
+        assert_eq!(
+            db.query("SELECT id, tag FROM item"),
+            [[Value::Int64(1), Value::Text("short".into())]]
+        );
+        assert_eq!(
+            db.query("SELECT id FROM item WHERE tag = 'short'"),
+            [[Value::Int64(1)]]
+        );
+    }
+
+    #[test]
     fn test_indexes_are_rebuilt_after_a_run_that_stopped_partway() {
         let mut db = TestDb::new("stale-index");
         db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
