@@ -142,7 +142,7 @@ impl BufferPool {
     }
 
     /// The file holding `name`: `<name>.table` for a table. A name with an extension,
-    /// such as an index's `users.id.index`, is the file name. Table names can't contain a
+    /// such as an index's `users_pkey.index`, is the file name. Table names can't contain a
     /// dot, so the two never clash.
     fn table_path(&self, name: &str) -> Option<PathBuf> {
         self.data_directory.as_ref().map(|dir| {
@@ -337,13 +337,6 @@ impl BufferPool {
         self.insert(name, page_id, Page::new(page_id, page_type), true)?;
         self.page_counts.insert(name.to_string(), page_id + 1);
         Ok(page_id)
-    }
-
-    /// Writes one page to disk now. Used for the catalog, whose rows must be saved
-    /// as soon as a table is created.
-    pub(crate) fn save_page(&mut self, table_name: &str, page_id: PageId) -> Result<()> {
-        let slot = self.load(table_name, page_id)?;
-        self.write_frame(slot)
     }
 
     /// Writes every dirty page, in file order, so each file is written front to back.

@@ -224,7 +224,8 @@ impl<'a> Iterator for Lexer<'a> {
                     Err(err) => Err(err),
                 }
             }
-            _ if char.is_alphabetic() => {
+            // As in Postgres, an identifier may start with a letter or _
+            _ if char.is_alphabetic() || char == '_' => {
                 let word = self.consume_word()?;
 
                 if let Ok(kw) = Keyword::from_str(word) {

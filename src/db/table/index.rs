@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, ops::Bound};
 use miette::Result;
 
 use crate::{
-    DataType, DatabaseError, Value,
+    ColumnDef, DataType, DatabaseError, Value,
     db::table::{column_def::ColumnConstraint, row::Row, schema::Schema},
     storage::{
         btree::{BTree, Cursor, MAX_ENTRY},
@@ -125,7 +125,7 @@ pub(crate) fn entry_ctid(entry: &[u8]) -> Ctid {
     )
 }
 
-/// An index over one column, stored as a B+tree in its own file, `<table>.<column>.index`.
+/// An index over one column, stored as a B+tree in its own file, `<name>.index`.
 ///
 /// Each entry is the column's key followed by the row's ctid (see [`encode_entry`]), so
 /// rows sharing a key are separate entries and a delete finds exactly its own.
@@ -133,31 +133,77 @@ pub(crate) fn entry_ctid(entry: &[u8]) -> Ctid {
 /// NULLs are not indexed, so a UNIQUE column may hold any number of them, as in SQL.
 #[derive(Debug, Clone)]
 pub(crate) struct TableIndex {
+    pub(crate) name: String,
     pub(crate) column: usize,
+
+    /// Whether two rows may share a key.
+    pub(crate) unique: bool,
+
+    /// The column constraint the index enforces, if CREATE TABLE made it for one. DROP
+    /// INDEX refuses such an index. It goes away when its table is dropped.
+    pub(crate) constraint: Option<IndexConstraint>,
+
     data_type: DataType,
     tree: BTree,
 }
 
+/// A column constraint that an index enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IndexConstraint {
+    PrimaryKey,
+    Unique,
+}
+
+impl IndexConstraint {
+    /// The constraint as SQL spells it, which is also how the catalog stores it.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::PrimaryKey => "PRIMARY KEY",
+            Self::Unique => "UNIQUE",
+        }
+    }
+
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        match text {
+            "PRIMARY KEY" => Some(Self::PrimaryKey),
+            "UNIQUE" => Some(Self::Unique),
+            _ => None,
+        }
+    }
+
+    /// The constraint `column` declares, if any. If it declares both, this returns
+    /// PRIMARY KEY.
+    pub(crate) fn of(column: &ColumnDef) -> Option<Self> {
+        let has = |wanted: &ColumnConstraint| column.constraints.contains(wanted);
+        if has(&ColumnConstraint::PrimaryKey) {
+            Some(Self::PrimaryKey)
+        } else if has(&ColumnConstraint::Unique) {
+            Some(Self::Unique)
+        } else {
+            None
+        }
+    }
+}
+
 impl TableIndex {
-    /// One index per PRIMARY KEY or UNIQUE column. Their files
-    /// aren't touched: see [`TableIndex::exists`] and [`TableIndex::create`].
-    pub(crate) fn for_schema(table_name: &str, schema: &Schema) -> Vec<Self> {
-        schema
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(_, column)| {
-                column
-                    .constraints
-                    .iter()
-                    .any(|c| matches!(c, ColumnConstraint::PrimaryKey | ColumnConstraint::Unique))
-            })
-            .map(|(column, def)| Self {
-                column,
-                data_type: def.data_type,
-                tree: BTree::open(&format!("{table_name}.{}.index", def.name)),
-            })
-            .collect()
+    /// The index called `name` on `schema`'s column number `column`. This doesn't touch
+    /// the index's file. See [`TableIndex::exists`] and [`TableIndex::create`].
+    pub(crate) fn new(
+        name: String,
+        schema: &Schema,
+        column: usize,
+        unique: bool,
+        constraint: Option<IndexConstraint>,
+    ) -> Self {
+        let tree = BTree::open(&format!("{name}.index"));
+        Self {
+            name,
+            column,
+            unique,
+            constraint,
+            data_type: schema.columns[column].data_type,
+            tree,
+        }
     }
 
     /// The name of the index's file, which is also its name in the buffer pool.
@@ -265,13 +311,13 @@ impl TableIndex {
         Ok(())
     }
 
-    /// Fails if writing `new_rows` would give two live rows the same key, or a key is too
-    /// long for the index. Called before anything is written, so a failing statement
-    /// changes nothing.
+    /// Fails if a key of `new_rows` is too long for the index. A unique index also fails if
+    /// writing them would give two live rows the same key. Statements call this before
+    /// writing anything, so a failing statement changes nothing.
     ///
     /// `replacing` holds the rows the statement removes before writing (an UPDATE's old
     /// versions), so a row may keep its own key.
-    pub(crate) fn check_unique(
+    pub(crate) fn check_rows(
         &self,
         pool: &mut BufferPool,
         column_name: &str,
@@ -291,6 +337,9 @@ impl TableIndex {
                 .into());
             }
 
+            if !self.unique {
+                continue;
+            }
             let range = IndexRange {
                 column: self.column,
                 lower: Bound::Included(key.clone()),

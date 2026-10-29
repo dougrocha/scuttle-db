@@ -15,7 +15,7 @@ use crate::{
         table::{
             Table,
             cursor::TableCursor,
-            index::{Ctid, TableIndex},
+            index::{Ctid, IndexConstraint, TableIndex},
             row::Row,
             schema::Schema,
             table_def::TableDef,
@@ -132,9 +132,9 @@ impl Database {
         std::fs::create_dir_all(&data_dir).ok();
 
         Self {
-            tables: std::collections::BTreeMap::default(),
+            tables: catalog_tables(),
             buffer_manager: BufferPool::with_capacity(&data_dir, pages),
-            catalog: SystemCatalog::new(),
+            catalog: SystemCatalog,
 
             data_directory: Some(data_dir),
             sort_mem: DEFAULT_SORT_MEM,
@@ -161,9 +161,9 @@ impl Database {
     /// ```
     pub fn in_memory() -> Self {
         Self {
-            tables: std::collections::BTreeMap::default(),
+            tables: catalog_tables(),
             buffer_manager: BufferPool::in_memory(),
-            catalog: SystemCatalog::new(),
+            catalog: SystemCatalog,
 
             data_directory: None,
             sort_mem: DEFAULT_SORT_MEM,
@@ -185,42 +185,30 @@ impl Database {
         })
     }
 
-    /// Initializes the database.
+    /// Opens the database and loads every table the catalog holds, with its indexes.
     ///
-    /// Currently a placeholder for future initialization logic such as:
-    /// - Loading system catalogs
-    /// - Setting up metadata tables
-    /// - Recovering from crash (WAL replay)
+    /// If the last run stopped with pages half written, an index may not match its table,
+    /// so this builds every index again from its table's rows.
     pub fn initialize(&mut self) -> Result<()> {
-        let Some(data_directory) = &self.data_directory else {
+        if self.data_directory.is_none() {
             return Ok(());
-        };
-        let path = data_directory.join(format!("{}.table", self.catalog.name()));
-
-        if Path::new(&path).exists() {
-            // The last run stopped with changes half written, so an index may not match
-            // its table. Indexes can be built again from the tables, so they are.
-            let rebuild = self.buffer_manager.was_left_unflushed();
-            let tables = self.catalog.load_all_tables(&mut self.buffer_manager)?;
-
-            for (name, schema) in tables {
-                let table = TableDef::new(name.clone(), schema);
-                if rebuild {
-                    for index in &table.indexes {
-                        self.buffer_manager.drop_table(index.file_name())?;
-                    }
-                }
-                self.tables.insert(name.clone(), table);
-                self.open_indexes(&name)?;
-            }
-            // Deletes the marker, even when there was no index to rebuild
-            self.buffer_manager.flush()?;
-            self.remove_orphan_files()?;
-        } else {
-            println!("No catalog exists. Creates when adding a table");
         }
 
-        Ok(())
+        let rebuild = self.buffer_manager.was_left_unflushed();
+        for table in self.catalog.load(&mut self.buffer_manager)? {
+            if rebuild {
+                for index in &table.indexes {
+                    self.buffer_manager.drop_table(index.file_name())?;
+                }
+            }
+            let name = table.name.clone();
+            self.tables.insert(name.clone(), table);
+            self.open_indexes(&name)?;
+        }
+        // The flush writes the catalog rows that loading deleted. It also deletes the
+        // unflushed marker, even when no index needed rebuilding
+        self.buffer_manager.flush()?;
+        self.remove_orphan_files()
     }
 
     /// Checks if a table exists in the database.
@@ -244,9 +232,9 @@ impl Database {
             return Err(DatabaseError::TableAlreadyExists(name.to_string()));
         }
 
-        // Names become file names, `<table>.table` and `<table>.<column>.index`. Letters,
-        // digits and `_` keep them inside the data directory, and keep two different names
-        // from making the same file.
+        // A table name becomes the file name `<table>.table`, and goes into index names,
+        // which become `<index>.index`. Letters, digits and `_` keep those files inside
+        // the data directory.
         let names = std::iter::once(name).chain(schema.columns.iter().map(|c| c.name.as_str()));
         for name in names {
             if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
@@ -274,27 +262,66 @@ impl Database {
             )));
         }
 
-        let _ = self
-            .catalog
-            .save_table_metadata(&mut self.buffer_manager, name, &schema, 0);
+        // One index per PRIMARY KEY or UNIQUE column, with Postgres's names:
+        // `<table>_pkey` and `<table>_<column>_key`
+        let mut indexes: Vec<TableIndex> = Vec::new();
+        for (position, column) in schema.columns.iter().enumerate() {
+            let Some(constraint) = IndexConstraint::of(column) else {
+                continue;
+            };
+            let base = match constraint {
+                IndexConstraint::PrimaryKey => format!("{name}_pkey"),
+                IndexConstraint::Unique => format!("{name}_{}_key", column.name),
+            };
+            let index_name = self.free_index_name(&base, &indexes);
+            indexes.push(TableIndex::new(
+                index_name,
+                &schema,
+                position,
+                true,
+                Some(constraint),
+            ));
+        }
+        let table = TableDef::new(name.to_string(), schema, indexes);
 
-        let table = TableDef::new(name.to_string(), schema);
+        let error = |error: miette::Report| DatabaseError::InvalidQuery(error.to_string());
         // A drop that failed partway may have left files under these names. Their old rows
         // must not show up in the new table.
         let leftovers = std::iter::once(name).chain(table.indexes.iter().map(|i| i.file_name()));
         for file in leftovers {
-            self.buffer_manager
-                .drop_table(file)
-                .map_err(|error| DatabaseError::InvalidQuery(error.to_string()))?;
+            self.buffer_manager.drop_table(file).map_err(error)?;
         }
         for index in &table.indexes {
-            index
-                .create(&mut self.buffer_manager)
-                .map_err(|error| DatabaseError::InvalidQuery(error.to_string()))?;
+            index.create(&mut self.buffer_manager).map_err(error)?;
         }
+        self.catalog
+            .add_table(&mut self.buffer_manager, &table)
+            .map_err(error)?;
         self.tables.insert(name.to_string(), table);
+        self.buffer_manager.flush().map_err(error)?;
 
         Ok(())
+    }
+
+    /// Returns `base` if no index has that name. Otherwise it appends 1, 2 and so on until
+    /// the name is free. `new` holds indexes not yet added to a table. Postgres picks
+    /// names the same way.
+    fn free_index_name(&self, base: &str, new: &[TableIndex]) -> String {
+        let taken = |name: &str| {
+            self.tables
+                .values()
+                .flat_map(|table| &table.indexes)
+                .chain(new)
+                .any(|index| index.name == name)
+        };
+        let mut name = base.to_string();
+        for n in 1.. {
+            if !taken(&name) {
+                break;
+            }
+            name = format!("{base}{n}");
+        }
+        name
     }
 
     /// Gets an immutable reference to a table.
@@ -356,6 +383,7 @@ impl Database {
         if !self.table_exists(name) {
             return Err(DatabaseError::TableNotFound(name.to_string()).into());
         }
+        Self::check_writable(name)?;
 
         self.catalog.remove_table(&mut self.buffer_manager, name)?;
         let table = self.tables.remove(name).expect("checked above");
@@ -375,7 +403,7 @@ impl Database {
             return Ok(());
         };
 
-        let mut owned = BTreeSet::from([format!("{}.table", self.catalog.name())]);
+        let mut owned = BTreeSet::new();
         for table in self.tables.values() {
             owned.insert(format!("{}.table", table.name));
             owned.extend(
@@ -448,7 +476,8 @@ impl Database {
         Ok(())
     }
 
-    /// Fails if writing `new_rows` would break a UNIQUE or PRIMARY KEY column.
+    /// Fails if writing `new_rows` would break a unique index, or put a key too long for
+    /// an index in one.
     ///
     /// `replacing` holds the rows the statement deletes first (an UPDATE's old versions).
     /// Checked before anything is written, so a failing statement changes nothing.
@@ -461,7 +490,7 @@ impl Database {
         let table = table_def(&self.tables, table_name)?;
         for index in &table.indexes {
             let column_name = &table.schema.columns[index.column].name;
-            index.check_unique(&mut self.buffer_manager, column_name, new_rows, replacing)?;
+            index.check_rows(&mut self.buffer_manager, column_name, new_rows, replacing)?;
         }
 
         Ok(())
@@ -815,6 +844,7 @@ impl Database {
         else {
             unreachable!("analyze_update always returns LogicalPlan::Update")
         };
+        Self::check_writable(&table_name)?;
 
         // Compute and validate every new row before writing anything, so a bad value
         // doesn't leave the table half-updated. Scanning everything up front also keeps
@@ -858,6 +888,18 @@ impl Database {
         })
     }
 
+    /// Fails for a catalog table. Only the database writes those, so they always match the
+    /// tables they describe.
+    fn check_writable(table_name: &str) -> Result<()> {
+        if SystemCatalog::is_catalog(table_name) {
+            return Err(DatabaseError::InvalidQuery(format!(
+                "{table_name} is a catalog table, which only the database changes"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
     /// Converts a value for storage in `column`, checking type and NOT NULL.
     fn coerce_for_column(value: Value, column: &ColumnDef) -> Result<Value> {
         if value == Value::Null && !column.is_nullable() {
@@ -882,6 +924,7 @@ impl Database {
         else {
             unreachable!("analyze_delete always returns LogicalPlan::Delete")
         };
+        Self::check_writable(&table_name)?;
 
         let mut rows_affected = 0;
         for (page_id, item_id, row) in self.get_rows_with_location(&table_name)? {
@@ -913,6 +956,7 @@ impl Database {
             source,
         } = analyzed_plan
         {
+            Self::check_writable(&table_name)?;
             if let LogicalPlan::Values { expressions, .. } = *source {
                 let schema = context.get_table(&table_name)?.schema().clone();
                 let evaluator = ExpressionEvaluator;
@@ -957,6 +1001,14 @@ impl Database {
             ..QueryResponse::default()
         })
     }
+}
+
+/// The catalog's tables, which every database starts with.
+fn catalog_tables() -> std::collections::BTreeMap<String, TableDef> {
+    SystemCatalog::tables()
+        .into_iter()
+        .map(|table| (table.name.clone(), table))
+        .collect()
 }
 
 /// The table called `name`. Takes only the tables, unlike [`Database::get_table`], so the
@@ -1691,7 +1743,7 @@ mod tests {
 
         db.db.drop_table("item").unwrap();
         assert!(!db.dir.join("item.table").exists());
-        assert!(!db.dir.join("item.id.index").exists());
+        assert!(!db.dir.join("item_pkey.index").exists());
         db.reopen();
 
         assert!(db.db.execute_query("SELECT * FROM item").is_err());
@@ -1738,8 +1790,8 @@ mod tests {
             assert!(db.fails("INSERT INTO item VALUES (1, 't1600')"));
         };
 
-        let index = db.dir.join("item.id.index");
-        assert!(index.exists() && db.dir.join("item.tag.index").exists());
+        let index = db.dir.join("item_pkey.index");
+        assert!(index.exists() && db.dir.join("item_tag_key.index").exists());
         lookups(&mut db);
 
         db.reopen();
@@ -1757,6 +1809,168 @@ mod tests {
         db.db.set_sort_mem(1024);
         db.db.initialize().unwrap();
         lookups(&mut db);
+    }
+
+    #[test]
+    fn test_a_table_reads_back_from_the_catalog_as_it_was_created() {
+        let mut db = TestDb::new("catalog-roundtrip");
+        db.execute(
+            "CREATE TABLE item (id INT PRIMARY KEY, code VARCHAR(8) UNIQUE NOT NULL, \
+             price FLOAT DEFAULT 2.5, made TIMESTAMP DEFAULT '2026-01-01 00:00:00', \
+             done BOOLEAN NOT NULL DEFAULT false, note TEXT DEFAULT 'a b', gone INT DEFAULT NULL)",
+        );
+        db.execute("UPDATE item SET id = 0 WHERE id = 0");
+        let before = db.db.get_table("item").unwrap().clone();
+
+        db.reopen();
+        let after = db.db.get_table("item").unwrap();
+        for (old, new) in before.schema.columns.iter().zip(&after.schema.columns) {
+            assert_eq!(new.name, old.name);
+            assert_eq!(new.data_type, old.data_type, "{}", old.name);
+            assert_eq!(new.is_nullable(), old.is_nullable(), "{}", old.name);
+            assert_eq!(new.has_default(), old.has_default(), "{}", old.name);
+            assert_eq!(new.default_value(), old.default_value(), "{}", old.name);
+            assert_eq!(
+                IndexConstraint::of(new),
+                IndexConstraint::of(old),
+                "{}",
+                old.name
+            );
+        }
+        assert_eq!(after.schema.columns.len(), before.schema.columns.len());
+        let names = |table: &TableDef| -> Vec<String> {
+            table.indexes.iter().map(|i| i.name.clone()).collect()
+        };
+        assert_eq!(names(after), ["item_pkey", "item_code_key"]);
+        assert_eq!(names(after), names(&before));
+
+        // The defaults still fill in an INSERT that leaves their columns out
+        db.execute("INSERT INTO item (id, code) VALUES (1, 'a')");
+        assert_eq!(
+            db.query("SELECT price, done, note, gone FROM item"),
+            [[
+                Value::Float64(2.5),
+                Value::Bool(false),
+                text("a b"),
+                Value::Null
+            ]]
+        );
+        assert!(db.fails("INSERT INTO item (id, code) VALUES (1, 'b')"));
+        assert!(db.fails("INSERT INTO item (id, code) VALUES (2, 'a')"));
+    }
+
+    #[test]
+    fn test_the_catalog_tables_can_be_read_but_not_written() {
+        let mut db = TestDb::new("catalog-read");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, tag VARCHAR(4) DEFAULT 'x')");
+
+        assert_eq!(
+            db.query("SELECT name FROM __tables__ ORDER BY name"),
+            [[text("item")], [text("users")]]
+        );
+        assert_eq!(
+            db.query(
+                "SELECT position, name, type, max_len, not_null, default_value \
+                 FROM __columns__ WHERE table_name = 'item' ORDER BY position"
+            ),
+            [
+                vec![
+                    Value::Int64(0),
+                    text("id"),
+                    text("INT"),
+                    Value::Null,
+                    Value::Bool(true),
+                    Value::Null
+                ],
+                vec![
+                    Value::Int64(1),
+                    text("tag"),
+                    text("VARCHAR"),
+                    Value::Int64(4),
+                    Value::Bool(false),
+                    text("x")
+                ],
+            ]
+        );
+        assert_eq!(
+            db.query("SELECT name, column_name, is_unique, constraint_type FROM __indexes__"),
+            [[
+                text("item_pkey"),
+                text("id"),
+                Value::Bool(true),
+                text("PRIMARY KEY")
+            ]]
+        );
+
+        assert!(db.fails("INSERT INTO __tables__ VALUES ('fake')"));
+        assert!(db.fails("UPDATE __columns__ SET name = 'x'"));
+        assert!(db.fails("DELETE FROM __indexes__"));
+        assert!(db.db.drop_table("__tables__").is_err());
+        assert!(db.fails(r#"CREATE TABLE "__tables__" (id INT)"#));
+        assert_eq!(db.query("SELECT name FROM __tables__").len(), 2);
+    }
+
+    #[test]
+    fn test_a_table_without_its_tables_row_is_cleaned_up_on_open() {
+        let mut db = TestDb::new("catalog-half-made");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
+        db.execute("INSERT INTO item VALUES (1)");
+
+        // As if the database stopped after writing the columns but not the `__tables__` row
+        for (page_id, item_id, row) in db.db.get_rows_with_location("__tables__").unwrap() {
+            if row.values[0] == text("item") {
+                let page = db.db.buffer_manager.get_page_mut("__tables__", page_id);
+                page.unwrap().delete_item(item_id).unwrap();
+            }
+        }
+        db.db.buffer_manager.flush().unwrap();
+
+        db.reopen();
+        assert!(db.fails("SELECT * FROM item"));
+        assert!(
+            db.query("SELECT * FROM __columns__ WHERE table_name = 'item'")
+                .is_empty()
+        );
+        assert!(db.query("SELECT * FROM __indexes__").is_empty());
+        assert!(!db.dir.join("item.table").exists());
+        assert!(!db.dir.join("item_pkey.index").exists());
+        // `users` is untouched
+        assert_eq!(db.query("SELECT id FROM users").len(), 4);
+    }
+
+    #[test]
+    fn test_index_names_that_clash_get_a_number() {
+        let mut db = TestDb::new("index-names");
+        // Both UNIQUE columns would be named a_b_c_key
+        db.execute("CREATE TABLE a_b (c INT UNIQUE)");
+        db.execute("CREATE TABLE a (b_c INT UNIQUE)");
+        assert_eq!(
+            db.query("SELECT name, table_name FROM __indexes__ ORDER BY name"),
+            [
+                [text("a_b_c_key"), text("a_b")],
+                [text("a_b_c_key1"), text("a")]
+            ]
+        );
+        db.execute("INSERT INTO a_b VALUES (1)");
+        db.execute("INSERT INTO a VALUES (1)");
+        db.reopen();
+        assert!(db.fails("INSERT INTO a VALUES (1)"));
+        db.execute("INSERT INTO a_b VALUES (2)");
+    }
+
+    #[test]
+    fn test_files_the_catalog_doesnt_list_are_deleted_on_open() {
+        let mut db = TestDb::new("catalog-old-files");
+        // What an older version left: its JSON catalog and a table it listed there
+        std::fs::write(db.dir.join("__catalog__.table"), "old").unwrap();
+        std::fs::write(db.dir.join("old.table"), "old").unwrap();
+        std::fs::write(db.dir.join("old.id.index"), "old").unwrap();
+
+        db.reopen();
+        assert!(!db.dir.join("__catalog__.table").exists());
+        assert!(!db.dir.join("old.table").exists());
+        assert!(!db.dir.join("old.id.index").exists());
+        assert_eq!(db.query("SELECT id FROM users").len(), 4);
     }
 
     #[test]
@@ -1893,7 +2107,7 @@ mod tests {
         let mut db = TestDb::new("stale-index");
         db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
         db.execute("INSERT INTO item VALUES (1), (2)");
-        let index = db.dir.join("item.id.index");
+        let index = db.dir.join("item_pkey.index");
         let old_index = std::fs::read(&index).unwrap();
 
         // A crash after the table's pages were written but before the index's: the table
@@ -1966,7 +2180,7 @@ mod tests {
         db.reopen();
         assert!(db.fails("SELECT * FROM item"));
         assert!(!db.dir.join("item.table").exists());
-        assert!(!db.dir.join("item.id.index").exists());
+        assert!(!db.dir.join("item_pkey.index").exists());
         db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
         assert_eq!(db.query("SELECT * FROM item"), Vec::<Vec<Value>>::new());
     }

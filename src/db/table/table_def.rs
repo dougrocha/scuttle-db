@@ -13,15 +13,15 @@ pub struct TableDef {
     /// The table's schema defining its columns.
     pub(crate) schema: Schema,
 
-    /// One index per PRIMARY KEY or UNIQUE column, each stored in its own file.
+    /// The table's indexes, each in its own file. CREATE TABLE makes one per PRIMARY KEY
+    /// or UNIQUE column, and CREATE INDEX makes the rest.
     pub(crate) indexes: Vec<TableIndex>,
 }
 
 impl TableDef {
-    /// Creates a new relation (table) with the given name and schema. Its indexes' files
-    /// are not created or read here.
-    pub fn new(name: String, schema: Schema) -> Self {
-        let indexes = TableIndex::for_schema(&name, &schema);
+    /// A table called `name` with `schema` and `indexes`. This doesn't create or read the
+    /// indexes' files.
+    pub(crate) fn new(name: String, schema: Schema, indexes: Vec<TableIndex>) -> Self {
         Self {
             name,
             schema,
@@ -31,10 +31,6 @@ impl TableDef {
 }
 
 impl Table for TableDef {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn schema(&self) -> &Schema {
         &self.schema
     }
