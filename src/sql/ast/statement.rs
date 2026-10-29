@@ -7,6 +7,16 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum Statement {
     Create(CreateStatement),
+
+    /// `CREATE [UNIQUE] INDEX <name> ON <table> (<column>)`
+    CreateIndex(CreateIndexStatement),
+
+    /// `DROP TABLE <name>`
+    DropTable(String),
+
+    /// `DROP INDEX <name>`
+    DropIndex(String),
+
     Select(SelectStatement),
     Insert(InsertStatement),
     Update(UpdateStatement),
@@ -105,6 +115,14 @@ impl std::fmt::Display for JoinKind {
 pub struct CreateStatement {
     pub table_name: String,
     pub columns: Vec<ColumnDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateIndexStatement {
+    pub name: String,
+    pub table_name: String,
+    pub column: String,
+    pub unique: bool,
 }
 
 #[derive(Debug, Clone)]

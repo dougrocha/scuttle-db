@@ -13,8 +13,9 @@ use crate::{
             operator::Operator,
             predicate::IsPredicate,
             statement::{
-                CreateStatement, DeleteStatement, From, InsertStatement, JoinClause, JoinKind,
-                OrderByItem, SelectStatement, Statement, TableRef, UpdateStatement,
+                CreateIndexStatement, CreateStatement, DeleteStatement, From, InsertStatement,
+                JoinClause, JoinKind, OrderByItem, SelectStatement, Statement, TableRef,
+                UpdateStatement,
             },
             target::{SelectList, SelectTarget},
         },
@@ -66,6 +67,7 @@ impl<'src> SqlParser<'src> {
             Token::Keyword(keyword) => match keyword {
                 Keyword::Select => self.parse_select_statement(),
                 Keyword::Create => self.parse_create_statement(),
+                Keyword::Drop => self.parse_drop_statement(),
                 Keyword::Insert => self.parse_insert_statement(),
                 Keyword::Update => self.parse_update_statement(),
                 Keyword::Delete => self.parse_delete_statement(),
@@ -250,6 +252,10 @@ impl<'src> SqlParser<'src> {
 
     fn parse_create_statement(&mut self) -> Result<Statement> {
         self.expect_keyword(Keyword::Create)?;
+        let unique = self.consume_if(Token::Keyword(Keyword::Unique));
+        if unique || self.peek_keyword(Keyword::Index) {
+            return self.parse_create_index(unique);
+        }
         self.expect_keyword(Keyword::Table)?;
 
         let table_name = self.expect_identifier()?;
@@ -268,6 +274,39 @@ impl<'src> SqlParser<'src> {
             table_name: table_name.to_string(),
             columns,
         }))
+    }
+
+    /// The rest of `CREATE [UNIQUE] INDEX <name> ON <table> (<column>)`, after `UNIQUE`.
+    fn parse_create_index(&mut self, unique: bool) -> Result<Statement> {
+        self.expect_keyword(Keyword::Index)?;
+        let name = self.expect_identifier()?.to_string();
+        self.expect_keyword(Keyword::On)?;
+        let table_name = self.expect_identifier()?.to_string();
+        self.expect_token(Token::LeftParen)?;
+        let column = self.expect_identifier()?.to_string();
+        if self.peek_is(Token::Comma) {
+            return Err(miette!("An index can only cover one column"));
+        }
+        self.expect_token(Token::RightParen)?;
+
+        Ok(Statement::CreateIndex(CreateIndexStatement {
+            name,
+            table_name,
+            column,
+            unique,
+        }))
+    }
+
+    /// `DROP TABLE <name>` or `DROP INDEX <name>`.
+    fn parse_drop_statement(&mut self) -> Result<Statement> {
+        self.expect_keyword(Keyword::Drop)?;
+        if self.consume_if(Token::Keyword(Keyword::Table)) {
+            Ok(Statement::DropTable(self.expect_identifier()?.to_string()))
+        } else if self.consume_if(Token::Keyword(Keyword::Index)) {
+            Ok(Statement::DropIndex(self.expect_identifier()?.to_string()))
+        } else {
+            Err(miette!("Expected TABLE or INDEX after DROP"))
+        }
     }
 
     fn parse_insert_statement(&mut self) -> Result<Statement> {

@@ -142,6 +142,11 @@ impl SystemCatalog {
         delete_where(pool, INDEXES, |row| text(row, 1).is_ok_and(|t| t == name))
     }
 
+    /// Removes the index called `name`.
+    pub(crate) fn remove_index(&self, pool: &mut BufferPool, name: &str) -> Result<()> {
+        delete_where(pool, INDEXES, |row| text(row, 0).is_ok_and(|t| t == name))
+    }
+
     /// Every table the catalog holds, with its indexes.
     ///
     /// Deletes the catalog rows of tables that have no `__tables__` row or no columns,

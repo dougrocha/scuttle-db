@@ -229,8 +229,29 @@ impl TableIndex {
     /// Creates the index's file holding `entries`, building the tree from the bottom up
     /// (see [`BTree::build`]). The entries come sorted, from an external sort of
     /// [`TableIndex::entry`] for each row.
+    ///
+    /// A unique index fails if two entries have the same key. Sorted, they are next to
+    /// each other.
     pub(crate) fn build(&self, pool: &mut BufferPool, mut entries: Sorted<Vec<u8>>) -> Result<()> {
-        let entries = std::iter::from_fn(|| entries.next().transpose());
+        let mut last: Option<Vec<u8>> = None;
+        let entries = std::iter::from_fn(|| {
+            let entry = match entries.next().transpose()? {
+                Ok(entry) => entry,
+                Err(error) => return Some(Err(error)),
+            };
+            if self.unique {
+                let key = &entry[..entry.len() - CTID_LEN];
+                if last.as_deref() == Some(key) {
+                    return Some(Err(DatabaseError::ConstraintViolation(format!(
+                        "two rows have the same key, so unique index {} can't be made",
+                        self.name
+                    ))
+                    .into()));
+                }
+                last = Some(key.to_vec());
+            }
+            Some(Ok(entry))
+        });
         BTree::build(pool, self.tree.name(), entries).map(|_| ())
     }
 

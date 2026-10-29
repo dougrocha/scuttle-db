@@ -396,6 +396,79 @@ impl Database {
         Ok(())
     }
 
+    /// Creates the index `name` on `table_name`'s `column`, filled from the table's rows.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the name is taken or not a valid name, if the table or column doesn't
+    /// exist, or if the index is unique and two rows share a key. A failed index leaves no
+    /// file behind.
+    pub fn create_index(
+        &mut self,
+        name: &str,
+        table_name: &str,
+        column: &str,
+        unique: bool,
+    ) -> Result<()> {
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Err(DatabaseError::InvalidQuery(format!(
+                "invalid index name \"{name}\": index names may only use letters, digits and _"
+            ))
+            .into());
+        }
+        if self.free_index_name(name, &[]) != name {
+            return Err(DatabaseError::InvalidQuery(format!("index {name} already exists")).into());
+        }
+        Self::check_writable(table_name)?;
+        let table = self.get_table(table_name)?;
+        let position = table.schema.get_column_index(column).ok_or_else(|| {
+            DatabaseError::ColumnNotFound(format!("{column} in table {table_name}"))
+        })?;
+        let index = TableIndex::new(name.to_string(), &table.schema, position, unique, None);
+
+        // A drop that failed partway may have left a file under this name
+        self.buffer_manager.drop_table(index.file_name())?;
+        if let Err(error) = self.build_indexes(table_name, vec![index.clone()]) {
+            self.buffer_manager.drop_table(index.file_name())?;
+            return Err(error);
+        }
+
+        let table = table_def(&self.tables, table_name)?;
+        self.catalog
+            .add_index(&mut self.buffer_manager, table, &index)?;
+        self.get_table_mut(table_name)?.indexes.push(index);
+        self.buffer_manager.flush()
+    }
+
+    /// Drops the index `name`: its catalog row, then its file.
+    ///
+    /// # Errors
+    ///
+    /// Fails if there is no such index, or it enforces a PRIMARY KEY or UNIQUE column.
+    /// Those go away with their table.
+    pub fn drop_index(&mut self, name: &str) -> Result<()> {
+        let Some((table_name, position)) = self.tables.values().find_map(|table| {
+            let position = table.indexes.iter().position(|index| index.name == name)?;
+            Some((table.name.clone(), position))
+        }) else {
+            return Err(DatabaseError::InvalidQuery(format!("index {name} does not exist")).into());
+        };
+        let index = &self.get_table(&table_name)?.indexes[position];
+        if let Some(constraint) = index.constraint {
+            return Err(DatabaseError::InvalidQuery(format!(
+                "index {name} enforces the {} constraint of table {table_name}, so it goes \
+                 only when the table does",
+                constraint.as_str()
+            ))
+            .into());
+        }
+
+        self.catalog.remove_index(&mut self.buffer_manager, name)?;
+        let index = self.get_table_mut(&table_name)?.indexes.remove(position);
+        self.buffer_manager.flush()?;
+        self.buffer_manager.drop_table(index.file_name())
+    }
+
     /// Deletes the table and index files no table owns, which a failed drop can leave,
     /// and any sort runs a stopped query left in `tmp`.
     fn remove_orphan_files(&mut self) -> Result<()> {
@@ -506,7 +579,6 @@ impl Database {
     }
 
     /// Opens a table's indexes, building any whose file is missing from the table's rows.
-    /// That covers a database written before indexes were stored on disk.
     fn open_indexes(&mut self, table_name: &str) -> Result<()> {
         let mut missing = Vec::new();
         for index in &table_def(&self.tables, table_name)?.indexes {
@@ -517,7 +589,11 @@ impl Database {
         if missing.is_empty() {
             return Ok(());
         }
+        self.build_indexes(table_name, missing)
+    }
 
+    /// Creates the files of `indexes`, filled from `table_name`'s rows.
+    fn build_indexes(&mut self, table_name: &str, missing: Vec<TableIndex>) -> Result<()> {
         // One pass over the table feeds every missing index's entries to its own sort,
         // which writes runs to disk past the sort budget. Nothing holds the whole table.
         let spill = self.sort_spill();
@@ -540,8 +616,8 @@ impl Database {
         for (index, sort) in sorts {
             index.build(&mut self.buffer_manager, sort.finish()?)?;
         }
-        // Not flushed here: `initialize` flushes once every table's indexes are open, so a
-        // crash partway through a rebuild still leaves the marker for the next run
+        // This doesn't flush. `initialize` flushes once every table's indexes are open, so
+        // a crash partway through a rebuild still leaves the marker for the next run
         Ok(())
     }
 
@@ -609,6 +685,16 @@ impl Database {
 
         let response = match statement {
             Statement::Create(create_stmt) => self.handle_create(create_stmt),
+            Statement::CreateIndex(create) => self
+                .create_index(
+                    &create.name,
+                    &create.table_name,
+                    &create.column,
+                    create.unique,
+                )
+                .map(|()| QueryResponse::default()),
+            Statement::DropTable(name) => self.drop_table(&name).map(|()| QueryResponse::default()),
+            Statement::DropIndex(name) => self.drop_index(&name).map(|()| QueryResponse::default()),
             Statement::Select(select_stmt) => self.handle_select(select_stmt, &mut on_rows),
             Statement::Insert(insert_stmt) => self.handle_insert(insert_stmt),
             Statement::Update(update_stmt) => self.handle_update(update_stmt),
@@ -759,6 +845,12 @@ impl Database {
             Statement::Delete(delete_stmt) => analyzer.analyze_delete(delete_stmt)?,
             Statement::Explain { .. } => {
                 return Err(DatabaseError::InvalidQuery("cannot EXPLAIN an EXPLAIN".into()).into());
+            }
+            Statement::CreateIndex(_) | Statement::DropTable(_) | Statement::DropIndex(_) => {
+                return Err(DatabaseError::InvalidQuery(
+                    "only CREATE TABLE, SELECT, INSERT, UPDATE and DELETE have a plan".into(),
+                )
+                .into());
             }
         };
 
@@ -1971,6 +2063,119 @@ mod tests {
         assert!(!db.dir.join("old.table").exists());
         assert!(!db.dir.join("old.id.index").exists());
         assert_eq!(db.query("SELECT id FROM users").len(), 4);
+    }
+
+    #[test]
+    fn test_create_index_serves_queries_until_it_is_dropped() {
+        let mut db = TestDb::new("create-index");
+        db.execute("CREATE TABLE item (id INT, grp INT)");
+        let values: Vec<String> = (0..1000)
+            .map(|id| format!("({id}, {})", id % 100))
+            .collect();
+        db.execute(&format!("INSERT INTO item VALUES {}", values.join(", ")));
+        let plan = |db: &mut TestDb| db.db.explain("SELECT id FROM item WHERE grp = 7").unwrap();
+        let ids = |db: &mut TestDb| db.query("SELECT id FROM item WHERE grp = 7 ORDER BY id");
+        let scanned = ids(&mut db);
+        assert_eq!(scanned.len(), 10);
+
+        db.execute("CREATE INDEX item_grp ON item (grp)");
+        assert!(
+            plan(&mut db).contains("IndexScan: item (grp = 7)"),
+            "{}",
+            plan(&mut db)
+        );
+        assert_eq!(ids(&mut db), scanned);
+        assert!(db.dir.join("item_grp.index").exists());
+
+        // Writes keep it up to date, and it outlives a restart
+        db.execute("INSERT INTO item VALUES (5000, 7)");
+        db.execute("DELETE FROM item WHERE id = 7");
+        db.execute("UPDATE item SET grp = 7 WHERE id = 8");
+        db.reopen();
+        assert!(plan(&mut db).contains("IndexScan"));
+        let expected: Vec<i64> = vec![8, 107, 207, 307, 407, 507, 607, 707, 807, 907, 5000];
+        assert_eq!(
+            ids(&mut db),
+            expected
+                .into_iter()
+                .map(|id| vec![Value::Int64(id)])
+                .collect::<Vec<_>>()
+        );
+
+        db.execute("DROP INDEX item_grp");
+        assert!(!plan(&mut db).contains("IndexScan"));
+        assert!(!db.dir.join("item_grp.index").exists());
+        assert!(db.query("SELECT * FROM __indexes__").is_empty());
+        db.reopen();
+        assert_eq!(ids(&mut db).len(), 11);
+        assert!(db.fails("DROP INDEX item_grp"));
+    }
+
+    #[test]
+    fn test_a_unique_index_refuses_duplicates_made_before_or_after_it() {
+        let mut db = TestDb::new("unique-index");
+        db.execute("CREATE TABLE item (id INT, tag TEXT)");
+        db.execute("INSERT INTO item VALUES (1, 'a'), (2, 'a'), (3, NULL), (4, NULL)");
+
+        assert!(db.fails("CREATE UNIQUE INDEX item_tag ON item (tag)"));
+        assert!(!db.dir.join("item_tag.index").exists());
+        assert!(db.query("SELECT * FROM __indexes__").is_empty());
+
+        // NULLs aren't indexed, so they don't clash
+        db.execute("DELETE FROM item WHERE id = 2");
+        db.execute("CREATE UNIQUE INDEX item_tag ON item (tag)");
+        assert!(db.fails("INSERT INTO item VALUES (5, 'a')"));
+        db.execute("INSERT INTO item VALUES (5, NULL), (6, 'b')");
+        db.reopen();
+        assert!(db.fails("UPDATE item SET tag = 'a' WHERE id = 6"));
+    }
+
+    #[test]
+    fn test_create_and_drop_index_refuse_what_they_cant_do() {
+        let mut db = TestDb::new("index-errors");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, tag TEXT UNIQUE)");
+
+        assert!(db.fails("CREATE INDEX item_pkey ON item (tag)"));
+        assert!(db.fails("CREATE INDEX item_tag_key ON users (name)"));
+        assert!(db.fails(r#"CREATE INDEX "a.b" ON item (tag)"#));
+        assert!(db.fails("CREATE INDEX x ON nope (tag)"));
+        assert!(db.fails("CREATE INDEX x ON item (nope)"));
+        assert!(db.fails("CREATE INDEX x ON item (id, tag)"));
+        assert!(db.fails("CREATE INDEX x ON __tables__ (name)"));
+        assert!(db.fails("DROP INDEX item_pkey"));
+        assert!(db.fails("DROP INDEX item_tag_key"));
+        assert!(db.fails("DROP INDEX nope"));
+        assert!(db.fails("DROP TABLE __columns__"));
+
+        // A CREATE TABLE after a CREATE INDEX took its constraint's name picks another
+        db.execute("CREATE INDEX other_pkey ON item (tag)");
+        db.execute("CREATE TABLE other (id INT PRIMARY KEY)");
+        assert_eq!(
+            db.db.get_table("other").unwrap().indexes[0].name,
+            "other_pkey1"
+        );
+    }
+
+    #[test]
+    fn test_drop_table_takes_its_indexes_with_it() {
+        let mut db = TestDb::new("drop-table-sql");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, grp INT)");
+        db.execute("INSERT INTO item VALUES (1, 1)");
+        db.execute("CREATE INDEX item_grp ON item (grp)");
+
+        db.execute("DROP TABLE item");
+        assert!(db.fails("SELECT * FROM item"));
+        assert!(db.fails("DROP TABLE item"));
+        for file in ["item.table", "item_pkey.index", "item_grp.index"] {
+            assert!(!db.dir.join(file).exists(), "{file}");
+        }
+        assert!(db.query("SELECT * FROM __indexes__").is_empty());
+
+        // The names are free again
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, grp INT)");
+        db.execute("CREATE INDEX item_grp ON item (grp)");
+        db.reopen();
+        assert!(db.query("SELECT * FROM item").is_empty());
     }
 
     #[test]

@@ -8,6 +8,7 @@ use strum::EnumString;
 pub enum Keyword {
     Create,
     Table,
+    Index,
     Drop,
     Alter,
     Constraint,
