@@ -13,11 +13,13 @@
 //! read the catalog tables' own schemas from the catalog before it has read the catalog,
 //! so the code below defines them. Postgres calls this the bootstrap problem.
 //!
-//! Creating a table writes its columns and indexes first, then its `__tables__` row.
-//! Dropping a table deletes its `__tables__` row first. Opening loads only the tables that
-//! have a `__tables__` row and at least one column, and deletes the catalog rows of any
-//! other table. So a crash between statements leaves no half-made table. A crash in the
-//! middle of writing pages still can, until there is a write-ahead log.
+//! A table exists once its `__tables__` row is on disk. Creating a table writes its
+//! columns and indexes, flushes them, then adds its `__tables__` row. Dropping a table
+//! deletes its `__tables__` row, flushes, then deletes the rest. Opening loads the tables
+//! that have a `__tables__` row and deletes the catalog rows of any other table. So a
+//! crash at any point leaves either the whole table or catalog rows that the next open
+//! deletes. That holds while the operating system writes the flushed pages in order,
+//! which nothing makes it do until there is a write-ahead log with fsync.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -90,7 +92,10 @@ impl SystemCatalog {
         [TABLES, COLUMNS, INDEXES].contains(&name)
     }
 
-    /// Adds `table`'s columns, then its indexes, then its `__tables__` row.
+    /// Adds `table`'s columns and indexes, flushes them, then adds its `__tables__` row.
+    ///
+    /// If this fails, some of the rows may be written. [`SystemCatalog::remove_table`]
+    /// deletes them.
     pub(crate) fn add_table(&self, pool: &mut BufferPool, table: &TableDef) -> Result<()> {
         for (position, column) in table.schema.columns.iter().enumerate() {
             let (type_name, max_len) = type_to_text(column.data_type);
@@ -112,6 +117,7 @@ impl SystemCatalog {
         for index in &table.indexes {
             self.add_index(pool, table, index)?;
         }
+        pool.flush()?;
         append(pool, TABLES, vec![Value::Text(table.name.clone())])
     }
 
@@ -134,10 +140,11 @@ impl SystemCatalog {
         append(pool, INDEXES, row)
     }
 
-    /// Removes `name`'s `__tables__` row first, then its columns and indexes.
+    /// Removes `name`'s `__tables__` row, flushes, then removes its columns and indexes.
     pub(crate) fn remove_table(&self, pool: &mut BufferPool, name: &str) -> Result<()> {
         let is_table = |row: &Row| text(row, 0).is_ok_and(|t| t == name);
         delete_where(pool, TABLES, is_table)?;
+        pool.flush()?;
         delete_where(pool, COLUMNS, is_table)?;
         delete_where(pool, INDEXES, |row| text(row, 1).is_ok_and(|t| t == name))
     }
@@ -149,8 +156,8 @@ impl SystemCatalog {
 
     /// Every table the catalog holds, with its indexes.
     ///
-    /// Deletes the catalog rows of tables that have no `__tables__` row or no columns,
-    /// which a crash partway through creating or dropping a table can leave.
+    /// Deletes the catalog rows of tables that have no `__tables__` row, which a crash
+    /// partway through creating or dropping a table can leave.
     pub(crate) fn load(&self, pool: &mut BufferPool) -> Result<Vec<TableDef>> {
         let mut names = BTreeSet::new();
         for row in rows(pool, TABLES)? {
@@ -171,9 +178,8 @@ impl SystemCatalog {
 
         let mut tables = Vec::new();
         for name in &names {
-            let Some(mut table_columns) = columns.remove(name) else {
-                continue;
-            };
+            // A table may have no columns, as in Postgres
+            let mut table_columns = columns.remove(name).unwrap_or_default();
             table_columns.sort_by_key(|(position, _)| *position);
             let schema = Schema::new(table_columns.into_iter().map(|(_, c)| c).collect());
             tables.push(TableDef::new(name.clone(), schema, Vec::new()));
@@ -219,11 +225,8 @@ impl SystemCatalog {
             table.indexes.push(index);
         }
 
-        // Delete the catalog rows of tables that weren't loaded
+        // Delete the catalog rows of tables that have no `__tables__` row
         let loaded: BTreeSet<&str> = tables.iter().map(|t| t.name.as_str()).collect();
-        for name in names.iter().filter(|name| !loaded.contains(name.as_str())) {
-            self.remove_table(pool, name)?;
-        }
         let stray = |row: &Row, column| text(row, column).is_ok_and(|t| !loaded.contains(t));
         delete_where(pool, COLUMNS, |row| stray(row, 0))?;
         delete_where(pool, INDEXES, |row| stray(row, 1))?;

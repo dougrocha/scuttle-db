@@ -244,6 +244,13 @@ impl Database {
                 )));
             }
         }
+        let mut seen = BTreeSet::new();
+        if let Some(column) = schema.columns.iter().find(|c| !seen.insert(&c.name)) {
+            return Err(DatabaseError::InvalidQuery(format!(
+                "column {} is named more than once",
+                column.name
+            )));
+        }
         // The database keeps its own tables, such as the catalog, under names like these
         if name.starts_with("__") {
             return Err(DatabaseError::InvalidQuery(format!(
@@ -285,8 +292,11 @@ impl Database {
         let table = TableDef::new(name.to_string(), schema, indexes);
 
         let error = |error: miette::Report| DatabaseError::InvalidQuery(error.to_string());
-        // A drop that failed partway may have left files under these names. Their old rows
-        // must not show up in the new table.
+        // A drop that failed partway may have left catalog rows and files under these
+        // names. Their old columns and rows must not show up in the new table.
+        self.catalog
+            .remove_table(&mut self.buffer_manager, name)
+            .map_err(error)?;
         let leftovers = std::iter::once(name).chain(table.indexes.iter().map(|i| i.file_name()));
         for file in leftovers {
             self.buffer_manager.drop_table(file).map_err(error)?;
@@ -294,9 +304,18 @@ impl Database {
         for index in &table.indexes {
             index.create(&mut self.buffer_manager).map_err(error)?;
         }
-        self.catalog
-            .add_table(&mut self.buffer_manager, &table)
-            .map_err(error)?;
+        if let Err(failed) = self.catalog.add_table(&mut self.buffer_manager, &table) {
+            // Delete the rows and files it made, so a retry starts clean
+            self.catalog
+                .remove_table(&mut self.buffer_manager, name)
+                .map_err(error)?;
+            for index in &table.indexes {
+                self.buffer_manager
+                    .drop_table(index.file_name())
+                    .map_err(error)?;
+            }
+            return Err(error(failed));
+        }
         self.tables.insert(name.to_string(), table);
         self.buffer_manager.flush().map_err(error)?;
 
@@ -374,7 +393,7 @@ impl Database {
 
     /// Drops a table: its catalog row, its pages and its files.
     ///
-    /// The table leaves the catalog and memory first, and the catalog is written before
+    /// The table leaves memory and the catalog first, and the catalog is written before
     /// any file is deleted. So if a later step fails, the table is still gone, and its
     /// files are left behind until the next open deletes them (see
     /// [`Database::remove_orphan_files`]). If the database stops before the catalog is
@@ -385,8 +404,8 @@ impl Database {
         }
         Self::check_writable(name)?;
 
-        self.catalog.remove_table(&mut self.buffer_manager, name)?;
         let table = self.tables.remove(name).expect("checked above");
+        self.catalog.remove_table(&mut self.buffer_manager, name)?;
         self.buffer_manager.flush()?;
 
         self.buffer_manager.drop_table(name)?;
@@ -434,8 +453,14 @@ impl Database {
         }
 
         let table = table_def(&self.tables, table_name)?;
-        self.catalog
-            .add_index(&mut self.buffer_manager, table, &index)?;
+        if let Err(error) = self
+            .catalog
+            .add_index(&mut self.buffer_manager, table, &index)
+        {
+            self.catalog.remove_index(&mut self.buffer_manager, name)?;
+            self.buffer_manager.drop_table(index.file_name())?;
+            return Err(error);
+        }
         self.get_table_mut(table_name)?.indexes.push(index);
         self.buffer_manager.flush()
     }
@@ -2028,6 +2053,53 @@ mod tests {
         assert!(!db.dir.join("item_pkey.index").exists());
         // `users` is untouched
         assert_eq!(db.query("SELECT id FROM users").len(), 4);
+    }
+
+    #[test]
+    fn test_a_create_table_that_fails_partway_leaves_nothing_for_a_retry() {
+        let long = "x".repeat(9000);
+        let create = format!("CREATE TABLE item (id INT UNIQUE, note TEXT DEFAULT '{long}')");
+        let mut on_disk = TestDb::new("create-fails-partway");
+        let mut in_memory = Database::in_memory();
+        for db in [&mut on_disk.db, &mut in_memory] {
+            // The second column's catalog row doesn't fit in a page
+            assert!(db.execute_query(&create).is_err());
+            let rows = db.execute_query("SELECT * FROM __columns__ WHERE table_name = 'item'");
+            assert!(rows.unwrap().rows.is_empty());
+            assert!(
+                db.execute_query("SELECT * FROM __indexes__")
+                    .unwrap()
+                    .rows
+                    .is_empty()
+            );
+
+            db.execute_query("CREATE TABLE item (id INT UNIQUE)")
+                .unwrap();
+        }
+        on_disk.reopen();
+        assert_eq!(
+            on_disk.db.get_table("item").unwrap().schema.columns.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_a_column_name_can_only_be_used_once_per_table() {
+        let mut db = TestDb::new("duplicate-columns");
+        assert!(db.fails("CREATE TABLE item (x INT, x INT UNIQUE)"));
+        assert!(db.fails("SELECT * FROM item"));
+    }
+
+    #[test]
+    fn test_a_table_with_no_columns_survives_a_reopen() {
+        let mut db = TestDb::new("zero-columns");
+        db.execute("CREATE TABLE z ()");
+        db.reopen();
+        assert!(db.query("SELECT * FROM z").is_empty());
+        assert_eq!(
+            db.query("SELECT name FROM __tables__ WHERE name = 'z'"),
+            [[text("z")]]
+        );
     }
 
     #[test]
