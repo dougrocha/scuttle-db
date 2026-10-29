@@ -6,7 +6,7 @@ something you can test. Verify every phase with `EXPLAIN ANALYZE` on a 1M-row ta
 (`cargo run --release --example bench -- gen <dir>` makes one).
 
 ```
-Phase 0  Foundations ── Phase 1  Top-N ── Phase 2  Memory limits ── Phase 3  On-disk B+tree ──┬── Phase 4  Catalog + CREATE INDEX
+Phase 0  Foundations ── Phase 1  Top-N ── Phase 2  Memory limits ── Phase 3  On-disk B+tree ──┬── Phase 4  Catalog + CREATE INDEX (done)
    (done)                  (done)                                                              ├── Phase 5  ORDER BY via index, IN / OR
                                                                                                └── Phase 6  Joins + statistics
 ```
@@ -205,7 +205,7 @@ g.**
 
 ---
 
-## Phase 4: Catalog without JSON, plus CREATE / DROP INDEX (medium)
+## Phase 4: Catalog without JSON, plus CREATE / DROP INDEX (done)
 
 | Approach | Used by | Trade-off |
 |---|---|---|
@@ -224,6 +224,16 @@ g.**
 4. Optional: multi-column keys. Their order is lexicographic, so an index on `(a, b)` also serves queries on just `a` (the leftmost prefix).
 
 **Verify:** on a 1M-row table, `WHERE grp = 7` changes from Scan with rows=1000000 to IndexScan with rows≈1000. After `DROP INDEX` it goes back to Scan.
+
+**What happened:**
+- The catalog is three tables: `__tables__`, `__columns__` and `__indexes__`. `SELECT` reads them, and INSERT, UPDATE, DELETE and DROP refuse them. The lexer now lets an identifier start with `_`, as Postgres does, so `FROM __columns__` parses.
+- Steps 1 and 2 became one step. We chose not to convert old databases, so nothing needed the JSON while the new tables were being tested. A data directory from before Phase 4 opens empty, and the cleanup on open deletes its files.
+- A DEFAULT is stored as text and parsed by the column's type, not as SQL, because the parser can't read a negative number. `has_default` tells `DEFAULT NULL` from no default, like Postgres's `atthasdef`.
+- Indexes have names, and the file is `<name>.index`. CREATE TABLE names its indexes `<table>_pkey` and `<table>_<column>_key`, and adds a number if the name is taken, as Postgres does. This replaced the Phase 3 rule that kept two index files from sharing a name.
+- `CREATE UNIQUE INDEX` checks for duplicate keys while it builds. The entries come sorted, so duplicates are next to each other.
+- `DROP TABLE` is parsed now too. Before, only the Rust API had it.
+- Multi-column keys (step 4) are not done. Phase 5 doesn't need them.
+- The bench table has no `grp` column, so the check used `age = 5` on `users`: Scan with rows=1000000 in 82–100 ms, IndexScan with rows=11112 in 3.6 ms, and Scan again after DROP INDEX.
 
 ---
 
@@ -276,7 +286,7 @@ Today's join compares every left row with every right row: 1M × 10K = 10^10 com
 
 ## Known bugs to fix along the way
 
-- Table and column names are checked only by CREATE TABLE. A database made before that check could hold quoted names with dots, such as `"a.b"`, and two such tables could share an index file.
+None known. The last one, two old tables with dotted names sharing an index file, went away in Phase 4: old databases aren't loaded, and an index file is named after its index.
 
 ## Suggested pace
 
