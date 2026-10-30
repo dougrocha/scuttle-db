@@ -2027,6 +2027,76 @@ mod tests {
     }
 
     #[test]
+    fn test_or_across_two_indexes_unions_their_rows() {
+        let mut db = TestDb::new("bitmap-or");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, tag TEXT, qty INT)");
+        db.execute("CREATE TABLE plain (id INT, tag TEXT, qty INT)");
+        let values: Vec<String> = (0..3000)
+            .map(|n| format!("({}, 't{}', {})", (n * 7919) % 3000, n % 100, n % 3))
+            .collect();
+        for table in ["item", "plain"] {
+            db.execute(&format!("INSERT INTO {table} VALUES {}", values.join(", ")));
+            // Moved rows go to the end of the table, out of id order
+            db.execute(&format!("UPDATE {table} SET qty = 9 WHERE id < 50"));
+        }
+        db.execute("CREATE INDEX item_tag ON item (tag)");
+        let tag_of_5 = db.query("SELECT tag FROM plain WHERE id = 5")[0][0].to_string();
+
+        for (filter, ranges) in [
+            ("id = 5 OR tag = 't3'", "id = 5 OR tag = 't3'".to_string()),
+            // Row 5 is found by both sides and comes back once
+            (
+                &format!("id IN (5, 6) OR tag = '{tag_of_5}'") as &str,
+                format!("id IN (5, 6) OR tag = '{tag_of_5}'"),
+            ),
+            (
+                "(id < 10 AND qty = 9) OR tag = 't7' OR id > 2995",
+                "id < 10 OR tag = 't7' OR id > 2995".to_string(),
+            ),
+            (
+                "qty = 1 AND (tag = 't1' OR id = 2000)",
+                "tag = 't1' OR id = 2000".to_string(),
+            ),
+        ] {
+            let sql =
+                |table| format!("SELECT id, tag, qty FROM {table} WHERE {filter} ORDER BY id");
+            assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{filter}");
+            let plan = db.db.explain(&sql("item")).unwrap();
+            assert!(
+                plan.contains(&format!("BitmapOr Scan: item ({ranges})")),
+                "{plan}"
+            );
+            // Table order isn't key order, so the Sort stays
+            assert!(plan.contains("Sort"), "{plan}");
+        }
+
+        let plan = db
+            .db
+            .explain(&format!(
+                "EXPLAIN ANALYZE SELECT id FROM item WHERE id IN (5, 6) OR tag = '{tag_of_5}'"
+            ))
+            .unwrap();
+        assert!(plan.contains("(rows=31 "), "{plan}");
+
+        // A side no index answers, or sides that find too many rows, read the table
+        for filter in [
+            "id = 5 OR qty = 2",
+            "id > 100 OR tag = 't1'",
+            // Each side alone finds under a tenth of the table, but not both together
+            "id < 200 OR id > 2850",
+            "id = 5 OR id + 0 = 6",
+        ] {
+            let sql = |table| format!("SELECT id FROM {table} WHERE {filter} ORDER BY id");
+            assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{filter}");
+            let plan = db
+                .db
+                .explain(&format!("SELECT id FROM item WHERE {filter}"))
+                .unwrap();
+            assert!(plan.ends_with("  Scan: item"), "{filter}\n{plan}");
+        }
+    }
+
+    #[test]
     fn test_explain_shows_the_index_range() {
         let mut db = TestDb::new("index-explain");
         db.execute("CREATE TABLE item (id INT PRIMARY KEY, qty INT)");

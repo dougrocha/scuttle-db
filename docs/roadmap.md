@@ -11,7 +11,7 @@ again.
 
 ```
 Phase 0  Foundations ── Phase 1  Top-N ── Phase 2  Memory limits ── Phase 3  On-disk B+tree ──┬── Phase 4  Catalog + CREATE INDEX (done)
-   (done)                  (done)                                                              ├── Phase 5  ORDER BY via index, IN / OR
+   (done)                  (done)                                                              ├── Phase 5  ORDER BY via index, IN / OR (done)
                                                                                                └── Phase 6  Joins + statistics
 ```
 
@@ -253,7 +253,7 @@ g.**
 - [x] 1d. DESC: a `prev` link in each leaf, so a scan can walk leaves right to left, as Postgres's `btpo_prev` allows. SQLite instead keeps the path from the root in its cursor and has no sibling links. We chose the Postgres way. A split now also fixes the `prev` of the page to its right. EXPLAIN shows `IndexScan Backward`. Rows with equal keys come out in reverse storage order, which SQL allows. On 1M rows, `ORDER BY id DESC LIMIT 10` takes 0.28 ms, against 140 ms for TopN on the table without an index.
 - [x] 2. Parse `col IN (...)`, and let an IndexScan carry several sorted ranges. `[NOT] IN` follows SQL's NULL rules: `1 NOT IN (2, NULL)` is NULL, so the row is filtered out. Each WHERE condition on the column becomes a sorted list of key ranges, and the lists are intersected, so `id IN (5, 77) AND id > 5` reads only 77. The cursor reads the ranges in turn, backward for DESC, so ORDER BY still skips the Sort. On 1M rows, `id IN (5, 500000, 999999)` reads 3 rows in 0.018 ms, against 106 ms for a Scan.
 - [x] 3a. Rewrite `a = 1 OR a = 2` into `a IN (1, 2)`. Equalities are grouped by column, so `a = 1 OR a = 2 OR b = 3` becomes `a IN (1, 2) OR b = 3`. The rule only looks through the ANDs and ORs at the top of a WHERE: our OR turns NULL into false and IN keeps NULL, which only agree where all that matters is whether the row passes. On 1M rows, `id = 5 OR id = 500000 OR id = 999999` reads 3 rows through the index.
-- [ ] 3b. OR across two indexes: union the row locations, sorted by page (BitmapOr).
+- [x] 3b. OR across two indexes: union the row locations, sorted by page (BitmapOr). A Scan's index is now either one index's ranges, read in key order, or a BitmapOr: each side of an OR gets the range of whichever index finds the fewest rows for it, and the row locations go into a `BTreeSet<Ctid>`, which drops a row two sides both find and puts them in table order. It is only used when every side has an index and the sides find under a tenth of the table between them. Table order isn't key order, so ORDER BY still sorts. EXPLAIN shows `BitmapOr Scan`. On 1M rows with an index on `age`, `id = 5 OR age = 3` finds 11,113 rows in 4 ms, against 116 ms for a Scan.
 
 **ORDER BY through an index.**
 - A B+tree already returns keys in order. When Sort's key is an indexed column, replace the Scan with a full-range IndexScan and delete the Sort. For DESC, walk the leaf chain backwards.

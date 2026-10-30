@@ -6,7 +6,7 @@
 
 use std::ops::Bound;
 
-use crate::db::table::index::{IndexKey, IndexRange, KeyRange};
+use crate::db::table::index::{IndexAccess, IndexKey, IndexRange, KeyRange};
 use crate::sql::analyzer::AnalyzedExpression;
 use crate::sql::planner::logical::{LogicalPlan, SortKey};
 use crate::sql::planner::relation_schema::RelationSchema;
@@ -29,18 +29,35 @@ fn write_node(plan: &LogicalPlan, depth: usize, lines: &mut Vec<String>) {
             index,
         } => {
             let mut line = match index {
-                Some(range) if range.descending => {
+                Some(IndexAccess::Range(range)) if range.descending => {
                     format!("{indent}IndexScan Backward: {table_name}")
                 }
-                Some(_) => format!("{indent}IndexScan: {table_name}"),
+                Some(IndexAccess::Range(_)) => format!("{indent}IndexScan: {table_name}"),
+                Some(IndexAccess::BitmapOr(_)) => format!("{indent}BitmapOr Scan: {table_name}"),
                 None => format!("{indent}Scan: {table_name}"),
             };
             if let Some(alias) = alias {
                 line.push_str(&format!(" {alias}"));
             }
-            if let Some(range) = index {
-                let column = &schema.columns[range.column].name;
-                line.push_str(&format!(" ({})", render_range(column, range)));
+            let render =
+                |range: &IndexRange| render_range(&schema.columns[range.column].name, range);
+            match index {
+                Some(IndexAccess::Range(range)) => line.push_str(&format!(" ({})", render(range))),
+                Some(IndexAccess::BitmapOr(ranges)) => {
+                    let ranges: Vec<String> = ranges
+                        .iter()
+                        .map(|range| {
+                            let text = render(range);
+                            if text.contains(" AND ") || text.contains(" OR ") {
+                                format!("({text})")
+                            } else {
+                                text
+                            }
+                        })
+                        .collect();
+                    line.push_str(&format!(" ({})", ranges.join(" OR ")));
+                }
+                None => {}
             }
             lines.push(line);
         }

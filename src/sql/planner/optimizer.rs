@@ -14,7 +14,7 @@ use miette::Result;
 use crate::{
     DataType, Value,
     db::table::{
-        index::{IndexKey, IndexRange, KeyRange, TableIndex},
+        index::{IndexAccess, IndexKey, IndexRange, KeyRange, TableIndex},
         table_def::TableDef,
     },
     sql::{
@@ -308,20 +308,21 @@ fn scan_in_key_order(
             }
             match index {
                 // The WHERE clause already reads this index, and a range comes out in order
-                Some(range) if range.column == column => {
+                Some(IndexAccess::Range(range)) if range.column == column => {
                     range.descending = descending;
                     true
                 }
+                // Another column's order, or a BitmapOr's table order
                 Some(_) => false,
                 None => {
                     let mut conjuncts = Vec::new();
                     if let Some(condition) = condition {
-                        split_and(condition, &mut conjuncts);
+                        split(condition, Operator::And, &mut conjuncts);
                     }
                     let mut range =
                         narrow(by_column, &conjuncts).unwrap_or_else(|| IndexRange::all(column));
                     range.descending = descending;
-                    *index = Some(range);
+                    *index = Some(IndexAccess::Range(range));
                     true
                 }
             }
@@ -399,27 +400,82 @@ pub(crate) fn use_indexes(
     }
 }
 
-/// The range of the index that finds the fewest rows, if any finds few enough.
+/// The way of reading the table through indexes that finds the fewest rows, if any
+/// finds few enough: one index's range, or a BitmapOr for a condition `a OR b` where an
+/// index can answer each side.
 fn pick_index(
     condition: &AnalyzedExpression,
     indexes: &[TableIndex],
     pool: &mut BufferPool,
-) -> Result<Option<IndexRange>> {
-    let mut conjuncts = Vec::new();
-    split_and(condition, &mut conjuncts);
+) -> Result<Option<IndexAccess>> {
+    let Some(table_rows) = indexes.first().map(|index| index.len(pool)).transpose()? else {
+        return Ok(None);
+    };
+    let limit = (table_rows as f64 * MAX_INDEX_FRACTION) as usize + 1;
 
+    let mut conjuncts = Vec::new();
+    split(condition, Operator::And, &mut conjuncts);
+
+    let mut best = best_range(&conjuncts, indexes, pool, limit)?
+        .map(|(rows, range)| (rows, IndexAccess::Range(range)));
+    for conjunct in &conjuncts {
+        let limit = best.as_ref().map_or(limit, |(rows, _)| *rows);
+        if let Some(found) = bitmap_or(conjunct, indexes, pool, limit)? {
+            best = Some(found);
+        }
+    }
+    Ok(best.map(|(_, access)| access))
+}
+
+/// The range of the index that finds the fewest rows for `conjuncts` and how many it
+/// finds, if one finds fewer than `limit`.
+fn best_range(
+    conjuncts: &[&AnalyzedExpression],
+    indexes: &[TableIndex],
+    pool: &mut BufferPool,
+    limit: usize,
+) -> Result<Option<(usize, IndexRange)>> {
     let mut best: Option<(usize, IndexRange)> = None;
     for index in indexes {
-        let Some(range) = narrow(index, &conjuncts) else {
+        let Some(range) = narrow(index, conjuncts) else {
             continue;
         };
-        let limit = (index.len(pool)? as f64 * MAX_INDEX_FRACTION) as usize + 1;
+        let limit = best.as_ref().map_or(limit, |(fewest, _)| *fewest);
         let rows = index.count_up_to(pool, &range, limit)?;
-        if rows < limit && best.as_ref().is_none_or(|(fewest, _)| rows < *fewest) {
+        if rows < limit {
             best = Some((rows, range));
         }
     }
-    Ok(best.map(|(_, range)| range))
+    Ok(best)
+}
+
+/// A BitmapOr for `condition` if it is an OR, an index can answer each side, and the
+/// sides find fewer than `limit` rows between them.
+fn bitmap_or(
+    condition: &AnalyzedExpression,
+    indexes: &[TableIndex],
+    pool: &mut BufferPool,
+    limit: usize,
+) -> Result<Option<(usize, IndexAccess)>> {
+    let mut disjuncts = Vec::new();
+    split(condition, Operator::Or, &mut disjuncts);
+    if disjuncts.len() < 2 {
+        return Ok(None);
+    }
+
+    let mut total = 0;
+    let mut ranges = Vec::new();
+    for disjunct in disjuncts {
+        let mut conjuncts = Vec::new();
+        split(disjunct, Operator::And, &mut conjuncts);
+        // A row both sides find counts twice, so this can overestimate
+        let Some((rows, range)) = best_range(&conjuncts, indexes, pool, limit - total)? else {
+            return Ok(None);
+        };
+        total += rows;
+        ranges.push(range);
+    }
+    Ok(Some((total, IndexAccess::BitmapOr(ranges))))
 }
 
 /// The keys of `index` that the conditions allow, or `None` if none of them is about
@@ -488,17 +544,18 @@ fn key_ranges(index: &TableIndex, conjunct: &AnalyzedExpression) -> Option<Vec<K
     Some(vec![KeyRange { lower, upper }])
 }
 
-/// The parts of `a AND b AND c`, or the expression itself when it isn't an AND.
-fn split_and<'a>(expr: &'a AnalyzedExpression, out: &mut Vec<&'a AnalyzedExpression>) {
+/// The parts of `a AND b AND c` for `op` AND, or of `a OR b OR c` for OR. An expression
+/// that isn't one is its own only part.
+fn split<'a>(expr: &'a AnalyzedExpression, op: Operator, out: &mut Vec<&'a AnalyzedExpression>) {
     match expr {
         AnalyzedExpression::BinaryExpr {
             left,
-            op: Operator::And,
+            op: found,
             right,
             ..
-        } => {
-            split_and(left, out);
-            split_and(right, out);
+        } if *found == op => {
+            split(left, op, out);
+            split(right, op, out);
         }
         _ => out.push(expr),
     }

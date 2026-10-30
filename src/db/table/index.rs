@@ -522,6 +522,18 @@ fn next_down(
     Ok((!past_end).then(|| entry_ctid(&entry)))
 }
 
+/// How a Scan reads its table through indexes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum IndexAccess {
+    /// The rows in one index's ranges, in key order.
+    Range(IndexRange),
+
+    /// The rows that any of the ranges find, perhaps in different indexes, each once and
+    /// in table order. For `a = 1 OR b = 2` with an index on each column. Postgres calls
+    /// the plan a BitmapOr, after the bitmap of row locations it builds.
+    BitmapOr(Vec<IndexRange>),
+}
+
 /// The part of one index a scan reads: keys of `column` in one or more ranges.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IndexRange {
