@@ -246,7 +246,10 @@ g.**
 **Todo:**
 - [x] 1a. Index NULLs as a key that sorts after every value, so a scan in key order sees every row. UNIQUE still lets NULLs repeat, and ranges skip them. Every key now starts with a byte, `00` for a value and `01` for NULL. A WHERE range ends before the NULLs. On 1M rows with 9,999 NULL ages, `ORDER BY age LIMIT 10` went from 93 ms (TopN) to 0.38 ms, and DESC returns the NULLs first, as the Sort does.
 - [x] 1b. `ORDER BY col [ASC] LIMIT n` on an indexed column: IndexScan in key order, no Sort, stops early. Any column since 1a. On 1M rows, `ORDER BY id LIMIT 10` reads 1,024 rows in 0.3 ms. With `WHERE id > 500000` the scan starts at 500000. Planning that query takes 6 ms, because the WHERE rule counts up to 10% of the index before deciding against it.
-- [ ] 1c. Decide when ORDER BY without LIMIT should use the index, by measuring a full index-order scan against Scan + Sort on 1M rows.
+- [x] 1c. Decide when ORDER BY without LIMIT should use the index, by measuring a full index-order scan against Scan + Sort on 1M rows. Measured with the planner forced each way (index / Scan + Sort):
+  - `ORDER BY id` on `users_pk`, whose ids are stored in order: 235 / 350 ms with the default cache, 237 / 336 ms with a 1,000-page cache.
+  - `ORDER BY age`, whose order has nothing to do with storage: 293 / 560 ms with the default cache, 992 / 530 ms with a 1,000-page cache (422k page reads).
+  - Rule: without a LIMIT, use the index only when the table and index fit in the cache. Postgres decides with its `correlation` statistic, which waits for Phase 6. The rule gives up the `id` win with a small cache, where sorting is the safe choice.
 - [x] 1d. DESC: a `prev` link in each leaf, so a scan can walk leaves right to left, as Postgres's `btpo_prev` allows. SQLite instead keeps the path from the root in its cursor and has no sibling links. We chose the Postgres way. A split now also fixes the `prev` of the page to its right. EXPLAIN shows `IndexScan Backward`. Rows with equal keys come out in reverse storage order, which SQL allows. On 1M rows, `ORDER BY id DESC LIMIT 10` takes 0.28 ms, against 140 ms for TopN on the table without an index.
 - [ ] 2. Parse `col IN (...)`, and let an IndexScan carry several sorted ranges.
 - [ ] 3a. Rewrite `a = 1 OR a = 2` into `a IN (1, 2)`.
@@ -256,7 +259,7 @@ g.**
 - A B+tree already returns keys in order. When Sort's key is an indexed column, replace the Scan with a full-range IndexScan and delete the Sort. For DESC, walk the leaf chain backwards.
 - With LIMIT, the scan stops after the first batch.
 - This is a simple version of System R's "interesting orders". The general version tracks the order each candidate plan produces.
-- Trap: NULLs aren't in the index. The scan must add them itself (last for ASC, first for DESC) or only be used on NOT NULL columns.
+- Trap: an index that leaves NULLs out would lose rows. Since 1a NULLs are indexed after every value, which is where ASC puts them, and a backward scan returns them first, as DESC does.
 
 **IN and OR.**
 - Parse `IN (...)` first: the keyword exists but nothing parses it.
