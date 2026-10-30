@@ -19,8 +19,8 @@ pub(crate) type Ctid = (PageId, ItemId);
 /// A value as an index orders it.
 ///
 /// `Value` can't be ordered as a whole (`Float64` has NaN), so a key stores a float as
-/// bits that can be. Every key in one index has the same variant, because the column has
-/// one type.
+/// bits that can be. The keys in one index all have the same variant, because the column
+/// has one type, except for `Null`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum IndexKey {
     Int(i64),
@@ -30,6 +30,10 @@ pub(crate) enum IndexKey {
 
     /// A float as bits that sort in number order, see [`IndexKey::float`].
     Float(u64),
+
+    /// A NULL, which sorts after every value, as `ORDER BY` puts it and as in Postgres.
+    /// It is last here so the derived order agrees.
+    Null,
 }
 
 impl IndexKey {
@@ -79,12 +83,15 @@ impl IndexKey {
 impl IndexKey {
     /// Writes the key as bytes that sort in the same order as the keys.
     ///
+    /// - A value starts with `00` and a NULL is just `01`, so NULL sorts after every value.
     /// - A number flips its sign bit and is written big-endian, so negative numbers sort
     ///   first and comparing bytes is comparing numbers.
     /// - Text ends with `00 00`, and a `00` inside it is written `00 FF`. That way text
     ///   that is a prefix of other text ("ab" before "abc") still sorts first.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        out.push(u8::from(*self == IndexKey::Null));
         match self {
+            IndexKey::Null => {}
             IndexKey::Int(n) | IndexKey::Timestamp(n) => {
                 out.extend_from_slice(&((*n as u64) ^ (1 << 63)).to_be_bytes());
             }
@@ -116,6 +123,11 @@ pub(crate) fn encode_entry(key: &IndexKey, (page, item): Ctid) -> Vec<u8> {
     out
 }
 
+/// Whether an encoded key is NULL's.
+fn is_null(key: &[u8]) -> bool {
+    key.first() == Some(&1)
+}
+
 /// The ctid at the end of an entry made by [`encode_entry`].
 pub(crate) fn entry_ctid(entry: &[u8]) -> Ctid {
     let ctid = &entry[entry.len() - CTID_LEN..];
@@ -130,7 +142,8 @@ pub(crate) fn entry_ctid(entry: &[u8]) -> Ctid {
 /// Each entry is the column's key followed by the row's ctid (see [`encode_entry`]), so
 /// rows sharing a key are separate entries and a delete finds exactly its own.
 ///
-/// NULLs are not indexed, so a UNIQUE column may hold any number of them, as in SQL.
+/// NULLs are indexed, after every value, so `ORDER BY` can read a nullable column through
+/// its index. A unique index lets any number of rows be NULL, as SQL does.
 #[derive(Debug, Clone)]
 pub(crate) struct TableIndex {
     pub(crate) name: String,
@@ -221,17 +234,17 @@ impl TableIndex {
         BTree::create(pool, self.tree.name()).map(|_| ())
     }
 
-    /// The entry this index stores for `row`, or `None` if it doesn't index the row (a NULL).
-    pub(crate) fn entry(&self, row: &Row, ctid: Ctid) -> Option<Vec<u8>> {
-        Some(encode_entry(&self.key(row)?, ctid))
+    /// The entry this index stores for `row`.
+    pub(crate) fn entry(&self, row: &Row, ctid: Ctid) -> Vec<u8> {
+        encode_entry(&self.key(row), ctid)
     }
 
     /// Creates the index's file holding `entries`, building the tree from the bottom up
     /// (see [`BTree::build`]). The entries come sorted, from an external sort of
     /// [`TableIndex::entry`] for each row.
     ///
-    /// A unique index fails if two entries have the same key. Sorted, they are next to
-    /// each other.
+    /// A unique index fails if two entries have the same key, other than NULL. Sorted,
+    /// they are next to each other.
     pub(crate) fn build(&self, pool: &mut BufferPool, mut entries: Sorted<Vec<u8>>) -> Result<()> {
         let mut last: Option<Vec<u8>> = None;
         let entries = std::iter::from_fn(|| {
@@ -241,7 +254,7 @@ impl TableIndex {
             };
             if self.unique {
                 let key = &entry[..entry.len() - CTID_LEN];
-                if last.as_deref() == Some(key) {
+                if last.as_deref() == Some(key) && !is_null(key) {
                     return Some(Err(DatabaseError::ConstraintViolation(format!(
                         "two rows have the same key, so unique index {} can't be made",
                         self.name
@@ -255,16 +268,23 @@ impl TableIndex {
         BTree::build(pool, self.tree.name(), entries).map(|_| ())
     }
 
-    /// Rows in the index. NULLs aren't indexed, so this can be less than the table's rows.
+    /// Rows in the index, which is every row of the table.
     pub(crate) fn len(&self, pool: &mut BufferPool) -> Result<u64> {
         self.tree.len(pool)
     }
 
-    fn key(&self, row: &Row) -> Option<IndexKey> {
-        self.key_for(&row.values[self.column])
+    fn key(&self, row: &Row) -> IndexKey {
+        match &row.values[self.column] {
+            Value::Null => IndexKey::Null,
+            value => self
+                .key_for(value)
+                .expect("a row's values have its columns' types"),
+        }
     }
 
-    /// The key this index would store `value` under, if it can hold it at all.
+    /// The key a WHERE clause comparing the column with `value` looks for, or `None` if
+    /// the index can't find it: NULL, which no comparison matches, or a value of another
+    /// type.
     pub(crate) fn key_for(&self, value: &Value) -> Option<IndexKey> {
         IndexKey::for_column(&self.data_type, value)
     }
@@ -339,17 +359,11 @@ impl TableIndex {
     }
 
     pub(crate) fn insert(&self, pool: &mut BufferPool, row: &Row, ctid: Ctid) -> Result<()> {
-        match self.key(row) {
-            Some(key) => self.tree.insert(pool, &encode_entry(&key, ctid)),
-            None => Ok(()),
-        }
+        self.tree.insert(pool, &self.entry(row, ctid))
     }
 
     pub(crate) fn remove(&self, pool: &mut BufferPool, row: &Row, ctid: Ctid) -> Result<()> {
-        if let Some(key) = self.key(row) {
-            self.tree.remove(pool, &encode_entry(&key, ctid))?;
-        }
-        Ok(())
+        self.tree.remove(pool, &self.entry(row, ctid)).map(|_| ())
     }
 
     /// Fails if a key of `new_rows` is too long for the index. A unique index also fails if
@@ -367,7 +381,7 @@ impl TableIndex {
     ) -> Result<()> {
         let mut seen = BTreeSet::new();
 
-        for key in new_rows.iter().filter_map(|row| self.key(row)) {
+        for key in new_rows.iter().map(|row| self.key(row)) {
             // Any ctid makes an entry of the same length
             let len = encode_entry(&key, (0, 0)).len();
             if len > MAX_ENTRY {
@@ -378,7 +392,7 @@ impl TableIndex {
                 .into());
             }
 
-            if !self.unique {
+            if !self.unique || key == IndexKey::Null {
                 continue;
             }
             let range = IndexRange {
@@ -478,6 +492,7 @@ impl std::fmt::Display for IndexKey {
             IndexKey::Timestamp(t) => write!(f, "TIMESTAMP '{}'", Value::Timestamp(*t)),
             IndexKey::Bool(b) => write!(f, "{b}"),
             IndexKey::Float(bits) => write!(f, "{}", Self::float_value(*bits)),
+            IndexKey::Null => write!(f, "NULL"),
         }
     }
 }
@@ -582,6 +597,29 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_null_sorts_after_the_largest_value_of_every_type() {
+        let bytes = |key: &IndexKey| {
+            let mut out = Vec::new();
+            key.encode(&mut out);
+            out
+        };
+        let null = bytes(&IndexKey::Null);
+        for largest in [
+            IndexKey::Int(i64::MAX),
+            IndexKey::Timestamp(i64::MAX),
+            IndexKey::Bool(true),
+            IndexKey::float(f64::NAN),
+            IndexKey::Text("\u{10FFFF}".repeat(4)),
+            IndexKey::Text("\u{FF}\0".into()),
+        ] {
+            assert!(bytes(&largest) < null, "{largest}");
+            assert!(largest < IndexKey::Null, "{largest}");
+            // Neither starts with the other, which backward scans rely on
+            assert!(!null.starts_with(&bytes(&largest)) && !bytes(&largest).starts_with(&null));
         }
     }
 

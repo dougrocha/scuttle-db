@@ -111,15 +111,8 @@ fn scan_in_key_order(
             scan_in_key_order(input, column, descending, tables, Some(condition))
         }
         LogicalPlan::Scan {
-            table_name,
-            schema,
-            index,
-            ..
+            table_name, index, ..
         } => {
-            // An index leaves out NULLs, so a nullable column would lose its NULL rows
-            if schema.columns[column].is_nullable() {
-                return false;
-            }
             let Some(by_column) = tables
                 .get(table_name.as_str())
                 .and_then(|table| table.indexes.iter().find(|i| i.column == column))
@@ -249,10 +242,11 @@ fn pick_index(
 /// The keys of `index` that the conditions allow, or `None` if none of them is about
 /// the index's column.
 fn narrow(index: &TableIndex, conjuncts: &[&AnalyzedExpression]) -> Option<IndexRange> {
+    // No comparison is true for NULL, so the range stops before the NULLs at the end
     let mut range = IndexRange {
         column: index.column,
         lower: Bound::Unbounded,
-        upper: Bound::Unbounded,
+        upper: Bound::Excluded(IndexKey::Null),
         descending: false,
     };
     let mut narrowed = false;

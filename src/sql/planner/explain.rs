@@ -6,7 +6,7 @@
 
 use std::ops::Bound;
 
-use crate::db::table::index::IndexRange;
+use crate::db::table::index::{IndexKey, IndexRange};
 use crate::sql::analyzer::AnalyzedExpression;
 use crate::sql::planner::logical::{LogicalPlan, SortKey};
 use crate::sql::planner::relation_schema::RelationSchema;
@@ -225,8 +225,9 @@ fn render_range(column: &str, range: &IndexRange) -> String {
     };
     let upper = match &range.upper {
         Bound::Included(key) => Some(format!("{column} <= {key}")),
+        // The bound a WHERE range has to leave out the NULLs, not one the query wrote
+        Bound::Excluded(IndexKey::Null) | Bound::Unbounded => None,
         Bound::Excluded(key) => Some(format!("{column} < {key}")),
-        Bound::Unbounded => None,
     };
     [lower, upper]
         .into_iter()
