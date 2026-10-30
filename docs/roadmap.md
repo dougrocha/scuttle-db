@@ -5,6 +5,10 @@ ways real databases do it, the way we pick and why, then small steps that each e
 something you can test. Verify every phase with `EXPLAIN ANALYZE` on a 1M-row table
 (`cargo run --release --example bench -- gen <dir>` makes one).
 
+**On-disk formats can change at any time.** There's no format version and no migration. After a
+change to how pages, indexes or the catalog are stored, delete the data directory and seed it
+again.
+
 ```
 Phase 0  Foundations ── Phase 1  Top-N ── Phase 2  Memory limits ── Phase 3  On-disk B+tree ──┬── Phase 4  Catalog + CREATE INDEX (done)
    (done)                  (done)                                                              ├── Phase 5  ORDER BY via index, IN / OR
