@@ -136,6 +136,11 @@ impl BufferPool {
         Self::default()
     }
 
+    /// Whether `pages` pages fit in the cache at once. They always do in memory.
+    pub(crate) fn fits(&self, pages: usize) -> bool {
+        self.capacity.is_none_or(|capacity| pages <= capacity)
+    }
+
     /// Requests answered so far. Read it before and after something to see what it cost.
     pub fn stats(&self) -> CacheStats {
         self.stats

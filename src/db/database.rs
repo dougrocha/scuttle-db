@@ -1772,6 +1772,10 @@ mod tests {
             "ORDER BY tag LIMIT 5000",
             "WHERE tag > 't3' ORDER BY tag LIMIT 5000",
             "WHERE tag < 't1' ORDER BY tag LIMIT 5000",
+            // No LIMIT: the table fits in the cache, so reading it in index order wins
+            "ORDER BY id",
+            "ORDER BY id DESC",
+            "WHERE grp = 1 ORDER BY id",
         ] {
             let sql = |table| format!("SELECT id, grp, tag FROM {table} {query}");
             assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{query}");
@@ -1849,13 +1853,8 @@ mod tests {
             "{plan}"
         );
 
-        // These still sort: no LIMIT, an expression, and two keys
-        for query in [
-            "ORDER BY id",
-            "ORDER BY id DESC",
-            "ORDER BY id + 0 LIMIT 5",
-            "ORDER BY grp, id LIMIT 5",
-        ] {
+        // These still sort: an expression, and two keys
+        for query in ["ORDER BY id + 0 LIMIT 5", "ORDER BY grp, id LIMIT 5"] {
             let sql = |table| format!("SELECT id, grp, tag FROM {table} {query}");
             assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{query}");
             let plan = db.db.explain(&sql("item")).unwrap();
@@ -2758,6 +2757,21 @@ mod tests {
                 [[Value::Int64(1234), Value::Text("changed".into())]]
             );
             assert!(query(&mut db, "SELECT id FROM item WHERE id = 50").is_empty());
+
+            // The table doesn't fit in the cache, so reading all of it in index order
+            // could read a page per row. It sorts instead, unless a LIMIT stops it early.
+            let plan = db.explain("SELECT id FROM item ORDER BY id").unwrap();
+            assert!(
+                plan.contains("Sort") && !plan.contains("IndexScan"),
+                "{plan}"
+            );
+            let plan = db
+                .explain("SELECT id FROM item ORDER BY id LIMIT 5")
+                .unwrap();
+            assert!(
+                plan.contains("IndexScan") && !plan.contains("Sort"),
+                "{plan}"
+            );
         }
         assert!(
             db.buffer_manager.stats().reads > 40,

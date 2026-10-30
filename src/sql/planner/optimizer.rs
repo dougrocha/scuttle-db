@@ -2,8 +2,8 @@
 //!
 //! - Read a filtered table through an index when the WHERE clause narrows an indexed
 //!   column.
-//! - Read a table in an index's key order instead of sorting it, for an ORDER BY with a
-//!   LIMIT.
+//! - Read a table in an index's key order instead of sorting it, for an ORDER BY on an
+//!   indexed column.
 //! - Keep only the rows a LIMIT needs instead of sorting all of them.
 
 use std::{collections::BTreeMap, ops::Bound};
@@ -38,36 +38,52 @@ pub(crate) fn optimize(
     pool: &mut BufferPool,
 ) -> Result<()> {
     use_indexes(plan, tables, pool)?;
-    use_index_order(plan, tables);
+    use_index_order(plan, tables, pool);
     use_top_n(plan);
     Ok(())
 }
 
-/// Removes the Sort under a LIMIT when its one key is an indexed column of the table it
-/// sorts. The Scan reads that column's index in key order instead, so the LIMIT stops
-/// it after the first batch.
+/// Removes the Sort when its one key is an indexed column of the table it sorts. The Scan
+/// reads that column's index in key order instead. Under a LIMIT, the LIMIT stops it
+/// after the first batch.
 ///
 /// For ASC, rows with equal keys come out in the order they are stored, as the Sort's
 /// stable sort would put them, because an index entry ends with the row's location. DESC
 /// reads the index backward, which returns them in reverse storage order. SQL leaves the
 /// order of ties undefined, and Postgres's backward index scans do the same.
 ///
-/// Without a LIMIT the Sort stays: reading every row through the index jumps around the
-/// table file, which may cost more than reading it in order and sorting.
-pub(crate) fn use_index_order(plan: &mut LogicalPlan, tables: &BTreeMap<String, TableDef>) {
-    if let LogicalPlan::Limit {
-        input,
-        limit: Some(_),
-        ..
-    } = plan
-    {
-        remove_sort(input, tables);
+/// Without a LIMIT, every row is fetched through the index, in an order that may jump
+/// around the table file. That only pays while the table and index fit in the cache. On
+/// 1M rows, ordering by a column whose order has nothing to do with where rows are
+/// stored took 293 ms through the index against 560 ms for Scan + Sort when they fit.
+/// With a 1,000-page cache it took 992 ms against 530 ms, because nearly every row read
+/// a page. Postgres instead estimates how closely the index order follows the table
+/// order (the `correlation` statistic), which needs statistics we don't keep yet.
+pub(crate) fn use_index_order(
+    plan: &mut LogicalPlan,
+    tables: &BTreeMap<String, TableDef>,
+    pool: &mut BufferPool,
+) {
+    match plan {
+        LogicalPlan::Limit {
+            input,
+            limit: Some(_),
+            ..
+        } => remove_sort(input, tables, None),
+        LogicalPlan::Limit { input, .. } => remove_sort(input, tables, Some(pool)),
+        _ => remove_sort(plan, tables, Some(pool)),
     }
 }
 
-fn remove_sort(plan: &mut LogicalPlan, tables: &BTreeMap<String, TableDef>) {
+/// `unlimited` holds the pool when every row will be read, so the rule checks the
+/// table fits in it first.
+fn remove_sort(
+    plan: &mut LogicalPlan,
+    tables: &BTreeMap<String, TableDef>,
+    unlimited: Option<&mut BufferPool>,
+) {
     match plan {
-        LogicalPlan::Projection { input, .. } => remove_sort(input, tables),
+        LogicalPlan::Projection { input, .. } => remove_sort(input, tables, unlimited),
         LogicalPlan::Sort { input, keys } => {
             let [
                 SortKey {
@@ -78,7 +94,7 @@ fn remove_sort(plan: &mut LogicalPlan, tables: &BTreeMap<String, TableDef>) {
             else {
                 return;
             };
-            if scan_in_key_order(input, column.index, *descending, tables, None) {
+            if scan_in_key_order(input, column.index, *descending, tables, unlimited, None) {
                 let input = std::mem::replace(
                     input.as_mut(),
                     LogicalPlan::Values {
@@ -94,7 +110,7 @@ fn remove_sort(plan: &mut LogicalPlan, tables: &BTreeMap<String, TableDef>) {
 
 /// Makes the Scan under `plan`, looking through a Filter, read the index on `column` in
 /// key order, or largest key first if `descending`. Returns false, changing nothing, if
-/// it can't.
+/// it can't, or if `unlimited` holds a pool that the table and index don't fit in.
 ///
 /// The scan reads only the part of the index that the Filter's `condition` allows, so
 /// `WHERE id > 500000 ORDER BY id` starts at 500000 instead of filtering out every row
@@ -104,12 +120,18 @@ fn scan_in_key_order(
     column: usize,
     descending: bool,
     tables: &BTreeMap<String, TableDef>,
+    unlimited: Option<&mut BufferPool>,
     condition: Option<&AnalyzedExpression>,
 ) -> bool {
     match plan {
-        LogicalPlan::Filter { input, condition } => {
-            scan_in_key_order(input, column, descending, tables, Some(condition))
-        }
+        LogicalPlan::Filter { input, condition } => scan_in_key_order(
+            input,
+            column,
+            descending,
+            tables,
+            unlimited,
+            Some(condition),
+        ),
         LogicalPlan::Scan {
             table_name, index, ..
         } => {
@@ -119,6 +141,12 @@ fn scan_in_key_order(
             else {
                 return false;
             };
+            if let Some(pool) = unlimited {
+                let pages = pool.page_count(table_name) + pool.page_count(by_column.file_name());
+                if !pool.fits(pages as usize) {
+                    return false;
+                }
+            }
             match index {
                 // The WHERE clause already reads this index, and a range comes out in order
                 Some(range) if range.column == column => {
