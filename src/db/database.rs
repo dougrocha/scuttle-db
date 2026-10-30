@@ -1889,6 +1889,18 @@ mod tests {
             ids(&mut db, "ts IN ('2024-01-01 00:00:00')"),
             [Value::Int64(1)]
         );
+        // A text literal on the left becomes a timestamp too, wherever the timestamp is.
+        // Row 2's ts is NULL, so only the text item can match.
+        for list in ["'2024-01-01 00:00:00', ts", "ts, '2024-01-01 00:00:00'"] {
+            assert_eq!(
+                ids(
+                    &mut db,
+                    &format!("'2024-01-01 00:00:00' IN ({list}) AND id = 2")
+                ),
+                [Value::Int64(2)],
+                "{list}"
+            );
+        }
         assert_eq!(
             db.query("SELECT id IN (1, id) FROM t"),
             [[Value::Bool(true)], [Value::Bool(true)], [Value::Null]]

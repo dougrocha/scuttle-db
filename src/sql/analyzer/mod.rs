@@ -673,9 +673,20 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 is_negated,
             } => {
                 let mut expr = self.bind(expr, scope, grouped.as_deref_mut())?;
-                let mut items = Vec::with_capacity(list.len());
+                let mut bound = Vec::with_capacity(list.len());
                 for item in list {
-                    let item = self.bind(item, scope, grouped.as_deref_mut())?;
+                    bound.push(self.bind(item, scope, grouped.as_deref_mut())?);
+                }
+                // A text literal on the left becomes a timestamp if any item is one, before
+                // the items are compared with it, so the list's order doesn't matter
+                if bound
+                    .iter()
+                    .any(|item| item.get_type() == DataType::Timestamp)
+                {
+                    expr = literal_as(expr, DataType::Timestamp)?;
+                }
+                let mut items = Vec::with_capacity(bound.len());
+                for item in bound {
                     // Each item must compare with `expr`, as `expr = item` would
                     let (left, item) = coerce_timestamp_literals(expr, item)?;
                     self.resolve_binary_op(left.get_type(), Operator::Equal, item.get_type())?;
