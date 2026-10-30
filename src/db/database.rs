@@ -1838,6 +1838,16 @@ mod tests {
             plan.contains("IndexScan: item (tag > 't3') (rows=580 "),
             "{plan}"
         );
+        let plan = db
+            .db
+            .explain(
+                "EXPLAIN ANALYZE SELECT id FROM item WHERE tag > 't3' ORDER BY tag DESC LIMIT 5000",
+            )
+            .unwrap();
+        assert!(
+            plan.contains("IndexScan Backward: item (tag > 't3') (rows=580 "),
+            "{plan}"
+        );
 
         // These still sort: no LIMIT, an expression, and two keys
         for query in [
