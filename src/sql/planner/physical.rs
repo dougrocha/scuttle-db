@@ -1,6 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     cmp::Ordering,
+    collections::BTreeSet,
     rc::Rc,
     time::Duration,
 };
@@ -12,7 +13,7 @@ use crate::{
     Schema, Value,
     db::table::{
         cursor::{TableCursor, fetch_row},
-        index::IndexCursor,
+        index::{Ctid, IndexAccess, IndexCursor, IndexRange},
         row::Row,
     },
     sql::{
@@ -83,25 +84,33 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
             LogicalPlan::Scan {
                 table_name,
                 schema,
-                index: Some(range),
+                index: Some(access),
                 ..
             } => {
                 let db = &mut *self.context.database;
-                let index = db
+                let indexes = db
                     .tables
                     .get(&table_name)
-                    .and_then(|table| {
-                        table
-                            .indexes
-                            .iter()
-                            .find(|index| index.column == range.column)
-                    })
-                    .ok_or_else(|| {
-                        miette!("No index on column {} of {table_name}", range.column)
-                    })?;
+                    .map_or(&[][..], |table| &table.indexes);
+                let cursor = |range: &IndexRange| {
+                    indexes
+                        .iter()
+                        .find(|index| index.column == range.column)
+                        .map(|index| index.scan(range))
+                        .ok_or_else(|| {
+                            miette!("No index on column {} of {table_name}", range.column)
+                        })
+                };
+                let ctids = match &access {
+                    IndexAccess::Range(range) => Ctids::Index(cursor(range)?),
+                    IndexAccess::BitmapOr(ranges) => Ctids::Bitmap {
+                        cursors: ranges.iter().map(cursor).collect::<Result<_>>()?,
+                        found: None,
+                    },
+                };
 
                 Ok(Box::new(IndexScanExec {
-                    ctids: index.scan(&range),
+                    ctids,
                     table_name,
                     schema,
                 }))
@@ -307,7 +316,43 @@ impl ExecutionNode for ScanExec {
     }
 }
 
-/// Reads only the rows an index finds, in key order.
+/// Where an [`IndexScanExec`] finds its rows.
+#[derive(Debug)]
+enum Ctids {
+    /// One index's ranges, read in key order a row at a time.
+    Index(IndexCursor),
+
+    /// Several ranges whose rows are gathered into one set on the first call, which drops
+    /// a row two ranges both find and sorts them into table order. Postgres builds a
+    /// bitmap of pages for the same purpose.
+    Bitmap {
+        cursors: Vec<IndexCursor>,
+        found: Option<std::collections::btree_set::IntoIter<Ctid>>,
+    },
+}
+
+impl Ctids {
+    fn next(&mut self, pool: &mut BufferPool) -> Result<Option<Ctid>> {
+        match self {
+            Ctids::Index(cursor) => cursor.next(pool),
+            Ctids::Bitmap { cursors, found } => {
+                if found.is_none() {
+                    let mut set = BTreeSet::new();
+                    for cursor in cursors {
+                        while let Some(ctid) = cursor.next(pool)? {
+                            set.insert(ctid);
+                        }
+                    }
+                    *found = Some(set.into_iter());
+                }
+                Ok(found.as_mut().and_then(Iterator::next))
+            }
+        }
+    }
+}
+
+/// Reads only the rows that indexes find: in key order from one index, or in table order
+/// for a BitmapOr.
 ///
 /// The leaves are read and the rows fetched from the heap only as batches are asked for,
 /// so a scan that stops early (under a LIMIT) reads no further.
@@ -315,7 +360,7 @@ impl ExecutionNode for ScanExec {
 pub struct IndexScanExec {
     table_name: String,
     schema: Schema,
-    ctids: IndexCursor,
+    ctids: Ctids,
 }
 impl ExecutionNode for IndexScanExec {
     fn next(&mut self, ctx: &mut ExecCtx<'_>) -> Result<Option<RecordBatch>> {
