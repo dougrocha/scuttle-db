@@ -1702,6 +1702,7 @@ mod tests {
             "id = 7 AND id = 8",
             "code = 'c007'",
             "code >= 'c298'",
+            "id = 5 OR id = 6",
         ] {
             let sql =
                 |table| format!("SELECT id, code, qty FROM {table} WHERE {filter} ORDER BY id");
@@ -1716,7 +1717,7 @@ mod tests {
         }
 
         // Conditions an index can't narrow keep the full scan
-        for filter in ["qty = 3", "id != 5", "id = 5 OR id = 6", "id = 5.5"] {
+        for filter in ["qty = 3", "id != 5", "id = 5 OR qty = 6", "id = 5.5"] {
             let plan = db
                 .db
                 .explain(&format!("SELECT id FROM item WHERE {filter}"))
@@ -1964,6 +1965,65 @@ mod tests {
             let plan = db.db.explain(&sql("item")).unwrap();
             assert!(!plan.contains("IndexScan: item (id"), "{filter}\n{plan}");
         }
+    }
+
+    #[test]
+    fn test_or_of_equalities_on_one_column_becomes_in() {
+        let mut db = TestDb::new("or-to-in");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, tag TEXT)");
+        db.execute("CREATE TABLE plain (id INT, tag TEXT)");
+        let values: Vec<String> = (0..3000)
+            .map(|n| format!("({}, 't{}')", (n * 7919) % 3000, n % 50))
+            .collect();
+        for table in ["item", "plain"] {
+            db.execute(&format!("INSERT INTO {table} VALUES {}", values.join(", ")));
+            db.execute(&format!("INSERT INTO {table} VALUES (5000, NULL)"));
+        }
+
+        for (filter, rewritten) in [
+            ("id = 5 OR id = 77 OR 1200 = id", "id IN (5, 77, 1200)"),
+            ("id = 5 OR id IN (6, 7) OR id = 5", "id IN (5, 6, 7, 5)"),
+            (
+                "(id = 1 OR id = 2) AND tag = 't1'",
+                "id IN (1, 2) AND (tag = 't1')",
+            ),
+            (
+                "id = 5 OR tag = 't3' OR id = 7",
+                "id IN (5, 7) OR (tag = 't3')",
+            ),
+            (
+                "tag = 't1' OR tag = 't2' OR tag = 't1'",
+                "tag IN ('t1', 't2', 't1')",
+            ),
+            // Nothing to merge
+            ("id = 1 OR id > 2990", "(id = 1) OR (id > 2990)"),
+            ("id = 1 OR tag = 't1'", "(id = 1) OR (tag = 't1')"),
+            ("id NOT IN (1) OR id = 2", "id NOT IN (1) OR (id = 2)"),
+        ] {
+            let sql = |table| format!("SELECT id, tag FROM {table} WHERE {filter} ORDER BY id");
+            assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{filter}");
+            let plan = db.db.explain(&sql("item")).unwrap();
+            assert!(plan.contains(&format!("Filter: {rewritten}\n")), "{plan}");
+        }
+
+        // The id equalities read the index once they are an IN list
+        let plan = db
+            .db
+            .explain("EXPLAIN ANALYZE SELECT id FROM item WHERE id = 5 OR id = 1500 OR id = 2999")
+            .unwrap();
+        assert!(
+            plan.contains("IndexScan: item (id IN (5, 1500, 2999)) (rows=3 "),
+            "{plan}"
+        );
+
+        // Inside IS, an OR of equalities stays: for a NULL id it is false, and IN would
+        // be NULL
+        let sql = |table| {
+            format!("SELECT id FROM {table} WHERE (tag = 't1' OR tag = 't2') IS FALSE ORDER BY id")
+        };
+        assert_eq!(db.query(&sql("item")), db.query(&sql("plain")));
+        assert!(db.query(&sql("item")).contains(&vec![Value::Int64(5000)]));
+        assert!(!db.db.explain(&sql("item")).unwrap().contains(" IN "));
     }
 
     #[test]
