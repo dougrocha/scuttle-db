@@ -631,9 +631,7 @@ impl Database {
             TableCursor::open(&mut self.buffer_manager, table_name.to_string(), schema);
         while cursor.read_next_page(&mut self.buffer_manager, |page_id, item_id, row| {
             for (index, sort) in &mut sorts {
-                if let Some(entry) = index.entry(&row, (page_id, item_id)) {
-                    sort.push(entry)?;
-                }
+                sort.push(index.entry(&row, (page_id, item_id)))?;
             }
             Ok(())
         })? {}
@@ -1743,7 +1741,7 @@ mod tests {
             db.execute(&format!("INSERT INTO {table} VALUES {}", values.join(", ")));
         }
         db.execute("CREATE INDEX item_grp ON item (grp)");
-        // NULLs aren't in an index, so ordering by `tag` through its index would lose them
+        // `tag` is nullable. Its NULLs are in its index, after every value.
         db.execute("CREATE INDEX item_tag ON item (tag)");
         for table in ["item", "plain"] {
             db.execute(&format!(
@@ -1771,6 +1769,9 @@ mod tests {
             "WHERE id >= 10 AND id <= 20 ORDER BY id DESC LIMIT 100",
             "WHERE id = 42 ORDER BY id DESC LIMIT 3",
             "WHERE tag = 't3' ORDER BY id DESC LIMIT 6",
+            "ORDER BY tag LIMIT 5000",
+            "WHERE tag > 't3' ORDER BY tag LIMIT 5000",
+            "WHERE tag < 't1' ORDER BY tag LIMIT 5000",
         ] {
             let sql = |table| format!("SELECT id, grp, tag FROM {table} {query}");
             assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{query}");
@@ -1818,12 +1819,31 @@ mod tests {
             .explain("SELECT id FROM item WHERE id > 1500 ORDER BY id LIMIT 4");
         assert!(plan.unwrap().contains("IndexScan: item (id > 1500)"));
 
-        // These still sort: no LIMIT, DESC, an expression, a nullable column, and two keys
+        // DESC puts NULLs first, as the Sort does, then the largest tag
+        let plan = db
+            .db
+            .explain("SELECT id FROM item ORDER BY tag DESC LIMIT 3");
+        assert!(plan.unwrap().contains("IndexScan Backward: item (by tag)"));
+        let rows = db.query("SELECT id, tag FROM item ORDER BY tag DESC LIMIT 3");
+        assert_eq!(rows[0][1], Value::Null);
+        assert_eq!(rows[1][1], Value::Null);
+        assert_eq!(rows[2][1], Value::Text("t4".into()));
+
+        // A WHERE range stops before the NULLs instead of reading them and filtering them out
+        let plan = db
+            .db
+            .explain("EXPLAIN ANALYZE SELECT id FROM item WHERE tag > 't3' ORDER BY tag LIMIT 5000")
+            .unwrap();
+        assert!(
+            plan.contains("IndexScan: item (tag > 't3') (rows=580 "),
+            "{plan}"
+        );
+
+        // These still sort: no LIMIT, an expression, and two keys
         for query in [
             "ORDER BY id",
             "ORDER BY id DESC",
             "ORDER BY id + 0 LIMIT 5",
-            "ORDER BY tag LIMIT 5000",
             "ORDER BY grp, id LIMIT 5",
         ] {
             let sql = |table| format!("SELECT id, grp, tag FROM {table} {query}");
