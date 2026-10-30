@@ -239,6 +239,15 @@ g.**
 
 ## Phase 5: Using index order, IN and OR (medium)
 
+**Todo:**
+- [ ] 1a. Index NULLs as a key that sorts after every value, so a scan in key order sees every row. UNIQUE still lets NULLs repeat, and ranges skip them.
+- [ ] 1b. `ORDER BY col [ASC] LIMIT n` on an indexed column: IndexScan in key order, no Sort, stops early.
+- [ ] 1c. Decide when ORDER BY without LIMIT should use the index, by measuring a full index-order scan against Scan + Sort on 1M rows.
+- [ ] 1d. DESC: a `prev` link in each leaf, so a scan can walk leaves right to left.
+- [ ] 2. Parse `col IN (...)`, and let an IndexScan carry several sorted ranges.
+- [ ] 3a. Rewrite `a = 1 OR a = 2` into `a IN (1, 2)`.
+- [ ] 3b. OR across two indexes: union the row locations, sorted by page (BitmapOr).
+
 **ORDER BY through an index.**
 - A B+tree already returns keys in order. When Sort's key is an indexed column, replace the Scan with a full-range IndexScan and delete the Sort. For DESC, walk the leaf chain backwards.
 - With LIMIT, the scan stops after the first batch.
