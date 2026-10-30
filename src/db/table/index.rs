@@ -498,6 +498,94 @@ mod tests {
     }
 
     #[test]
+    fn test_a_backward_scan_returns_the_forward_scan_reversed_for_every_key_type() {
+        let text = |s: &str| Value::Text(s.to_string());
+        let columns: [(DataType, Vec<Value>); 5] = [
+            (
+                DataType::Int64,
+                [i64::MIN, -5, -1, 0, 1, 7, i64::MAX]
+                    .map(Value::Int64)
+                    .to_vec(),
+            ),
+            (
+                // Prefixes of each other, NUL bytes, and the empty string
+                DataType::Text,
+                [
+                    "", "\0", "\0\0", "\0a", "a", "a\0", "a\0b", "ab", "abc", "b", "\u{ff}",
+                ]
+                .map(text)
+                .to_vec(),
+            ),
+            (
+                DataType::Float64,
+                [
+                    f64::NEG_INFINITY,
+                    -2.5,
+                    -0.0,
+                    1e-300,
+                    1.5,
+                    f64::INFINITY,
+                    f64::NAN,
+                ]
+                .map(Value::Float64)
+                .to_vec(),
+            ),
+            (DataType::Bool, vec![Value::Bool(false), Value::Bool(true)]),
+            (
+                DataType::Timestamp,
+                [-86_400, 0, 1_767_225_600].map(Value::Timestamp).to_vec(),
+            ),
+        ];
+
+        for (data_type, values) in columns {
+            let schema = Schema::new(vec![ColumnDef::new("c", data_type)]);
+            let index = TableIndex::new("t_c".to_string(), &schema, 0, false, None);
+            let mut pool = BufferPool::in_memory();
+            index.create(&mut pool).unwrap();
+            // Each value three times, so every key has entries on both sides of a ctid
+            let mut item = 0;
+            for _ in 0..3 {
+                for value in &values {
+                    let row = Row::new(vec![value.clone()]);
+                    index
+                        .insert(&mut pool, &row, (item / 7, (item % 7) as u16))
+                        .unwrap();
+                    item += 1;
+                }
+            }
+
+            let read = |pool: &mut BufferPool, range: &IndexRange| {
+                let mut cursor = index.scan(pool, range).unwrap();
+                std::iter::from_fn(|| cursor.next(pool).unwrap()).collect::<Vec<_>>()
+            };
+            let keys: Vec<IndexKey> = values.iter().filter_map(|v| index.key_for(v)).collect();
+            let mut bounds = vec![Bound::Unbounded];
+            for key in &keys {
+                bounds.push(Bound::Included(key.clone()));
+                bounds.push(Bound::Excluded(key.clone()));
+            }
+            for lower in &bounds {
+                for upper in &bounds {
+                    let mut range = IndexRange {
+                        column: 0,
+                        lower: lower.clone(),
+                        upper: upper.clone(),
+                        descending: false,
+                    };
+                    let mut forward = read(&mut pool, &range);
+                    range.descending = true;
+                    forward.reverse();
+                    assert_eq!(
+                        read(&mut pool, &range),
+                        forward,
+                        "{data_type:?} from {lower:?} to {upper:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_float_and_bool_keys_sort_like_their_values() {
         let floats = [
             f64::NEG_INFINITY,
