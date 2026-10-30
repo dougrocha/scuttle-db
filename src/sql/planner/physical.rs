@@ -101,7 +101,7 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                     })?;
 
                 Ok(Box::new(IndexScanExec {
-                    ctids: index.scan(&mut db.buffer_manager, &range)?,
+                    ctids: index.scan(&range),
                     table_name,
                     schema,
                 }))
@@ -309,9 +309,8 @@ impl ExecutionNode for ScanExec {
 
 /// Reads only the rows an index finds, in key order.
 ///
-/// Building the plan finds the range's first leaf. After that, the leaves are read and the
-/// rows fetched from the heap only as batches are asked for, so a scan that stops early
-/// (under a LIMIT) reads no further.
+/// The leaves are read and the rows fetched from the heap only as batches are asked for,
+/// so a scan that stops early (under a LIMIT) reads no further.
 #[derive(Debug)]
 pub struct IndexScanExec {
     table_name: String,

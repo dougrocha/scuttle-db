@@ -82,6 +82,31 @@ impl Evaluator<Value> for ExpressionEvaluator {
                     )),
                 }
             }
+            AnalyzedExpression::InList {
+                expr,
+                list,
+                negated,
+            } => {
+                // `x IN (a, b)` is `x = a OR x = b`: true on a match, else NULL if any
+                // comparison was NULL, else false. So `1 NOT IN (2, NULL)` is NULL, not
+                // true, and filters the row out.
+                let value = self.evaluate(expr, row)?;
+                let mut found = Value::Bool(false);
+                for item in list {
+                    match values_equal(&value, &self.evaluate(item, row)?) {
+                        Value::Bool(true) => {
+                            found = Value::Bool(true);
+                            break;
+                        }
+                        Value::Null => found = Value::Null,
+                        _ => {}
+                    }
+                }
+                Ok(match (found, negated) {
+                    (Value::Bool(found), true) => Value::Bool(!found),
+                    (found, _) => found,
+                })
+            }
             AnalyzedExpression::IsPredicate {
                 expr,
                 predicate,

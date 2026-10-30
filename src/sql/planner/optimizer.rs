@@ -13,7 +13,7 @@ use miette::Result;
 use crate::{
     Value,
     db::table::{
-        index::{IndexKey, IndexRange, TableIndex},
+        index::{IndexKey, IndexRange, KeyRange, TableIndex},
         table_def::TableDef,
     },
     sql::{
@@ -159,12 +159,8 @@ fn scan_in_key_order(
                     if let Some(condition) = condition {
                         split_and(condition, &mut conjuncts);
                     }
-                    let mut range = narrow(by_column, &conjuncts).unwrap_or(IndexRange {
-                        column,
-                        lower: Bound::Unbounded,
-                        upper: Bound::Unbounded,
-                        descending: false,
-                    });
+                    let mut range =
+                        narrow(by_column, &conjuncts).unwrap_or_else(|| IndexRange::all(column));
                     range.descending = descending;
                     *index = Some(range);
                     true
@@ -270,38 +266,67 @@ fn pick_index(
 /// The keys of `index` that the conditions allow, or `None` if none of them is about
 /// the index's column.
 fn narrow(index: &TableIndex, conjuncts: &[&AnalyzedExpression]) -> Option<IndexRange> {
-    // No comparison is true for NULL, so the range stops before the NULLs at the end
-    let mut range = IndexRange {
-        column: index.column,
+    // No comparison is true for NULL, so the ranges stop before the NULLs at the end
+    let mut ranges = vec![KeyRange {
         lower: Bound::Unbounded,
         upper: Bound::Excluded(IndexKey::Null),
-        descending: false,
-    };
+    }];
     let mut narrowed = false;
 
     for conjunct in conjuncts {
-        let Some((column, op, value)) = column_vs_literal(conjunct) else {
+        let Some(allowed) = key_ranges(index, conjunct) else {
             continue;
         };
-        let Some(key) = index.key_for(value).filter(|_| column == index.column) else {
-            continue;
-        };
-
-        match op {
-            Operator::Equal => {
-                tighten_lower(&mut range.lower, Bound::Included(key.clone()));
-                tighten_upper(&mut range.upper, Bound::Included(key));
-            }
-            Operator::GreaterThan => tighten_lower(&mut range.lower, Bound::Excluded(key)),
-            Operator::GreaterThanEqual => tighten_lower(&mut range.lower, Bound::Included(key)),
-            Operator::LessThan => tighten_upper(&mut range.upper, Bound::Excluded(key)),
-            Operator::LessThanEqual => tighten_upper(&mut range.upper, Bound::Included(key)),
-            _ => continue,
-        }
+        // Both lists are sorted and don't overlap, so the pairs that meet come out in
+        // order and don't overlap either
+        ranges = ranges
+            .iter()
+            .flat_map(|a| allowed.iter().filter_map(|b| a.intersect(b)))
+            .collect();
         narrowed = true;
     }
 
-    narrowed.then_some(range)
+    narrowed.then_some(IndexRange {
+        column: index.column,
+        ranges,
+        descending: false,
+    })
+}
+
+/// The keys of `index` that `conjunct` allows, sorted and not overlapping, or `None` if
+/// it isn't a condition on the index's column that an index can answer.
+fn key_ranges(index: &TableIndex, conjunct: &AnalyzedExpression) -> Option<Vec<KeyRange>> {
+    if let AnalyzedExpression::InList {
+        expr,
+        list,
+        negated: false,
+    } = conjunct
+        && let AnalyzedExpression::Column(column, _) = expr.as_ref()
+        && column.index == index.column
+    {
+        let mut keys = list
+            .iter()
+            .map(|item| match item {
+                AnalyzedExpression::Literal(value) => index.key_for(value),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        keys.sort();
+        keys.dedup();
+        return Some(keys.into_iter().map(KeyRange::point).collect());
+    }
+
+    let (column, op, value) = column_vs_literal(conjunct)?;
+    let key = index.key_for(value).filter(|_| column == index.column)?;
+    let (lower, upper) = match op {
+        Operator::Equal => return Some(vec![KeyRange::point(key)]),
+        Operator::GreaterThan => (Bound::Excluded(key), Bound::Unbounded),
+        Operator::GreaterThanEqual => (Bound::Included(key), Bound::Unbounded),
+        Operator::LessThan => (Bound::Unbounded, Bound::Excluded(key)),
+        Operator::LessThanEqual => (Bound::Unbounded, Bound::Included(key)),
+        _ => return None,
+    };
+    Some(vec![KeyRange { lower, upper }])
 }
 
 /// The parts of `a AND b AND c`, or the expression itself when it isn't an AND.
@@ -345,42 +370,5 @@ fn column_vs_literal(expr: &AnalyzedExpression) -> Option<(usize, Operator, &Val
             Some((column.index, flipped, value))
         }
         _ => None,
-    }
-}
-
-/// Keeps whichever lower bound lets fewer keys through.
-fn tighten_lower(current: &mut Bound<IndexKey>, new: Bound<IndexKey>) {
-    let tighter = match (&*current, &new) {
-        (Bound::Unbounded, _) => true,
-        (_, Bound::Unbounded) => false,
-        (Bound::Included(a) | Bound::Excluded(a), Bound::Included(b) | Bound::Excluded(b))
-            if a != b =>
-        {
-            b > a
-        }
-        // Same key: excluding it is tighter than including it
-        (_, Bound::Excluded(_)) => true,
-        _ => false,
-    };
-    if tighter {
-        *current = new;
-    }
-}
-
-/// Keeps whichever upper bound lets fewer keys through.
-fn tighten_upper(current: &mut Bound<IndexKey>, new: Bound<IndexKey>) {
-    let tighter = match (&*current, &new) {
-        (Bound::Unbounded, _) => true,
-        (_, Bound::Unbounded) => false,
-        (Bound::Included(a) | Bound::Excluded(a), Bound::Included(b) | Bound::Excluded(b))
-            if a != b =>
-        {
-            b < a
-        }
-        (_, Bound::Excluded(_)) => true,
-        _ => false,
-    };
-    if tighter {
-        *current = new;
     }
 }

@@ -152,6 +152,15 @@ impl RelationSchema {
                 let not = if *negated { "NOT " } else { "" };
                 format!("{} IS {not}{target}", self.operand(expr))
             }
+            AnalyzedExpression::InList {
+                expr,
+                list,
+                negated,
+            } => {
+                let list: Vec<String> = list.iter().map(|item| self.render(item)).collect();
+                let not = if *negated { "NOT " } else { "" };
+                format!("{} {not}IN ({})", self.operand(expr), list.join(", "))
+            }
         }
     }
 

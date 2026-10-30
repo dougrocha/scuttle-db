@@ -6,7 +6,7 @@
 
 use std::ops::Bound;
 
-use crate::db::table::index::{IndexKey, IndexRange};
+use crate::db::table::index::{IndexKey, IndexRange, KeyRange};
 use crate::sql::analyzer::AnalyzedExpression;
 use crate::sql::planner::logical::{LogicalPlan, SortKey};
 use crate::sql::planner::relation_schema::RelationSchema;
@@ -208,6 +208,30 @@ fn render_keys(input: &LogicalPlan, keys: &[SortKey]) -> String {
 }
 
 fn render_range(column: &str, range: &IndexRange) -> String {
+    let points: Option<Vec<String>> = range
+        .ranges
+        .iter()
+        .map(|range| match (&range.lower, &range.upper) {
+            (Bound::Included(lo), Bound::Included(hi)) if lo == hi => Some(lo.to_string()),
+            _ => None,
+        })
+        .collect();
+    match points.as_deref() {
+        // The conditions contradict each other, such as `id = 1 AND id = 2`
+        Some([]) => "no keys".to_string(),
+        Some([key]) => format!("{column} = {key}"),
+        Some(keys) => format!("{column} IN ({})", keys.join(", ")),
+        None if range.ranges.len() == 1 => render_key_range(column, &range.ranges[0]),
+        None => range
+            .ranges
+            .iter()
+            .map(|range| format!("({})", render_key_range(column, range)))
+            .collect::<Vec<_>>()
+            .join(" OR "),
+    }
+}
+
+fn render_key_range(column: &str, range: &KeyRange) -> String {
     // The whole index, read for its order
     if (&range.lower, &range.upper) == (&Bound::Unbounded, &Bound::Unbounded) {
         return format!("by {column}");

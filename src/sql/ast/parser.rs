@@ -411,7 +411,17 @@ impl<'src> SqlParser<'src> {
     fn parse_expression(&mut self, min_prec: u8) -> Result<Expression> {
         let mut lhs = self.parse_primary()?;
 
-        while let Some(op) = self.peek_binary_op() {
+        loop {
+            // `IN` binds like a comparison, so `a + 1 IN (2)` is `(a + 1) IN (2)`
+            if Operator::Equal.precedence() >= min_prec
+                && (self.peek_keyword(Keyword::In) || self.peek_keyword(Keyword::Not))
+            {
+                lhs = self.parse_in_list(lhs)?;
+                continue;
+            }
+            let Some(op) = self.peek_binary_op() else {
+                break;
+            };
             if op.precedence() < min_prec {
                 break;
             }
@@ -429,6 +439,23 @@ impl<'src> SqlParser<'src> {
         }
 
         Ok(lhs)
+    }
+
+    /// Parses `[NOT] IN (a, b, ...)` after `expr`. The list can't be empty.
+    fn parse_in_list(&mut self, expr: Expression) -> Result<Expression> {
+        let is_negated = self.consume_if(Token::Keyword(Keyword::Not));
+        self.expect_keyword(Keyword::In)?;
+        self.expect_token(Token::LeftParen)?;
+        let mut list = vec![self.parse_expression(0)?];
+        while self.consume_if(Token::Comma) {
+            list.push(self.parse_expression(0)?);
+        }
+        self.expect_token(Token::RightParen)?;
+        Ok(Expression::InList {
+            expr: Box::new(expr),
+            list,
+            is_negated,
+        })
     }
 
     fn parse_primary(&mut self) -> Result<Expression> {
@@ -959,6 +986,29 @@ mod tests {
                 );
             }
             _ => panic!("Expected Select statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_in_list() {
+        // Binds like `=`: looser than `+`, tighter than AND
+        assert_eq!(
+            parse_where("SELECT * FROM t WHERE a + 1 NOT IN (2, b) AND c IN (3)").to_string(),
+            "((a Add 1) NOT IN (2, b) And c IN (3))"
+        );
+        let Expression::InList { list, .. } = parse_where("SELECT * FROM t WHERE a IN ('x')")
+        else {
+            panic!("expected an IN list");
+        };
+        assert_eq!(list, [Expression::Literal(Value::Text("x".into()))]);
+
+        for bad in [
+            "SELECT * FROM t WHERE a IN ()",
+            "SELECT * FROM t WHERE a IN (1,)",
+            "SELECT * FROM t WHERE a IN 1",
+            "SELECT * FROM t WHERE a NOT 1",
+        ] {
+            assert!(SqlParser::new(bad).parse().is_err(), "{bad}");
         }
     }
 

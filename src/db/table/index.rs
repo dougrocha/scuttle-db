@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, ops::Bound};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, VecDeque},
+    ops::Bound,
+};
 
 use miette::Result;
 
@@ -291,52 +295,28 @@ impl TableIndex {
 
     /// The rows whose key is within `range`, in key order, or largest key first if the
     /// range is `descending`. They are read as they are asked for.
-    pub(crate) fn scan(&self, pool: &mut BufferPool, range: &IndexRange) -> Result<IndexCursor> {
-        let encode = |key: &IndexKey| {
-            let mut bytes = Vec::new();
-            key.encode(&mut bytes);
-            bytes
+    pub(crate) fn scan(&self, range: &IndexRange) -> IndexCursor {
+        let encode = |bound: &Bound<IndexKey>| {
+            bound.as_ref().map(|key| {
+                let mut bytes = Vec::new();
+                key.encode(&mut bytes);
+                bytes
+            })
         };
-        let lower = match &range.lower {
-            Bound::Included(key) => Bound::Included(encode(key)),
-            Bound::Excluded(key) => Bound::Excluded(encode(key)),
-            Bound::Unbounded => Bound::Unbounded,
-        };
-        let upper = match &range.upper {
-            Bound::Included(key) => Bound::Included(encode(key)),
-            Bound::Excluded(key) => Bound::Excluded(encode(key)),
-            Bound::Unbounded => Bound::Unbounded,
-        };
-
-        let cursor = if range.descending {
-            // Starts before the first entry past the upper bound. An entry is its key's
-            // bytes and then a ctid, so every entry of `key` sorts after `key` itself and
-            // before `key` followed by more 0xFF bytes than a ctid has. No key's bytes
-            // start with another key's bytes, so no other key sorts in between.
-            let start = match &upper {
-                Bound::Included(key) => {
-                    let mut past = key.clone();
-                    past.extend_from_slice(&[0xFF; CTID_LEN + 1]);
-                    Some(past)
-                }
-                Bound::Excluded(key) => Some(key.clone()),
-                Bound::Unbounded => None,
-            };
-            self.tree.seek_back(pool, start.as_deref())?
-        } else {
-            // Every entry of a key starts with the key's bytes, so they all sort at or after it
-            let start = match &lower {
-                Bound::Included(key) | Bound::Excluded(key) => key.as_slice(),
-                Bound::Unbounded => &[],
-            };
-            self.tree.seek(pool, start)?
-        };
-        Ok(IndexCursor {
-            cursor,
-            lower,
-            upper,
+        let mut ranges: VecDeque<_> = range
+            .ranges
+            .iter()
+            .map(|range| (encode(&range.lower), encode(&range.upper)))
+            .collect();
+        if range.descending {
+            ranges.make_contiguous().reverse();
+        }
+        IndexCursor {
+            tree: self.tree.clone(),
+            ranges,
+            current: None,
             descending: range.descending,
-        })
+        }
     }
 
     /// How many rows fall in `range`, counting no further than `limit`.
@@ -350,7 +330,7 @@ impl TableIndex {
         range: &IndexRange,
         limit: usize,
     ) -> Result<usize> {
-        let mut cursor = self.scan(pool, range)?;
+        let mut cursor = self.scan(range);
         let mut count = 0;
         while count < limit && cursor.next(pool)?.is_some() {
             count += 1;
@@ -397,12 +377,11 @@ impl TableIndex {
             }
             let range = IndexRange {
                 column: self.column,
-                lower: Bound::Included(key.clone()),
-                upper: Bound::Included(key.clone()),
+                ranges: vec![KeyRange::point(key.clone())],
                 descending: false,
             };
             let mut taken = false;
-            let mut rows = self.scan(pool, &range)?;
+            let mut rows = self.scan(&range);
             while let Some(ctid) = rows.next(pool)? {
                 if !replacing.contains(&ctid) {
                     taken = true;
@@ -422,66 +401,204 @@ impl TableIndex {
     }
 }
 
-/// The rows of one index range, read from the tree a row at a time.
+/// A range bound as the bytes of its key.
+type EncodedBound = Bound<Vec<u8>>;
+
+/// The rows of one index's ranges, read from the tree a row at a time.
 #[derive(Debug)]
 pub(crate) struct IndexCursor {
-    cursor: Cursor,
+    tree: BTree,
 
-    /// The range's bounds, as encoded keys. A cursor going up starts at the lower bound,
-    /// but still has to skip a key the lower bound excludes. A cursor going down starts
-    /// below the upper bound, past any key it excludes.
-    lower: Bound<Vec<u8>>,
-    upper: Bound<Vec<u8>>,
+    /// The ranges not yet finished, in the order they are read, as encoded keys. The
+    /// first one is being read.
+    ranges: VecDeque<(EncodedBound, EncodedBound)>,
+
+    /// Where the first range is being read from, once it has been opened.
+    current: Option<Cursor>,
     descending: bool,
 }
 
 impl IndexCursor {
-    /// The next row in the range, or `None` past its end.
+    /// The next row in the ranges, or `None` past the end of the last one.
     pub(crate) fn next(&mut self, pool: &mut BufferPool) -> Result<Option<Ctid>> {
-        if self.descending {
-            let Some(entry) = self.cursor.prev(pool)? else {
-                return Ok(None);
+        while let Some((lower, upper)) = self.ranges.front() {
+            let cursor = match &mut self.current {
+                Some(cursor) => cursor,
+                None => self
+                    .current
+                    .insert(open(&self.tree, pool, lower, upper, self.descending)?),
             };
-            let key = &entry[..entry.len() - CTID_LEN];
-            let past_end = match &self.lower {
-                Bound::Included(lower) => key < lower.as_slice(),
-                Bound::Excluded(lower) => key <= lower.as_slice(),
-                Bound::Unbounded => false,
+            let ctid = if self.descending {
+                next_down(cursor, pool, lower)?
+            } else {
+                next_up(cursor, pool, lower, upper)?
             };
-            return Ok((!past_end).then(|| entry_ctid(&entry)));
-        }
-
-        while let Some(entry) = self.cursor.next(pool)? {
-            let key = &entry[..entry.len() - CTID_LEN];
-            if let Bound::Excluded(lower) = &self.lower
-                && key == lower.as_slice()
-            {
-                continue;
+            if ctid.is_some() {
+                return Ok(ctid);
             }
-
-            let past_end = match &self.upper {
-                Bound::Included(upper) => key > upper.as_slice(),
-                Bound::Excluded(upper) => key >= upper.as_slice(),
-                Bound::Unbounded => false,
-            };
-            if past_end {
-                return Ok(None);
-            }
-            return Ok(Some(entry_ctid(&entry)));
+            self.ranges.pop_front();
+            self.current = None;
         }
         Ok(None)
     }
 }
 
-/// The part of one index a scan reads: the keys of `column` between two bounds.
+/// A cursor placed at the start of the range between `lower` and `upper`: before its
+/// first entry going up, or after its last going down.
+fn open(
+    tree: &BTree,
+    pool: &mut BufferPool,
+    lower: &EncodedBound,
+    upper: &EncodedBound,
+    descending: bool,
+) -> Result<Cursor> {
+    if descending {
+        // Starts before the first entry past the upper bound. An entry is its key's
+        // bytes and then a ctid, so every entry of `key` sorts after `key` itself and
+        // before `key` followed by more 0xFF bytes than a ctid has. No key's bytes
+        // start with another key's bytes, so no other key sorts in between.
+        let start = match upper {
+            Bound::Included(key) => {
+                let mut past = key.clone();
+                past.extend_from_slice(&[0xFF; CTID_LEN + 1]);
+                Some(past)
+            }
+            Bound::Excluded(key) => Some(key.clone()),
+            Bound::Unbounded => None,
+        };
+        tree.seek_back(pool, start.as_deref())
+    } else {
+        // Every entry of a key starts with the key's bytes, so they all sort at or after it
+        let start = match lower {
+            Bound::Included(key) | Bound::Excluded(key) => key.as_slice(),
+            Bound::Unbounded => &[],
+        };
+        tree.seek(pool, start)
+    }
+}
+
+/// The next row going up, or `None` past `upper`. The cursor starts at the lower bound,
+/// but still has to skip a key the lower bound excludes.
+fn next_up(
+    cursor: &mut Cursor,
+    pool: &mut BufferPool,
+    lower: &EncodedBound,
+    upper: &EncodedBound,
+) -> Result<Option<Ctid>> {
+    while let Some(entry) = cursor.next(pool)? {
+        let key = &entry[..entry.len() - CTID_LEN];
+        if let Bound::Excluded(lower) = lower
+            && key == lower.as_slice()
+        {
+            continue;
+        }
+
+        let past_end = match upper {
+            Bound::Included(upper) => key > upper.as_slice(),
+            Bound::Excluded(upper) => key >= upper.as_slice(),
+            Bound::Unbounded => false,
+        };
+        return Ok((!past_end).then(|| entry_ctid(&entry)));
+    }
+    Ok(None)
+}
+
+/// The next row going down, or `None` past `lower`. The cursor starts below the upper
+/// bound, past any key it excludes.
+fn next_down(
+    cursor: &mut Cursor,
+    pool: &mut BufferPool,
+    lower: &EncodedBound,
+) -> Result<Option<Ctid>> {
+    let Some(entry) = cursor.prev(pool)? else {
+        return Ok(None);
+    };
+    let key = &entry[..entry.len() - CTID_LEN];
+    let past_end = match lower {
+        Bound::Included(lower) => key < lower.as_slice(),
+        Bound::Excluded(lower) => key <= lower.as_slice(),
+        Bound::Unbounded => false,
+    };
+    Ok((!past_end).then(|| entry_ctid(&entry)))
+}
+
+/// The part of one index a scan reads: keys of `column` in one or more ranges.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IndexRange {
     pub(crate) column: usize,
+
+    /// Sorted and not overlapping, so reading them in turn returns rows in key order,
+    /// each once. `id IN (1, 5)` is two ranges of one key each.
+    pub(crate) ranges: Vec<KeyRange>,
+
+    /// Read the ranges largest key first, for an `ORDER BY ... DESC`.
+    pub(crate) descending: bool,
+}
+
+impl IndexRange {
+    /// Every key of `column`, NULLs included.
+    pub(crate) fn all(column: usize) -> Self {
+        Self {
+            column,
+            ranges: vec![KeyRange {
+                lower: Bound::Unbounded,
+                upper: Bound::Unbounded,
+            }],
+            descending: false,
+        }
+    }
+}
+
+/// The keys between two bounds.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct KeyRange {
     pub(crate) lower: Bound<IndexKey>,
     pub(crate) upper: Bound<IndexKey>,
+}
 
-    /// Read the range largest key first, for an `ORDER BY ... DESC`.
-    pub(crate) descending: bool,
+impl KeyRange {
+    /// The keys equal to `key`.
+    pub(crate) fn point(key: IndexKey) -> Self {
+        Self {
+            lower: Bound::Included(key.clone()),
+            upper: Bound::Included(key),
+        }
+    }
+
+    /// The keys in both `self` and `other`, or `None` if there are none.
+    pub(crate) fn intersect(&self, other: &KeyRange) -> Option<KeyRange> {
+        let lower = tighter(&self.lower, &other.lower, Ordering::Greater);
+        let upper = tighter(&self.upper, &other.upper, Ordering::Less);
+        let empty = match (&lower, &upper) {
+            (Bound::Included(lo), Bound::Included(hi)) => lo > hi,
+            (
+                Bound::Included(lo) | Bound::Excluded(lo),
+                Bound::Included(hi) | Bound::Excluded(hi),
+            ) => lo >= hi,
+            _ => false,
+        };
+        (!empty).then_some(KeyRange { lower, upper })
+    }
+}
+
+/// Whichever of two bounds lets fewer keys through. `keep` is how the tighter key
+/// compares with the other: `Greater` for lower bounds, `Less` for upper bounds.
+fn tighter(a: &Bound<IndexKey>, b: &Bound<IndexKey>, keep: Ordering) -> Bound<IndexKey> {
+    match (a, b) {
+        (Bound::Unbounded, other) | (other, Bound::Unbounded) => other.clone(),
+        (Bound::Included(x) | Bound::Excluded(x), Bound::Included(y) | Bound::Excluded(y))
+            if x != y =>
+        {
+            if y.cmp(x) == keep {
+                b.clone()
+            } else {
+                a.clone()
+            }
+        }
+        // Same key: excluding it is tighter than including it
+        (Bound::Excluded(_), _) => a.clone(),
+        _ => b.clone(),
+    }
 }
 
 impl std::fmt::Display for IndexKey {
@@ -570,7 +687,7 @@ mod tests {
             }
 
             let read = |pool: &mut BufferPool, range: &IndexRange| {
-                let mut cursor = index.scan(pool, range).unwrap();
+                let mut cursor = index.scan(range);
                 std::iter::from_fn(|| cursor.next(pool).unwrap()).collect::<Vec<_>>()
             };
             let keys: Vec<IndexKey> = values.iter().filter_map(|v| index.key_for(v)).collect();
@@ -583,8 +700,10 @@ mod tests {
                 for upper in &bounds {
                     let mut range = IndexRange {
                         column: 0,
-                        lower: lower.clone(),
-                        upper: upper.clone(),
+                        ranges: vec![KeyRange {
+                            lower: lower.clone(),
+                            upper: upper.clone(),
+                        }],
                         descending: false,
                     };
                     let mut forward = read(&mut pool, &range);
