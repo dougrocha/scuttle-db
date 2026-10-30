@@ -209,6 +209,18 @@ impl BindScope {
                 predicate: predicate.clone(),
                 is_negated: *is_negated,
             }),
+            Expression::InList {
+                expr: inner,
+                list,
+                is_negated,
+            } => Ok(Expression::InList {
+                expr: Box::new(self.canonicalize(inner)?),
+                list: list
+                    .iter()
+                    .map(|item| self.canonicalize(item))
+                    .collect::<Result<_>>()?,
+                is_negated: *is_negated,
+            }),
             Expression::Function { name, args } => {
                 let args = match args {
                     FunctionArgs::Star => FunctionArgs::Star,

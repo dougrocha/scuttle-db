@@ -40,6 +40,13 @@ pub enum Expression {
 
     /// Function call (e.g., `COUNT(*)`, `SUM(price)`)
     Function { name: String, args: FunctionArgs },
+
+    /// `expr IN (a, b, c)`, or `expr NOT IN (...)` when `is_negated`
+    InList {
+        expr: Box<Expression>,
+        list: Vec<Expression>,
+        is_negated: bool,
+    },
 }
 
 /// Arguments passed to a function call.
@@ -92,6 +99,15 @@ impl fmt::Display for Expression {
                 if *is_negated { "IS NOT" } else { "IS" }
             ),
             Expression::Function { name, args } => write!(f, "{name}({args})"),
+            Expression::InList {
+                expr,
+                list,
+                is_negated,
+            } => {
+                let list: Vec<String> = list.iter().map(ToString::to_string).collect();
+                let not = if *is_negated { "NOT " } else { "" };
+                write!(f, "{expr} {not}IN ({})", list.join(", "))
+            }
         }
     }
 }

@@ -42,6 +42,11 @@ pub enum AnalyzedExpression {
         predicate: IsPredicateTarget,
         negated: bool,
     },
+    InList {
+        expr: Box<AnalyzedExpression>,
+        list: Vec<AnalyzedExpression>,
+        negated: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +140,9 @@ fn contains_aggregate(expr: &Expression) -> bool {
             contains_aggregate(left) || contains_aggregate(right)
         }
         Expression::Is { expr, .. } => contains_aggregate(expr),
+        Expression::InList { expr, list, .. } => {
+            contains_aggregate(expr) || list.iter().any(contains_aggregate)
+        }
         Expression::Identifier(_) | Expression::Qualified { .. } | Expression::Literal(_) => false,
     }
 }
@@ -153,7 +161,9 @@ impl AnalyzedExpression {
             },
             AnalyzedExpression::Column(_, column_type) => *column_type,
             AnalyzedExpression::BinaryExpr { return_type, .. } => *return_type,
-            AnalyzedExpression::IsPredicate { .. } => DataType::Bool,
+            AnalyzedExpression::IsPredicate { .. } | AnalyzedExpression::InList { .. } => {
+                DataType::Bool
+            }
         }
     }
 }
@@ -657,6 +667,27 @@ impl<'a, 'db> Analyzer<'a, 'db> {
                 )),
                 scalar_value => Ok(AnalyzedExpression::Literal(scalar_value.clone())),
             },
+            Expression::InList {
+                expr,
+                list,
+                is_negated,
+            } => {
+                let mut expr = self.bind(expr, scope, grouped.as_deref_mut())?;
+                let mut items = Vec::with_capacity(list.len());
+                for item in list {
+                    let item = self.bind(item, scope, grouped.as_deref_mut())?;
+                    // Each item must compare with `expr`, as `expr = item` would
+                    let (left, item) = coerce_timestamp_literals(expr, item)?;
+                    self.resolve_binary_op(left.get_type(), Operator::Equal, item.get_type())?;
+                    expr = left;
+                    items.push(item);
+                }
+                Ok(AnalyzedExpression::InList {
+                    expr: Box::new(expr),
+                    list: items,
+                    negated: *is_negated,
+                })
+            }
             Expression::Is {
                 expr,
                 predicate,

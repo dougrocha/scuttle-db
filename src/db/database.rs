@@ -1866,6 +1866,107 @@ mod tests {
     }
 
     #[test]
+    fn test_in_and_not_in_follow_sql_null_rules() {
+        let mut db = TestDb::new("in-nulls");
+        db.execute("CREATE TABLE t (id INT, ts TIMESTAMP)");
+        db.execute("INSERT INTO t VALUES (1, '2024-01-01 00:00:00'), (2, NULL), (NULL, NULL)");
+        let ids = |db: &mut TestDb, filter: &str| {
+            db.query(&format!("SELECT id FROM t WHERE {filter}"))
+                .into_iter()
+                .map(|row| row[0].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&mut db, "id IN (2, 1, 9)"),
+            [Value::Int64(1), Value::Int64(2)]
+        );
+        // A NULL id is neither in nor not in the list
+        assert_eq!(ids(&mut db, "id NOT IN (1)"), [Value::Int64(2)]);
+        assert_eq!(ids(&mut db, "id + 1 IN (3)"), [Value::Int64(2)]);
+        // Text in the list becomes a timestamp, as with `=`
+        assert_eq!(
+            ids(&mut db, "ts IN ('2024-01-01 00:00:00')"),
+            [Value::Int64(1)]
+        );
+        assert_eq!(
+            db.query("SELECT id IN (1, id) FROM t"),
+            [[Value::Bool(true)], [Value::Bool(true)], [Value::Null]]
+        );
+        assert!(db.fails("SELECT id FROM t WHERE id IN ('x')"));
+        assert!(db.fails("SELECT id FROM t WHERE id IN (NULL)"));
+    }
+
+    #[test]
+    fn test_in_reads_one_index_range_per_value() {
+        let mut db = TestDb::new("index-in");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, tag TEXT)");
+        db.execute("CREATE TABLE plain (id INT, tag TEXT)");
+        let values: Vec<String> = (0..3000)
+            .map(|n| format!("({}, 't{}')", (n * 7919) % 3000, n % 50))
+            .collect();
+        for table in ["item", "plain"] {
+            db.execute(&format!("INSERT INTO {table} VALUES {}", values.join(", ")));
+            db.execute(&format!("INSERT INTO {table} VALUES (5000, NULL)"));
+        }
+        db.execute("CREATE INDEX item_tag ON item (tag)");
+
+        for (filter, range) in [
+            ("id IN (2999, 5, 77, 5, 0)", "id IN (0, 5, 77, 2999)"),
+            ("id IN (5, 77, 1200) AND id > 5", "id IN (77, 1200)"),
+            ("id IN (5, 77) AND id > 100", "no keys"),
+            ("id = 5 AND id IN (5, 6)", "id = 5"),
+            ("tag IN ('t7', 't3')", "tag IN ('t3', 't7')"),
+            ("tag IN ('t7', 'x')", "tag IN ('t7', 'x')"),
+            // The id range finds 10 rows and the tags 60, so the id index wins
+            ("tag IN ('t7', 'x') AND id < 10", "id < 10"),
+        ] {
+            let sql = |table| format!("SELECT id, tag FROM {table} WHERE {filter} ORDER BY id");
+            assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{filter}");
+            let plan = db.db.explain(&sql("item")).unwrap();
+            assert!(
+                plan.contains(&format!("IndexScan: item ({range})")),
+                "{plan}"
+            );
+        }
+
+        // Each value finds its own rows, nothing in between
+        let plan = db
+            .db
+            .explain("EXPLAIN ANALYZE SELECT id FROM item WHERE id IN (5, 1500, 2999)")
+            .unwrap();
+        assert!(
+            plan.contains("IndexScan: item (id IN (5, 1500, 2999)) (rows=3 "),
+            "{plan}"
+        );
+
+        // The ranges come out in key order, so ORDER BY reads them instead of sorting,
+        // backward for DESC
+        for order in ["", " DESC"] {
+            let sql = |table| {
+                format!(
+                    "SELECT id FROM {table} WHERE id IN (9, 3, 2000, 41) ORDER BY id{order} LIMIT 3"
+                )
+            };
+            assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{order}");
+            let plan = db.db.explain(&sql("item")).unwrap();
+            assert!(!plan.contains("Sort") && !plan.contains("TopN"), "{plan}");
+        }
+
+        // An index can't answer these, so the table is read
+        for filter in [
+            "id NOT IN (1, 2)",
+            "id IN (1, 2.5)",
+            "id IN (1, id)",
+            "id + 0 IN (1)",
+        ] {
+            let sql = |table| format!("SELECT id FROM {table} WHERE {filter} ORDER BY id");
+            assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{filter}");
+            let plan = db.db.explain(&sql("item")).unwrap();
+            assert!(!plan.contains("IndexScan: item (id"), "{filter}\n{plan}");
+        }
+    }
+
+    #[test]
     fn test_explain_shows_the_index_range() {
         let mut db = TestDb::new("index-explain");
         db.execute("CREATE TABLE item (id INT PRIMARY KEY, qty INT)");
