@@ -1,5 +1,6 @@
-//! Rewrites a logical plan before it runs. Three rules, in order:
+//! Rewrites a logical plan before it runs. Four rules, in order:
 //!
+//! - Turn `a = 1 OR a = 2` into `a IN (1, 2)`, which an index can read.
 //! - Read a filtered table through an index when the WHERE clause narrows an indexed
 //!   column.
 //! - Read a table in an index's key order instead of sorting it, for an ORDER BY on an
@@ -11,7 +12,7 @@ use std::{collections::BTreeMap, ops::Bound};
 use miette::Result;
 
 use crate::{
-    Value,
+    DataType, Value,
     db::table::{
         index::{IndexKey, IndexRange, KeyRange, TableIndex},
         table_def::TableDef,
@@ -37,10 +38,168 @@ pub(crate) fn optimize(
     tables: &BTreeMap<String, TableDef>,
     pool: &mut BufferPool,
 ) -> Result<()> {
+    use_in_lists(plan);
     use_indexes(plan, tables, pool)?;
     use_index_order(plan, tables, pool);
     use_top_n(plan);
     Ok(())
+}
+
+/// Rewrites each Filter's `a = 1 OR a = 2 OR b = 3` into `a IN (1, 2) OR b = 3`, so the
+/// index on `a` reads two keys instead of the Filter checking every row.
+///
+/// It only looks through the ANDs and ORs at the top of the condition. There, only
+/// whether a row passes matters. Deeper down, as in `(a = 1 OR a = 2) IS NULL`, the
+/// rewrite would change the answer for a NULL `a`: our OR gives false where IN gives NULL.
+pub(crate) fn use_in_lists(plan: &mut LogicalPlan) {
+    match plan {
+        LogicalPlan::Filter { input, condition } => {
+            let placeholder = AnalyzedExpression::Literal(Value::Bool(true));
+            *condition = or_to_in(std::mem::replace(condition, placeholder));
+            use_in_lists(input);
+        }
+        LogicalPlan::Projection { input, .. }
+        | LogicalPlan::Aggregate { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::TopN { input, .. }
+        | LogicalPlan::Limit { input, .. } => use_in_lists(input),
+        LogicalPlan::Join { left, right, .. } => {
+            use_in_lists(left);
+            use_in_lists(right);
+        }
+        _ => {}
+    }
+}
+
+fn or_to_in(expr: AnalyzedExpression) -> AnalyzedExpression {
+    match expr {
+        AnalyzedExpression::BinaryExpr {
+            op: Operator::Or, ..
+        } => {
+            let mut disjuncts = Vec::new();
+            split_or(expr, &mut disjuncts);
+
+            // Each column's equalities, in the order the columns first appear, and the
+            // disjuncts that aren't equalities, in their own places
+            let mut groups: Vec<(usize, Vec<AnalyzedExpression>)> = Vec::new();
+            let mut parts: Vec<Result<usize, AnalyzedExpression>> = Vec::new();
+            for disjunct in disjuncts {
+                match equality_column(&disjunct) {
+                    Some(column) => match groups.iter_mut().position(|(c, _)| *c == column) {
+                        Some(group) => groups[group].1.push(disjunct),
+                        None => {
+                            parts.push(Ok(groups.len()));
+                            groups.push((column, vec![disjunct]));
+                        }
+                    },
+                    None => parts.push(Err(or_to_in(disjunct))),
+                }
+            }
+
+            let mut groups: Vec<Option<_>> = groups.into_iter().map(Some).collect();
+            parts
+                .into_iter()
+                .map(|part| match part {
+                    Ok(group) => {
+                        let (_, mut equalities) = groups[group].take().unwrap();
+                        if equalities.len() == 1 {
+                            equalities.pop().unwrap()
+                        } else {
+                            merge_equalities(equalities)
+                        }
+                    }
+                    Err(other) => other,
+                })
+                .reduce(|left, right| AnalyzedExpression::BinaryExpr {
+                    left: Box::new(left),
+                    op: Operator::Or,
+                    right: Box::new(right),
+                    return_type: DataType::Bool,
+                })
+                .unwrap()
+        }
+        AnalyzedExpression::BinaryExpr {
+            left,
+            op: Operator::And,
+            right,
+            return_type,
+        } => AnalyzedExpression::BinaryExpr {
+            left: Box::new(or_to_in(*left)),
+            op: Operator::And,
+            right: Box::new(or_to_in(*right)),
+            return_type,
+        },
+        other => other,
+    }
+}
+
+/// The parts of `a OR b OR c`.
+fn split_or(expr: AnalyzedExpression, out: &mut Vec<AnalyzedExpression>) {
+    match expr {
+        AnalyzedExpression::BinaryExpr {
+            left,
+            op: Operator::Or,
+            right,
+            ..
+        } => {
+            split_or(*left, out);
+            split_or(*right, out);
+        }
+        other => out.push(other),
+    }
+}
+
+/// The column of `column = literal`, `literal = column` or `column IN (literals)`.
+fn equality_column(expr: &AnalyzedExpression) -> Option<usize> {
+    match expr {
+        AnalyzedExpression::InList {
+            expr,
+            list,
+            negated: false,
+        } if list
+            .iter()
+            .all(|item| matches!(item, AnalyzedExpression::Literal(_))) =>
+        {
+            match expr.as_ref() {
+                AnalyzedExpression::Column(column, _) => Some(column.index),
+                _ => None,
+            }
+        }
+        _ => match column_vs_literal(expr)? {
+            (column, Operator::Equal, _) => Some(column),
+            _ => None,
+        },
+    }
+}
+
+/// One `column IN (...)` holding the values of `equalities`, which all pass
+/// [`equality_column`] for the same column.
+fn merge_equalities(equalities: Vec<AnalyzedExpression>) -> AnalyzedExpression {
+    let mut column = None;
+    let mut values = Vec::new();
+    for equality in equalities {
+        match equality {
+            AnalyzedExpression::InList { expr, list, .. } => {
+                column.get_or_insert(expr);
+                values.extend(list);
+            }
+            AnalyzedExpression::BinaryExpr { left, right, .. } => {
+                let (col, value) = match (*left, *right) {
+                    (col @ AnalyzedExpression::Column(..), value)
+                    | (value, col @ AnalyzedExpression::Column(..)) => (col, value),
+                    _ => unreachable!("equality_column checked for a column"),
+                };
+                column.get_or_insert(Box::new(col));
+                values.push(value);
+            }
+            _ => unreachable!("equality_column checked the shape"),
+        }
+    }
+    AnalyzedExpression::InList {
+        expr: column.expect("at least one equality"),
+        list: values,
+        negated: false,
+    }
 }
 
 /// Removes the Sort when its one key is an indexed column of the table it sorts. The Scan
