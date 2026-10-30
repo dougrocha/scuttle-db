@@ -269,7 +269,8 @@ impl TableIndex {
         IndexKey::for_column(&self.data_type, value)
     }
 
-    /// The rows whose key is within `range`, in key order, read as they are asked for.
+    /// The rows whose key is within `range`, in key order, or largest key first if the
+    /// range is `descending`. They are read as they are asked for.
     pub(crate) fn scan(&self, pool: &mut BufferPool, range: &IndexRange) -> Result<IndexCursor> {
         let encode = |key: &IndexKey| {
             let mut bytes = Vec::new();
@@ -287,15 +288,34 @@ impl TableIndex {
             Bound::Unbounded => Bound::Unbounded,
         };
 
-        // Every entry of a key starts with the key's bytes, so they all sort at or after it
-        let start = match &lower {
-            Bound::Included(key) | Bound::Excluded(key) => key.as_slice(),
-            Bound::Unbounded => &[],
+        let cursor = if range.descending {
+            // Starts before the first entry past the upper bound. An entry is its key's
+            // bytes and then a ctid, so every entry of `key` sorts after `key` itself and
+            // before `key` followed by more 0xFF bytes than a ctid has. No key's bytes
+            // start with another key's bytes, so no other key sorts in between.
+            let start = match &upper {
+                Bound::Included(key) => {
+                    let mut past = key.clone();
+                    past.extend_from_slice(&[0xFF; CTID_LEN + 1]);
+                    Some(past)
+                }
+                Bound::Excluded(key) => Some(key.clone()),
+                Bound::Unbounded => None,
+            };
+            self.tree.seek_back(pool, start.as_deref())?
+        } else {
+            // Every entry of a key starts with the key's bytes, so they all sort at or after it
+            let start = match &lower {
+                Bound::Included(key) | Bound::Excluded(key) => key.as_slice(),
+                Bound::Unbounded => &[],
+            };
+            self.tree.seek(pool, start)?
         };
         Ok(IndexCursor {
-            cursor: self.tree.seek(pool, start)?,
+            cursor,
             lower,
             upper,
+            descending: range.descending,
         })
     }
 
@@ -365,6 +385,7 @@ impl TableIndex {
                 column: self.column,
                 lower: Bound::Included(key.clone()),
                 upper: Bound::Included(key.clone()),
+                descending: false,
             };
             let mut taken = false;
             let mut rows = self.scan(pool, &range)?;
@@ -392,15 +413,30 @@ impl TableIndex {
 pub(crate) struct IndexCursor {
     cursor: Cursor,
 
-    /// The range's bounds, as encoded keys. The cursor starts at the lower bound, but
-    /// still has to skip a key the lower bound excludes.
+    /// The range's bounds, as encoded keys. A cursor going up starts at the lower bound,
+    /// but still has to skip a key the lower bound excludes. A cursor going down starts
+    /// below the upper bound, past any key it excludes.
     lower: Bound<Vec<u8>>,
     upper: Bound<Vec<u8>>,
+    descending: bool,
 }
 
 impl IndexCursor {
     /// The next row in the range, or `None` past its end.
     pub(crate) fn next(&mut self, pool: &mut BufferPool) -> Result<Option<Ctid>> {
+        if self.descending {
+            let Some(entry) = self.cursor.prev(pool)? else {
+                return Ok(None);
+            };
+            let key = &entry[..entry.len() - CTID_LEN];
+            let past_end = match &self.lower {
+                Bound::Included(lower) => key < lower.as_slice(),
+                Bound::Excluded(lower) => key <= lower.as_slice(),
+                Bound::Unbounded => false,
+            };
+            return Ok((!past_end).then(|| entry_ctid(&entry)));
+        }
+
         while let Some(entry) = self.cursor.next(pool)? {
             let key = &entry[..entry.len() - CTID_LEN];
             if let Bound::Excluded(lower) = &self.lower
@@ -429,6 +465,9 @@ pub(crate) struct IndexRange {
     pub(crate) column: usize,
     pub(crate) lower: Bound<IndexKey>,
     pub(crate) upper: Bound<IndexKey>,
+
+    /// Read the range largest key first, for an `ORDER BY ... DESC`.
+    pub(crate) descending: bool,
 }
 
 impl std::fmt::Display for IndexKey {

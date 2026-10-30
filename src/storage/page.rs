@@ -5,7 +5,7 @@ use crate::core::serialization::Serializable;
 pub type PageId = u32;
 pub type ItemId = u16;
 
-/// Stands for "no page" where a page id is stored, as in a last leaf's `next`.
+/// Stands for "no page" where a page id is stored, as in the last leaf's `next`.
 const NO_PAGE: PageId = PageId::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -13,8 +13,10 @@ pub enum PageType {
     /// A B-tree page above the leaves. Item `i` is a child page and the lowest key in it.
     BTreeInternal,
 
-    /// A B-tree page holding keys. `next` is the leaf to its right, for walking a range.
+    /// A B-tree page holding keys. `prev` and `next` are the leaves to its left and right,
+    /// so a range can be walked either way, as Postgres's `btpo_prev` and `btpo_next` allow.
     BTreeLeaf {
+        prev: Option<PageId>,
         next: Option<PageId>,
     },
 
@@ -66,8 +68,9 @@ impl Serializable<{ PageHeader::SIZE }> for PageHeader {
         data[7..9].copy_from_slice(&this.upper.to_le_bytes());
         data[9..11].copy_from_slice(&this.item_count.to_le_bytes());
         data[11..13].copy_from_slice(&this.special.to_le_bytes());
-        if let PageType::BTreeLeaf { next } = this.page_type {
+        if let PageType::BTreeLeaf { prev, next } = this.page_type {
             data[13..17].copy_from_slice(&next.unwrap_or(NO_PAGE).to_le_bytes());
+            data[17..21].copy_from_slice(&prev.unwrap_or(NO_PAGE).to_le_bytes());
         }
         data
     }
@@ -79,9 +82,13 @@ impl Serializable<{ PageHeader::SIZE }> for PageHeader {
             1 => PageType::Catalog,
             2 => PageType::BTreeInternal,
             3 => {
-                let next = u32::from_le_bytes(data[13..17].try_into().unwrap());
+                let link = |bytes: &[u8]| {
+                    let page = u32::from_le_bytes(bytes.try_into().unwrap());
+                    (page != NO_PAGE).then_some(page)
+                };
                 PageType::BTreeLeaf {
-                    next: (next != NO_PAGE).then_some(next),
+                    prev: link(&data[17..21]),
+                    next: link(&data[13..17]),
                 }
             }
             4 => PageType::BTreeMeta,
@@ -514,8 +521,14 @@ mod test {
     pub fn test_btree_page_types_round_trip() {
         for page_type in [
             PageType::BTreeInternal,
-            PageType::BTreeLeaf { next: None },
-            PageType::BTreeLeaf { next: Some(7) },
+            PageType::BTreeLeaf {
+                prev: None,
+                next: None,
+            },
+            PageType::BTreeLeaf {
+                prev: Some(2),
+                next: Some(7),
+            },
             PageType::BTreeMeta,
         ] {
             let page = Page::new(3, page_type);
@@ -528,7 +541,13 @@ mod test {
 
     #[test]
     pub fn test_insert_at_and_remove_at_keep_items_in_position() {
-        let mut page = Page::new(0, PageType::BTreeLeaf { next: None });
+        let mut page = Page::new(
+            0,
+            PageType::BTreeLeaf {
+                prev: None,
+                next: None,
+            },
+        );
         for (pos, item) in [(0, "c"), (0, "a"), (1, "b"), (3, "d")] {
             page.insert_at(pos, item.as_bytes()).unwrap();
         }

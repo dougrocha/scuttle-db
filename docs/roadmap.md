@@ -243,7 +243,7 @@ g.**
 - [ ] 1a. Index NULLs as a key that sorts after every value, so a scan in key order sees every row. UNIQUE still lets NULLs repeat, and ranges skip them.
 - [x] 1b. `ORDER BY col [ASC] LIMIT n` on an indexed column: IndexScan in key order, no Sort, stops early. NOT NULL columns only until 1a. On 1M rows, `ORDER BY id LIMIT 10` reads 1,024 rows in 0.3 ms. With `WHERE id > 500000` the scan starts at 500000. Planning that query takes 6 ms, because the WHERE rule counts up to 10% of the index before deciding against it.
 - [ ] 1c. Decide when ORDER BY without LIMIT should use the index, by measuring a full index-order scan against Scan + Sort on 1M rows.
-- [ ] 1d. DESC: a `prev` link in each leaf, so a scan can walk leaves right to left.
+- [x] 1d. DESC: a `prev` link in each leaf, so a scan can walk leaves right to left, as Postgres's `btpo_prev` allows. SQLite instead keeps the path from the root in its cursor and has no sibling links. We chose the Postgres way. A split now also fixes the `prev` of the page to its right. EXPLAIN shows `IndexScan Backward`. Rows with equal keys come out in reverse storage order, which SQL allows. On 1M rows, `ORDER BY id DESC LIMIT 10` takes 0.28 ms, against 140 ms for TopN on the table without an index.
 - [ ] 2. Parse `col IN (...)`, and let an IndexScan carry several sorted ranges.
 - [ ] 3a. Rewrite `a = 1 OR a = 2` into `a IN (1, 2)`.
 - [ ] 3b. OR across two indexes: union the row locations, sorted by page (BitmapOr).

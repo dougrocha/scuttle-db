@@ -47,8 +47,10 @@ pub(crate) fn optimize(
 /// sorts. The Scan reads that column's index in key order instead, so the LIMIT stops
 /// it after the first batch.
 ///
-/// Rows with equal keys come out in the order they are stored, as the Sort's stable sort
-/// would put them, because an index entry ends with the row's location.
+/// For ASC, rows with equal keys come out in the order they are stored, as the Sort's
+/// stable sort would put them, because an index entry ends with the row's location. DESC
+/// reads the index backward, which returns them in reverse storage order. SQL leaves the
+/// order of ties undefined, and Postgres's backward index scans do the same.
 ///
 /// Without a LIMIT the Sort stays: reading every row through the index jumps around the
 /// table file, which may cost more than reading it in order and sorting.
@@ -70,13 +72,13 @@ fn remove_sort(plan: &mut LogicalPlan, tables: &BTreeMap<String, TableDef>) {
             let [
                 SortKey {
                     expr: AnalyzedExpression::Column(column, _),
-                    descending: false,
+                    descending,
                 },
             ] = keys.as_slice()
             else {
                 return;
             };
-            if scan_in_key_order(input, column.index, tables, None) {
+            if scan_in_key_order(input, column.index, *descending, tables, None) {
                 let input = std::mem::replace(
                     input.as_mut(),
                     LogicalPlan::Values {
@@ -91,7 +93,8 @@ fn remove_sort(plan: &mut LogicalPlan, tables: &BTreeMap<String, TableDef>) {
 }
 
 /// Makes the Scan under `plan`, looking through a Filter, read the index on `column` in
-/// key order. Returns false, changing nothing, if it can't.
+/// key order, or largest key first if `descending`. Returns false, changing nothing, if
+/// it can't.
 ///
 /// The scan reads only the part of the index that the Filter's `condition` allows, so
 /// `WHERE id > 500000 ORDER BY id` starts at 500000 instead of filtering out every row
@@ -99,12 +102,13 @@ fn remove_sort(plan: &mut LogicalPlan, tables: &BTreeMap<String, TableDef>) {
 fn scan_in_key_order(
     plan: &mut LogicalPlan,
     column: usize,
+    descending: bool,
     tables: &BTreeMap<String, TableDef>,
     condition: Option<&AnalyzedExpression>,
 ) -> bool {
     match plan {
         LogicalPlan::Filter { input, condition } => {
-            scan_in_key_order(input, column, tables, Some(condition))
+            scan_in_key_order(input, column, descending, tables, Some(condition))
         }
         LogicalPlan::Scan {
             table_name,
@@ -124,17 +128,24 @@ fn scan_in_key_order(
             };
             match index {
                 // The WHERE clause already reads this index, and a range comes out in order
-                Some(range) => range.column == column,
+                Some(range) if range.column == column => {
+                    range.descending = descending;
+                    true
+                }
+                Some(_) => false,
                 None => {
                     let mut conjuncts = Vec::new();
                     if let Some(condition) = condition {
                         split_and(condition, &mut conjuncts);
                     }
-                    *index = Some(narrow(by_column, &conjuncts).unwrap_or(IndexRange {
+                    let mut range = narrow(by_column, &conjuncts).unwrap_or(IndexRange {
                         column,
                         lower: Bound::Unbounded,
                         upper: Bound::Unbounded,
-                    }));
+                        descending: false,
+                    });
+                    range.descending = descending;
+                    *index = Some(range);
                     true
                 }
             }
@@ -242,6 +253,7 @@ fn narrow(index: &TableIndex, conjuncts: &[&AnalyzedExpression]) -> Option<Index
         column: index.column,
         lower: Bound::Unbounded,
         upper: Bound::Unbounded,
+        descending: false,
     };
     let mut narrowed = false;
 

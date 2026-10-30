@@ -1763,6 +1763,14 @@ mod tests {
             "WHERE tag = 't3' ORDER BY id LIMIT 6",
             "ORDER BY grp LIMIT 2000",
             "WHERE grp = 2 ORDER BY grp LIMIT 50",
+            "ORDER BY id DESC LIMIT 5",
+            "ORDER BY id DESC LIMIT 5 OFFSET 2995",
+            "WHERE id < 1500 ORDER BY id DESC LIMIT 4",
+            "WHERE id <= 1500 ORDER BY id DESC LIMIT 4",
+            "WHERE id > 2990 ORDER BY id DESC LIMIT 100",
+            "WHERE id >= 10 AND id <= 20 ORDER BY id DESC LIMIT 100",
+            "WHERE id = 42 ORDER BY id DESC LIMIT 3",
+            "WHERE tag = 't3' ORDER BY id DESC LIMIT 6",
         ] {
             let sql = |table| format!("SELECT id, grp, tag FROM {table} {query}");
             assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{query}");
@@ -1773,6 +1781,37 @@ mod tests {
             );
         }
 
+        // A backward scan stops at an excluded lower bound itself, not only in the Filter
+        let plan = db
+            .db
+            .explain(
+                "EXPLAIN ANALYZE SELECT id FROM item WHERE id > 2990 ORDER BY id DESC LIMIT 100",
+            )
+            .unwrap();
+        assert!(
+            plan.contains("IndexScan Backward: item (id > 2990) (rows=11 "),
+            "{plan}"
+        );
+
+        // DESC returns tied rows in reverse storage order, which SQL allows. The same rows
+        // come back, each group in place.
+        use crate::sql::evaluator::compare_values;
+        let sql = |table| {
+            format!("SELECT grp, id, tag FROM {table} WHERE grp >= 2 ORDER BY grp DESC LIMIT 5000")
+        };
+        let mut indexed = db.query(&sql("item"));
+        assert!(
+            db.db
+                .explain(&sql("item"))
+                .unwrap()
+                .contains("IndexScan Backward: item")
+        );
+        assert!(indexed.is_sorted_by(|a, b| compare_values(&a[0], &b[0]).is_ge()));
+        let mut plain = db.query(&sql("plain"));
+        indexed.sort_by(|a, b| compare_values(&a[1], &b[1]));
+        plain.sort_by(|a, b| compare_values(&a[1], &b[1]));
+        assert_eq!(indexed, plain);
+
         // The scan starts where the WHERE clause allows, not at the first key
         let plan = db
             .db
@@ -1782,7 +1821,7 @@ mod tests {
         // These still sort: no LIMIT, DESC, an expression, a nullable column, and two keys
         for query in [
             "ORDER BY id",
-            "ORDER BY id DESC LIMIT 5",
+            "ORDER BY id DESC",
             "ORDER BY id + 0 LIMIT 5",
             "ORDER BY tag LIMIT 5000",
             "ORDER BY grp, id LIMIT 5",

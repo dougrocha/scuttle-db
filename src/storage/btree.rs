@@ -6,8 +6,10 @@
 //!
 //! Page 0 is the metapage: where the root is and how many entries the tree holds. Every
 //! other page is a node:
-//! - A leaf holds entries in order, and the id of the leaf to its right, so a range scan
-//!   finds its first entry and then walks along the leaves.
+//! - A leaf holds entries in order, and the ids of the leaves to its left and right. A
+//!   range scan finds its first entry and walks right along the leaves, or finds its last
+//!   entry and walks left for a descending scan. Postgres links its leaves both ways for
+//!   the same reason.
 //! - An internal page holds items of (child page, lowest entry in that child). The first
 //!   item's entry is left empty: it stands for "anything smaller than the next one".
 //!
@@ -40,6 +42,12 @@ const ROOM: usize = CHILD_LEN + MAX_ENTRY + ItemPointer::SIZE;
 /// The metapage.
 const META: PageId = 0;
 
+/// A leaf with no neighbors, such as the root of a new tree.
+const LONE_LEAF: PageType = PageType::BTreeLeaf {
+    prev: None,
+    next: None,
+};
+
 /// Space [`BTree::build`] leaves free in each page, so the next inserts don't split every
 /// page at once. A tenth of the page, the same as Postgres' default fillfactor of 90.
 const FILL_SLACK: usize = Page::SIZE / 10;
@@ -66,7 +74,7 @@ impl BTree {
 
         let tree = Self::open(name);
         pool.allocate_page(name, PageType::BTreeMeta)?;
-        let root = pool.allocate_page(name, PageType::BTreeLeaf { next: None })?;
+        let root = pool.allocate_page(name, LONE_LEAF)?;
         tree.write_meta(pool, Meta { root, len: 0 })?;
         Ok(tree)
     }
@@ -101,9 +109,17 @@ impl BTree {
                 .get_page(name, leaf)?
                 .has_room_for(entry.len() + FILL_SLACK)
             {
-                let next = pool.allocate_page(name, PageType::BTreeLeaf { next: None })?;
-                pool.get_page_mut(name, leaf)?.header.page_type =
-                    PageType::BTreeLeaf { next: Some(next) };
+                let next = pool.allocate_page(
+                    name,
+                    PageType::BTreeLeaf {
+                        prev: Some(leaf),
+                        next: None,
+                    },
+                )?;
+                let page = pool.get_page_mut(name, leaf)?;
+                if let PageType::BTreeLeaf { next: link, .. } = &mut page.header.page_type {
+                    *link = Some(next);
+                }
                 leaf = next;
             }
             if level.last().is_none_or(|&(page_id, _)| page_id != leaf) {
@@ -262,13 +278,27 @@ impl BTree {
 
         let right_id = pool.allocate_page(&self.name, page_type)?;
         let (left_type, right_type) = match page_type {
-            // The new leaf goes into the chain between the old one and its right neighbor
-            PageType::BTreeLeaf { next } => (
-                PageType::BTreeLeaf {
-                    next: Some(right_id),
-                },
-                PageType::BTreeLeaf { next },
-            ),
+            // The new leaf goes into the chain between the old one and its right neighbor,
+            // which now has the new leaf to its left. Fixing that neighbor is the one page
+            // a split writes that isn't the parent or the two halves, as in Postgres.
+            PageType::BTreeLeaf { prev, next } => {
+                if let Some(next) = next {
+                    let page = pool.get_page_mut(&self.name, next)?;
+                    if let PageType::BTreeLeaf { prev: link, .. } = &mut page.header.page_type {
+                        *link = Some(right_id);
+                    }
+                }
+                (
+                    PageType::BTreeLeaf {
+                        prev,
+                        next: Some(right_id),
+                    },
+                    PageType::BTreeLeaf {
+                        prev: Some(child_id),
+                        next,
+                    },
+                )
+            }
             page_type => (page_type, page_type),
         };
 
@@ -327,6 +357,46 @@ impl BTree {
         })
     }
 
+    /// A cursor whose [`Cursor::prev`] returns the entries `< target`, largest first, or
+    /// every entry from the last when `target` is `None`.
+    pub(crate) fn seek_back(&self, pool: &mut BufferPool, target: Option<&[u8]>) -> Result<Cursor> {
+        let root = self.meta(pool)?.root;
+        let (leaf, pos) = match target {
+            Some(target) => {
+                let leaf = self.find_leaf(pool, root, target)?;
+                let (Ok(pos) | Err(pos)) = search_leaf(pool.get_page(&self.name, leaf)?, target);
+                (leaf, pos)
+            }
+            None => {
+                let leaf = self.last_leaf(pool, root)?;
+                (
+                    leaf,
+                    pool.get_page(&self.name, leaf)?.header.item_count as usize,
+                )
+            }
+        };
+
+        Ok(Cursor {
+            name: self.name.clone(),
+            page: Some(leaf),
+            pos,
+        })
+    }
+
+    /// The rightmost leaf under `page_id`.
+    fn last_leaf(&self, pool: &mut BufferPool, mut page_id: PageId) -> Result<PageId> {
+        loop {
+            let page = pool.get_page(&self.name, page_id)?;
+            match page.header.page_type {
+                PageType::BTreeLeaf { .. } => return Ok(page_id),
+                PageType::BTreeInternal => {
+                    page_id = child_at(page, page.header.item_count as usize - 1);
+                }
+                other => return Err(not_a_node(&self.name, page_id, other)),
+            }
+        }
+    }
+
     /// The leaf where `target` is or would be.
     fn find_leaf(
         &self,
@@ -375,7 +445,8 @@ impl BTree {
     }
 }
 
-/// A position in the tree's entries, moved forward by [`Cursor::next`].
+/// A position between two of the tree's entries, moved right by [`Cursor::next`] and left
+/// by [`Cursor::prev`].
 ///
 /// It keeps a page id and a position, not a borrowed page, so the pool stays free for
 /// other work between entries. The tree must not change while a cursor is in use.
@@ -398,11 +469,31 @@ impl Cursor {
                 return Ok(Some(item_at(page, self.pos - 1).to_vec()));
             }
 
-            let PageType::BTreeLeaf { next } = page.header.page_type else {
+            let PageType::BTreeLeaf { next, .. } = page.header.page_type else {
                 return Err(not_a_node(&self.name, page_id, page.header.page_type));
             };
             self.page = next;
             self.pos = 0;
+        }
+        Ok(None)
+    }
+
+    /// The entry before the cursor, which then moves before it. `None` at the start.
+    pub(crate) fn prev(&mut self, pool: &mut BufferPool) -> Result<Option<Vec<u8>>> {
+        while let Some(page_id) = self.page {
+            let page = pool.get_page(&self.name, page_id)?;
+            if self.pos > 0 {
+                self.pos -= 1;
+                return Ok(Some(item_at(page, self.pos).to_vec()));
+            }
+
+            let PageType::BTreeLeaf { prev, .. } = page.header.page_type else {
+                return Err(not_a_node(&self.name, page_id, page.header.page_type));
+            };
+            self.page = prev;
+            if let Some(prev) = prev {
+                self.pos = pool.get_page(&self.name, prev)?.header.item_count as usize;
+            }
         }
         Ok(None)
     }
@@ -529,10 +620,20 @@ mod tests {
         entries
     }
 
+    /// The entries `< before`, or all of them, largest first.
+    fn scan_back(tree: &BTree, pool: &mut BufferPool, before: Option<&[u8]>) -> Vec<Vec<u8>> {
+        let mut cursor = tree.seek_back(pool, before).unwrap();
+        let mut entries = Vec::new();
+        while let Some(entry) = cursor.prev(pool).unwrap() {
+            entries.push(entry);
+        }
+        entries
+    }
+
     /// Checks the tree's shape:
     /// - entries in each node are in order, and within the bounds its parent gives it
     /// - every leaf is at the same depth
-    /// - the leaf chain visits every leaf, left to right
+    /// - the `next` links visit every leaf left to right, and the `prev` links right to left
     fn check(tree: &BTree, pool: &mut BufferPool) {
         fn walk(
             tree: &BTree,
@@ -591,17 +692,29 @@ mod tests {
             "leaves at different depths"
         );
 
-        let mut chain = vec![leaves[0].0];
-        while let PageType::BTreeLeaf { next: Some(next) } = pool
-            .get_page(tree.name(), *chain.last().unwrap())
+        let links = |pool: &mut BufferPool, page_id| match pool
+            .get_page(tree.name(), page_id)
             .unwrap()
             .header
             .page_type
         {
+            PageType::BTreeLeaf { prev, next } => (prev, next),
+            other => panic!("page {page_id} is a {other:?}, not a leaf"),
+        };
+        let in_order: Vec<PageId> = leaves.iter().map(|&(page_id, _)| page_id).collect();
+
+        let mut chain = vec![in_order[0]];
+        while let (_, Some(next)) = links(pool, *chain.last().unwrap()) {
             chain.push(next);
         }
-        let in_order: Vec<PageId> = leaves.iter().map(|&(page_id, _)| page_id).collect();
-        assert_eq!(chain, in_order, "the leaf chain skips or repeats leaves");
+        assert_eq!(chain, in_order, "the next links skip or repeat leaves");
+
+        let mut back = vec![*in_order.last().unwrap()];
+        while let (Some(prev), _) = links(pool, *back.last().unwrap()) {
+            back.push(prev);
+        }
+        back.reverse();
+        assert_eq!(back, in_order, "the prev links skip or repeat leaves");
     }
 
     #[test]
@@ -631,6 +744,47 @@ mod tests {
         }
         assert_eq!(root_type(&mut pool), PageType::BTreeInternal);
         check(&tree, &mut pool);
+    }
+
+    #[test]
+    fn test_a_backward_scan_returns_entries_largest_first() {
+        let mut pool = BufferPool::in_memory();
+        let tree = BTree::create(&mut pool, "t.index").unwrap();
+        assert!(scan_back(&tree, &mut pool, None).is_empty());
+
+        let mut rng = Rng(0xbac4);
+        let mut expected = BTreeSet::new();
+        for _ in 0..20_000 {
+            let entry = rng.entry();
+            if expected.insert(entry.clone()) {
+                tree.insert(&mut pool, &entry).unwrap();
+            }
+        }
+        // Removes empty some leaves, which a backward scan has to step over
+        let removed: Vec<Vec<u8>> = expected.iter().take(3000).cloned().collect();
+        for entry in &removed {
+            tree.remove(&mut pool, entry).unwrap();
+            expected.remove(entry);
+        }
+        check(&tree, &mut pool);
+
+        let all: Vec<Vec<u8>> = expected.iter().rev().cloned().collect();
+        assert_eq!(scan_back(&tree, &mut pool, None), all);
+        for _ in 0..50 {
+            let before = rng.entry();
+            let below: Vec<Vec<u8>> = expected.range(..before.clone()).rev().cloned().collect();
+            assert_eq!(scan_back(&tree, &mut pool, Some(&before)), below);
+        }
+        // An entry that is in the tree is not returned for itself
+        let present = expected.iter().nth(5000).unwrap().clone();
+        let below: Vec<Vec<u8>> = expected.range(..present.clone()).rev().cloned().collect();
+        assert_eq!(scan_back(&tree, &mut pool, Some(&present)), below);
+
+        // A tree built bottom up links its leaves both ways too
+        let mut pool = BufferPool::in_memory();
+        let built = BTree::build(&mut pool, "b.index", expected.iter().cloned().map(Ok)).unwrap();
+        check(&built, &mut pool);
+        assert_eq!(scan_back(&built, &mut pool, None), all);
     }
 
     #[test]

@@ -29,6 +29,9 @@ fn write_node(plan: &LogicalPlan, depth: usize, lines: &mut Vec<String>) {
             index,
         } => {
             let mut line = match index {
+                Some(range) if range.descending => {
+                    format!("{indent}IndexScan Backward: {table_name}")
+                }
                 Some(_) => format!("{indent}IndexScan: {table_name}"),
                 None => format!("{indent}Scan: {table_name}"),
             };
