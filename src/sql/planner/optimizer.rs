@@ -1,6 +1,10 @@
-//! Rewrites a logical plan before it runs. Two rules: read a filtered table through an
-//! index when the WHERE clause narrows an indexed column, and keep only the rows a LIMIT
-//! needs instead of sorting all of them.
+//! Rewrites a logical plan before it runs. Three rules, in order:
+//!
+//! - Read a filtered table through an index when the WHERE clause narrows an indexed
+//!   column.
+//! - Read a table in an index's key order instead of sorting it, for an ORDER BY with a
+//!   LIMIT.
+//! - Keep only the rows a LIMIT needs instead of sorting all of them.
 
 use std::{collections::BTreeMap, ops::Bound};
 
@@ -12,7 +16,11 @@ use crate::{
         index::{IndexKey, IndexRange, TableIndex},
         table_def::TableDef,
     },
-    sql::{analyzer::AnalyzedExpression, ast::operator::Operator, planner::logical::LogicalPlan},
+    sql::{
+        analyzer::AnalyzedExpression,
+        ast::operator::Operator,
+        planner::logical::{LogicalPlan, SortKey},
+    },
     storage::buffer_pool::BufferPool,
 };
 
@@ -30,8 +38,109 @@ pub(crate) fn optimize(
     pool: &mut BufferPool,
 ) -> Result<()> {
     use_indexes(plan, tables, pool)?;
+    use_index_order(plan, tables);
     use_top_n(plan);
     Ok(())
+}
+
+/// Removes the Sort under a LIMIT when its one key is an indexed column of the table it
+/// sorts. The Scan reads that column's index in key order instead, so the LIMIT stops
+/// it after the first batch.
+///
+/// Rows with equal keys come out in the order they are stored, as the Sort's stable sort
+/// would put them, because an index entry ends with the row's location.
+///
+/// Without a LIMIT the Sort stays: reading every row through the index jumps around the
+/// table file, which may cost more than reading it in order and sorting.
+pub(crate) fn use_index_order(plan: &mut LogicalPlan, tables: &BTreeMap<String, TableDef>) {
+    if let LogicalPlan::Limit {
+        input,
+        limit: Some(_),
+        ..
+    } = plan
+    {
+        remove_sort(input, tables);
+    }
+}
+
+fn remove_sort(plan: &mut LogicalPlan, tables: &BTreeMap<String, TableDef>) {
+    match plan {
+        LogicalPlan::Projection { input, .. } => remove_sort(input, tables),
+        LogicalPlan::Sort { input, keys } => {
+            let [
+                SortKey {
+                    expr: AnalyzedExpression::Column(column, _),
+                    descending: false,
+                },
+            ] = keys.as_slice()
+            else {
+                return;
+            };
+            if scan_in_key_order(input, column.index, tables, None) {
+                let input = std::mem::replace(
+                    input.as_mut(),
+                    LogicalPlan::Values {
+                        expressions: vec![],
+                    },
+                );
+                *plan = input;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Makes the Scan under `plan`, looking through a Filter, read the index on `column` in
+/// key order. Returns false, changing nothing, if it can't.
+///
+/// The scan reads only the part of the index that the Filter's `condition` allows, so
+/// `WHERE id > 500000 ORDER BY id` starts at 500000 instead of filtering out every row
+/// before it.
+fn scan_in_key_order(
+    plan: &mut LogicalPlan,
+    column: usize,
+    tables: &BTreeMap<String, TableDef>,
+    condition: Option<&AnalyzedExpression>,
+) -> bool {
+    match plan {
+        LogicalPlan::Filter { input, condition } => {
+            scan_in_key_order(input, column, tables, Some(condition))
+        }
+        LogicalPlan::Scan {
+            table_name,
+            schema,
+            index,
+            ..
+        } => {
+            // An index leaves out NULLs, so a nullable column would lose its NULL rows
+            if schema.columns[column].is_nullable() {
+                return false;
+            }
+            let Some(by_column) = tables
+                .get(table_name.as_str())
+                .and_then(|table| table.indexes.iter().find(|i| i.column == column))
+            else {
+                return false;
+            };
+            match index {
+                // The WHERE clause already reads this index, and a range comes out in order
+                Some(range) => range.column == column,
+                None => {
+                    let mut conjuncts = Vec::new();
+                    if let Some(condition) = condition {
+                        split_and(condition, &mut conjuncts);
+                    }
+                    *index = Some(narrow(by_column, &conjuncts).unwrap_or(IndexRange {
+                        column,
+                        lower: Bound::Unbounded,
+                        upper: Bound::Unbounded,
+                    }));
+                    true
+                }
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Turns the Sort under a `LIMIT n OFFSET m` into a TopN that keeps only `n + m` rows.

@@ -1731,6 +1731,73 @@ mod tests {
     }
 
     #[test]
+    fn test_order_by_with_limit_reads_an_index_in_key_order() {
+        let mut db = TestDb::new("index-order");
+        db.execute("CREATE TABLE item (id INT PRIMARY KEY, grp INT NOT NULL, tag TEXT)");
+        db.execute("CREATE TABLE plain (id INT, grp INT, tag TEXT)");
+        // Ids out of order, and few groups so most rows tie on grp
+        let values: Vec<String> = (0..3000)
+            .map(|n| format!("({}, {}, 't{}')", (n * 7919) % 3000, n % 4, n % 5))
+            .collect();
+        for table in ["item", "plain"] {
+            db.execute(&format!("INSERT INTO {table} VALUES {}", values.join(", ")));
+        }
+        db.execute("CREATE INDEX item_grp ON item (grp)");
+        // NULLs aren't in an index, so ordering by `tag` through its index would lose them
+        db.execute("CREATE INDEX item_tag ON item (tag)");
+        for table in ["item", "plain"] {
+            db.execute(&format!(
+                "INSERT INTO {table} VALUES (5000, 0, NULL), (5001, 1, NULL)"
+            ));
+        }
+        // An UPDATE moves rows to the end of the table, which reorders their ties
+        for table in ["item", "plain"] {
+            db.execute(&format!("UPDATE {table} SET tag = 'moved' WHERE id < 100"));
+        }
+
+        for query in [
+            "ORDER BY id LIMIT 5",
+            "ORDER BY id LIMIT 5 OFFSET 2990",
+            "WHERE id > 1500 ORDER BY id LIMIT 4",
+            "WHERE id >= 10 AND id < 20 ORDER BY id LIMIT 100",
+            "WHERE tag = 't3' ORDER BY id LIMIT 6",
+            "ORDER BY grp LIMIT 2000",
+            "WHERE grp = 2 ORDER BY grp LIMIT 50",
+        ] {
+            let sql = |table| format!("SELECT id, grp, tag FROM {table} {query}");
+            assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{query}");
+            let plan = db.db.explain(&sql("item")).unwrap();
+            assert!(
+                plan.contains("IndexScan") && !plan.contains("Sort") && !plan.contains("TopN"),
+                "{query}\n{plan}"
+            );
+        }
+
+        // The scan starts where the WHERE clause allows, not at the first key
+        let plan = db
+            .db
+            .explain("SELECT id FROM item WHERE id > 1500 ORDER BY id LIMIT 4");
+        assert!(plan.unwrap().contains("IndexScan: item (id > 1500)"));
+
+        // These still sort: no LIMIT, DESC, an expression, a nullable column, and two keys
+        for query in [
+            "ORDER BY id",
+            "ORDER BY id DESC LIMIT 5",
+            "ORDER BY id + 0 LIMIT 5",
+            "ORDER BY tag LIMIT 5000",
+            "ORDER BY grp, id LIMIT 5",
+        ] {
+            let sql = |table| format!("SELECT id, grp, tag FROM {table} {query}");
+            assert_eq!(db.query(&sql("item")), db.query(&sql("plain")), "{query}");
+            let plan = db.db.explain(&sql("item")).unwrap();
+            assert!(
+                plan.contains("Sort") || plan.contains("TopN"),
+                "{query}\n{plan}"
+            );
+        }
+    }
+
+    #[test]
     fn test_explain_shows_the_index_range() {
         let mut db = TestDb::new("index-explain");
         db.execute("CREATE TABLE item (id INT PRIMARY KEY, qty INT)");

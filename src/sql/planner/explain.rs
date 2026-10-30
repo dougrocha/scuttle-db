@@ -205,6 +205,10 @@ fn render_keys(input: &LogicalPlan, keys: &[SortKey]) -> String {
 }
 
 fn render_range(column: &str, range: &IndexRange) -> String {
+    // The whole index, read for its order
+    if (&range.lower, &range.upper) == (&Bound::Unbounded, &Bound::Unbounded) {
+        return format!("by {column}");
+    }
     if let (Bound::Included(lo), Bound::Included(hi)) = (&range.lower, &range.upper)
         && lo == hi
     {
