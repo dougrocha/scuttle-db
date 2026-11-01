@@ -606,3 +606,26 @@ fn test_update_and_delete_find_their_rows_through_an_index() {
         "Delete: item\n  Filter: qty = 7\n    Scan: item"
     );
 }
+
+#[test]
+fn test_an_update_of_the_key_it_scans_by_changes_each_row_once() {
+    let mut db = TestDb::new("update-scanned-key");
+    db.execute("CREATE TABLE item (id INT PRIMARY KEY)");
+    let values: Vec<String> = (0..1000).map(|n| format!("({n})")).collect();
+    db.execute(&format!("INSERT INTO item VALUES {}", values.join(", ")));
+
+    // Each new id is still inside the range, so a scan that wrote as it read would find
+    // the rows again
+    let sql = "UPDATE item SET id = id + 1 WHERE id >= 990";
+    assert!(db.db.explain(sql).unwrap().contains("IndexScan"));
+    assert_eq!(db.affected(sql), Some(10));
+    let ids: Vec<i64> = db
+        .query("SELECT id FROM item WHERE id >= 990 ORDER BY id")
+        .into_iter()
+        .map(|row| match row[0] {
+            Value::Int64(id) => id,
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(ids, (991..=1000).collect::<Vec<_>>());
+}
