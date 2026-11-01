@@ -52,22 +52,12 @@ pub(crate) fn optimize(
 /// whether a row passes matters. Deeper down, as in `(a = 1 OR a = 2) IS NULL`, the
 /// rewrite would change the answer for a NULL `a`: our OR gives false where IN gives NULL.
 pub(crate) fn use_in_lists(plan: &mut LogicalPlan) {
-    match plan {
-        LogicalPlan::Filter { input, condition } => {
-            let placeholder = AnalyzedExpression::Literal(Value::Bool(true));
-            *condition = or_to_in(std::mem::replace(condition, placeholder));
-            use_in_lists(input);
-        }
-        LogicalPlan::Projection { input, .. }
-        | LogicalPlan::Aggregate { input, .. }
-        | LogicalPlan::Sort { input, .. }
-        | LogicalPlan::TopN { input, .. }
-        | LogicalPlan::Limit { input, .. } => use_in_lists(input),
-        LogicalPlan::Join { left, right, .. } => {
-            use_in_lists(left);
-            use_in_lists(right);
-        }
-        _ => {}
+    if let LogicalPlan::Filter { condition, .. } = plan {
+        let placeholder = AnalyzedExpression::Literal(Value::Bool(true));
+        *condition = or_to_in(std::mem::replace(condition, placeholder));
+    }
+    for child in plan.children_mut() {
+        use_in_lists(child);
     }
 }
 
@@ -368,31 +358,20 @@ pub(crate) fn use_indexes(
     catalog: &Catalog,
     pool: &mut BufferPool,
 ) -> Result<()> {
-    match plan {
-        LogicalPlan::Filter { input, condition } => {
-            if let LogicalPlan::Scan {
-                table_name, index, ..
-            } = input.as_mut()
-            {
-                if let Ok(table) = catalog.table(table_name) {
-                    *index = pick_index(condition, &table.indexes, pool)?;
-                }
-                Ok(())
-            } else {
-                use_indexes(input, catalog, pool)
-            }
+    if let LogicalPlan::Filter { input, condition } = plan
+        && let LogicalPlan::Scan {
+            table_name, index, ..
+        } = input.as_mut()
+    {
+        if let Ok(table) = catalog.table(table_name) {
+            *index = pick_index(condition, &table.indexes, pool)?;
         }
-        LogicalPlan::Projection { input, .. }
-        | LogicalPlan::Aggregate { input, .. }
-        | LogicalPlan::Sort { input, .. }
-        | LogicalPlan::TopN { input, .. }
-        | LogicalPlan::Limit { input, .. } => use_indexes(input, catalog, pool),
-        LogicalPlan::Join { left, right, .. } => {
-            use_indexes(left, catalog, pool)?;
-            use_indexes(right, catalog, pool)
-        }
-        _ => Ok(()),
+        return Ok(());
     }
+    for child in plan.children_mut() {
+        use_indexes(child, catalog, pool)?;
+    }
+    Ok(())
 }
 
 /// The way of reading the table through indexes that finds the fewest rows, if any

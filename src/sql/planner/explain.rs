@@ -5,9 +5,7 @@
 //! output names, and so on.
 
 use crate::db::table::index::{IndexAccess, IndexRange};
-use crate::sql::analyzer::AnalyzedExpression;
 use crate::sql::planner::logical::{LogicalPlan, SortKey};
-use crate::sql::planner::relation_schema::RelationSchema;
 
 /// Formats `plan` as one line per node, children indented under their parent.
 pub(crate) fn explain(plan: &LogicalPlan) -> String {
@@ -144,13 +142,8 @@ fn write_node(plan: &LogicalPlan, depth: usize, lines: &mut Vec<String>) {
             ));
             write_node(source, depth + 1, lines);
         }
-        LogicalPlan::Update {
-            table_name,
-            assignments,
-            filter,
-            schema,
-        } => {
-            let columns = RelationSchema::table(table_name, schema);
+        LogicalPlan::Update { input, assignments } => {
+            let columns = input.output_schema();
             let sets: Vec<String> = assignments
                 .iter()
                 .map(|(index, value)| {
@@ -158,19 +151,15 @@ fn write_node(plan: &LogicalPlan, depth: usize, lines: &mut Vec<String>) {
                 })
                 .collect();
             lines.push(format!(
-                "{indent}Update: {table_name} set {}",
+                "{indent}Update: {} set {}",
+                written_table(input),
                 sets.join(", ")
             ));
-            write_filtered_scan(table_name, filter.as_ref(), &columns, depth + 1, lines);
+            write_node(input, depth + 1, lines);
         }
-        LogicalPlan::Delete {
-            table_name,
-            filter,
-            schema,
-        } => {
-            let columns = RelationSchema::table(table_name, schema);
-            lines.push(format!("{indent}Delete: {table_name}"));
-            write_filtered_scan(table_name, filter.as_ref(), &columns, depth + 1, lines);
+        LogicalPlan::Delete { input } => {
+            lines.push(format!("{indent}Delete: {}", written_table(input)));
+            write_node(input, depth + 1, lines);
         }
         LogicalPlan::CreateTable {
             table_name,
@@ -188,21 +177,9 @@ fn write_node(plan: &LogicalPlan, depth: usize, lines: &mut Vec<String>) {
     }
 }
 
-/// Writes the scan (and optional filter) that UPDATE and DELETE read their rows from.
-fn write_filtered_scan(
-    table_name: &str,
-    filter: Option<&AnalyzedExpression>,
-    columns: &RelationSchema,
-    depth: usize,
-    lines: &mut Vec<String>,
-) {
-    let mut depth = depth;
-    if let Some(filter) = filter {
-        let indent = "  ".repeat(depth);
-        lines.push(format!("{indent}Filter: {}", columns.render(filter)));
-        depth += 1;
-    }
-    lines.push(format!("{}Scan: {table_name}", "  ".repeat(depth)));
+/// The table an UPDATE's or DELETE's `input` reads.
+fn written_table(input: &LogicalPlan) -> &str {
+    input.table_scan().map_or("?", |scan| scan.table_name)
 }
 
 /// ORDER BY keys as written: `age DESC, name`.

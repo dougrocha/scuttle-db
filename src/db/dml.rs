@@ -9,15 +9,19 @@ use crate::{
     db::{
         catalog::Catalog,
         database::{Database, QueryResponse},
-        table::{cursor::TableCursor, index::Ctid, row::Row},
+        table::{
+            cursor::{TableCursor, fetch_row},
+            index::Ctid,
+            row::Row,
+            schema::Schema,
+        },
     },
     sql::{
         analyzer::Analyzer,
         ast::statement,
         evaluator::{Evaluator, expression::ExpressionEvaluator, predicate::PredicateEvaluator},
-        planner::logical::LogicalPlan,
+        planner::{logical::LogicalPlan, optimizer},
     },
-    storage::page::{ItemId, PageId},
 };
 
 impl Database {
@@ -26,51 +30,43 @@ impl Database {
         insert_stmt: statement::InsertStatement,
     ) -> Result<QueryResponse> {
         let analyzer = Analyzer::new(&self.catalog);
-        let analyzed_plan = analyzer.analyze_insert(insert_stmt)?;
-        let rows_affected;
-
-        if let LogicalPlan::Insert {
+        let LogicalPlan::Insert {
             table_name,
             column_names: insert_columns,
             source,
-        } = analyzed_plan
-        {
-            Self::check_writable(&table_name)?;
-            if let LogicalPlan::Values { expressions, .. } = *source {
-                let schema = self.catalog.table(&table_name)?.schema.clone();
-                let evaluator = ExpressionEvaluator;
-                // VALUES don't reference columns, so they are evaluated against an empty row
-                let empty_row = Row::new(Vec::new());
+        } = analyzer.analyze_insert(insert_stmt)?
+        else {
+            unreachable!("analyze_insert always returns LogicalPlan::Insert")
+        };
+        let LogicalPlan::Values { expressions } = *source else {
+            unreachable!("an INSERT's rows always come from VALUES")
+        };
+        Self::check_writable(&table_name)?;
 
-                // Build and validate every row before writing any of them
-                let mut new_rows = Vec::with_capacity(expressions.len());
-                for exprs in expressions {
-                    let mut values = Vec::with_capacity(schema.columns.len());
+        let schema = &self.catalog.table(&table_name)?.schema;
+        let evaluator = ExpressionEvaluator;
+        // VALUES don't reference columns, so they are evaluated against an empty row
+        let empty_row = Row::new(Vec::new());
 
-                    for col_def in &schema.columns {
-                        let value =
-                            match insert_columns.iter().position(|name| *name == col_def.name) {
-                                Some(idx) => evaluator.evaluate(&exprs[idx], &empty_row)?,
-                                None => col_def.default_value().cloned().unwrap_or(Value::Null),
-                            };
-
-                        values.push(Self::coerce_for_column(value, col_def)?);
-                    }
-
-                    new_rows.push(Row::new(values));
-                }
-
-                self.check_unique(&table_name, &new_rows, &BTreeSet::new())?;
-
-                rows_affected = new_rows.len();
-                for row in new_rows {
-                    self.append_row(&table_name, row)?;
-                }
-            } else {
-                todo!()
+        // Build and validate every row before writing any of them
+        let mut new_rows = Vec::with_capacity(expressions.len());
+        for exprs in expressions {
+            let mut values = Vec::with_capacity(schema.columns.len());
+            for col_def in &schema.columns {
+                let value = match insert_columns.iter().position(|name| *name == col_def.name) {
+                    Some(idx) => evaluator.evaluate(&exprs[idx], &empty_row)?,
+                    None => col_def.default_value().cloned().unwrap_or(Value::Null),
+                };
+                values.push(Self::coerce_for_column(value, col_def)?);
             }
-        } else {
-            unreachable!("")
+            new_rows.push(Row::new(values));
+        }
+
+        self.check_unique(&table_name, &new_rows, &BTreeSet::new())?;
+
+        let rows_affected = new_rows.len();
+        for row in new_rows {
+            self.append_row(&table_name, row)?;
         }
 
         Ok(QueryResponse {
@@ -85,38 +81,30 @@ impl Database {
         &mut self,
         update_stmt: statement::UpdateStatement,
     ) -> Result<QueryResponse> {
-        let analyzer = Analyzer::new(&self.catalog);
-        let LogicalPlan::Update {
-            table_name,
-            assignments,
-            filter,
-            schema,
-        } = analyzer.analyze_update(update_stmt)?
-        else {
+        let mut plan = Analyzer::new(&self.catalog).analyze_update(update_stmt)?;
+        optimizer::optimize(&mut plan, &self.catalog, &mut self.pool)?;
+        let LogicalPlan::Update { input, assignments } = plan else {
             unreachable!("analyze_update always returns LogicalPlan::Update")
         };
-        Self::check_writable(&table_name)?;
+        let RowsToChange {
+            table_name,
+            schema,
+            rows,
+        } = self.rows_to_change(&input)?;
 
         // Compute and validate every new row before writing anything, so a bad value
-        // doesn't leave the table half-updated. Scanning everything up front also keeps
+        // doesn't leave the table half-updated. Reading every row up front also keeps
         // the rows we insert from being picked up and updated a second time.
         let evaluator = ExpressionEvaluator;
         let mut updates = Vec::new();
-        for (page_id, item_id, row) in self.get_rows_with_location(&table_name)? {
-            if let Some(filter) = &filter
-                && !PredicateEvaluator.evaluate(filter, &row)?
-            {
-                continue;
-            }
-
+        for (ctid, row) in rows {
             let mut new_row = row.clone();
             for (index, expr) in &assignments {
                 // Every SET expression sees the old row, not the partially updated one
                 let value = evaluator.evaluate(expr, &row)?;
                 new_row.values[*index] = Self::coerce_for_column(value, &schema.columns[*index])?;
             }
-
-            updates.push(((page_id, item_id), row, new_row));
+            updates.push((ctid, row, new_row));
         }
 
         // A row may keep its own key, so the old versions don't count as duplicates
@@ -143,25 +131,18 @@ impl Database {
         &mut self,
         delete_stmt: statement::DeleteStatement,
     ) -> Result<QueryResponse> {
-        let analyzer = Analyzer::new(&self.catalog);
-        let LogicalPlan::Delete {
-            table_name, filter, ..
-        } = analyzer.analyze_delete(delete_stmt)?
-        else {
+        let mut plan = Analyzer::new(&self.catalog).analyze_delete(delete_stmt)?;
+        optimizer::optimize(&mut plan, &self.catalog, &mut self.pool)?;
+        let LogicalPlan::Delete { input } = plan else {
             unreachable!("analyze_delete always returns LogicalPlan::Delete")
         };
-        Self::check_writable(&table_name)?;
+        let RowsToChange {
+            table_name, rows, ..
+        } = self.rows_to_change(&input)?;
 
-        let mut rows_affected = 0;
-        for (page_id, item_id, row) in self.get_rows_with_location(&table_name)? {
-            if let Some(filter) = &filter
-                && !PredicateEvaluator.evaluate(filter, &row)?
-            {
-                continue;
-            }
-
-            self.delete_row(&table_name, (page_id, item_id), &row)?;
-            rows_affected += 1;
+        let rows_affected = rows.len();
+        for (ctid, row) in rows {
+            self.delete_row(&table_name, ctid, &row)?;
         }
 
         Ok(QueryResponse {
@@ -254,24 +235,62 @@ impl Database {
         Ok(())
     }
 
-    /// Every live row of a table, with where it is stored.
+    /// The rows an UPDATE's or DELETE's `input` finds, with where each is stored, and
+    /// the table they are in. Fails for a catalog table.
     ///
-    /// The `(PageId, ItemId)` pair identifies the tuple (PostgreSQL's `ctid`), which
-    /// UPDATE and DELETE need to mark the old version as deleted. They read the whole
-    /// table before writing, so unlike a SELECT this doesn't stream.
-    pub(crate) fn get_rows_with_location(
-        &mut self,
-        table_name: &str,
-    ) -> Result<Vec<(PageId, ItemId, Row)>> {
-        let schema = self.catalog.table(table_name)?.schema.clone();
-        let mut cursor = TableCursor::open(&mut self.pool, table_name.to_string(), schema);
+    /// The ctid is what UPDATE and DELETE need to mark the old version deleted. Every
+    /// row is read before any is written, so unlike a SELECT this doesn't stream.
+    fn rows_to_change(&mut self, input: &LogicalPlan) -> Result<RowsToChange> {
+        let scan = input
+            .table_scan()
+            .expect("the analyzer reads an UPDATE's or DELETE's rows with a Scan");
+        let table_name = scan.table_name.to_string();
+        let schema = scan.schema.clone();
+        Self::check_writable(&table_name)?;
 
         let mut rows = Vec::new();
-        while cursor.read_next_page(&mut self.pool, |page_id, item_id, row| {
-            rows.push((page_id, item_id, row));
-            Ok(())
-        })? {}
+        match scan.index {
+            Some(access) => {
+                let mut ctids = access.open(&self.catalog.table(&table_name)?.indexes)?;
+                while let Some(ctid) = ctids.next(&mut self.pool)? {
+                    if let Some(row) = fetch_row(&mut self.pool, &table_name, &schema, ctid)? {
+                        rows.push((ctid, row));
+                    }
+                }
+            }
+            None => {
+                let mut cursor =
+                    TableCursor::open(&mut self.pool, table_name.clone(), schema.clone());
+                while cursor.read_next_page(&mut self.pool, |page_id, item_id, row| {
+                    rows.push(((page_id, item_id), row));
+                    Ok(())
+                })? {}
+            }
+        }
 
-        Ok(rows)
+        // An index finds every row the filter passes, and perhaps more
+        if let Some(filter) = scan.filter {
+            let mut passed = Vec::with_capacity(rows.len());
+            for (ctid, row) in rows {
+                if PredicateEvaluator.evaluate(filter, &row)? {
+                    passed.push((ctid, row));
+                }
+            }
+            rows = passed;
+        }
+        Ok(RowsToChange {
+            table_name,
+            schema,
+            rows,
+        })
     }
+}
+
+/// What [`Database::rows_to_change`] finds.
+struct RowsToChange {
+    table_name: String,
+    schema: Schema,
+
+    /// Each row with where it is stored.
+    rows: Vec<(Ctid, Row)>,
 }

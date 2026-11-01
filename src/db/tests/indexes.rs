@@ -74,9 +74,12 @@ fn test_order_by_with_limit_reads_an_index_in_key_order() {
             "INSERT INTO {table} VALUES (5000, 0, NULL), (5001, 1, NULL)"
         ));
     }
-    // An UPDATE moves rows to the end of the table, which reorders their ties
+    // An UPDATE moves rows to the end of the table, which reorders their ties. `id + 0`
+    // keeps item's index out of it, so both tables move them in the same order.
     for table in ["item", "plain"] {
-        db.execute(&format!("UPDATE {table} SET tag = 'moved' WHERE id < 100"));
+        db.execute(&format!(
+            "UPDATE {table} SET tag = 'moved' WHERE id + 0 < 100"
+        ));
     }
 
     for query in [
@@ -549,5 +552,57 @@ fn test_explain_analyze_counts_the_rows_each_node_produced() {
             .unwrap()
             .rows
             .is_empty()
+    );
+}
+
+#[test]
+fn test_update_and_delete_find_their_rows_through_an_index() {
+    let mut db = TestDb::new("write-through-index");
+    db.execute("CREATE TABLE item (id INT PRIMARY KEY, qty INT)");
+    let values: Vec<String> = (0..1000).map(|n| format!("({n}, {})", n % 10)).collect();
+    db.execute(&format!("INSERT INTO item VALUES {}", values.join(", ")));
+
+    assert_eq!(
+        db.db
+            .explain("UPDATE item SET qty = qty + 100 WHERE id IN (3, 500)")
+            .unwrap(),
+        "Update: item set qty = qty + 100\n  Filter: id IN (3, 500)\n    IndexScan: item (id IN (3, 500))"
+    );
+    assert_eq!(
+        db.affected("UPDATE item SET qty = qty + 100 WHERE id IN (3, 500)"),
+        Some(2)
+    );
+    assert_eq!(
+        db.query("SELECT id, qty FROM item WHERE qty >= 100 ORDER BY id"),
+        vec![
+            vec![Value::Int64(3), Value::Int64(103)],
+            vec![Value::Int64(500), Value::Int64(100)],
+        ]
+    );
+
+    // The index finds 10..20, and the Filter still drops the rows it doesn't pass
+    assert_eq!(
+        db.db
+            .explain("DELETE FROM item WHERE id >= 10 AND id < 20 AND qty = 5")
+            .unwrap(),
+        "Delete: item\n  Filter: ((id >= 10) AND (id < 20)) AND (qty = 5)\n    IndexScan: item (id >= 10 AND id < 20)"
+    );
+    assert_eq!(
+        db.affected("DELETE FROM item WHERE id >= 10 AND id < 20 AND qty = 5"),
+        Some(1)
+    );
+    assert_eq!(
+        db.query("SELECT id FROM item WHERE id = 15"),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        db.query("SELECT COUNT(*) FROM item"),
+        vec![vec![Value::Int64(999)]]
+    );
+
+    // Without an index to use, they read the whole table, as before
+    assert_eq!(
+        db.db.explain("DELETE FROM item WHERE qty = 7").unwrap(),
+        "Delete: item\n  Filter: qty = 7\n    Scan: item"
     );
 }

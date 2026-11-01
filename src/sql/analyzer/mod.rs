@@ -358,15 +358,9 @@ impl<'a> Analyzer<'a> {
             bound_assignments.push((index, value));
         }
 
-        let filter = where_clause
-            .map(|expr| self.bind_expression(&expr, &scope))
-            .transpose()?;
-
         Ok(LogicalPlan::Update {
-            table_name,
+            input: Box::new(self.filtered_scan(table_name, where_clause)?),
             assignments: bound_assignments,
-            filter,
-            schema: schema.clone(),
         })
     }
 
@@ -375,17 +369,34 @@ impl<'a> Analyzer<'a> {
             table: table_name,
             where_clause,
         } = statement;
-        let schema = self.catalog.table(&table_name)?.schema();
-        let scope = BindScope::single(&table_name, schema);
-
-        let filter = where_clause
-            .map(|expr| self.bind_expression(&expr, &scope))
-            .transpose()?;
-
         Ok(LogicalPlan::Delete {
+            input: Box::new(self.filtered_scan(table_name, where_clause)?),
+        })
+    }
+
+    /// A Scan of `table_name`, under a Filter if there is a WHERE clause: the rows an
+    /// UPDATE or DELETE changes.
+    fn filtered_scan(
+        &self,
+        table_name: String,
+        where_clause: Option<Expression>,
+    ) -> Result<LogicalPlan> {
+        let schema = self.catalog.table(&table_name)?.schema().clone();
+        let condition = where_clause
+            .map(|expr| self.bind_expression(&expr, &BindScope::single(&table_name, &schema)))
+            .transpose()?;
+        let scan = LogicalPlan::Scan {
             table_name,
-            filter,
-            schema: schema.clone(),
+            alias: None,
+            schema,
+            index: None,
+        };
+        Ok(match condition {
+            Some(condition) => LogicalPlan::Filter {
+                input: Box::new(scan),
+                condition,
+            },
+            None => scan,
         })
     }
 

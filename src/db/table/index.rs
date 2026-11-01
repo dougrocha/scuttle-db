@@ -1,10 +1,10 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeSet, VecDeque, btree_set},
     ops::Bound,
 };
 
-use miette::Result;
+use miette::{Result, miette};
 
 use crate::{
     ColumnDef, DataType, DatabaseError, Value,
@@ -550,6 +550,64 @@ pub(crate) enum IndexAccess {
     BitmapOr(Vec<IndexRange>),
 }
 
+impl IndexAccess {
+    /// Starts reading the rows this finds from `indexes`, its table's.
+    pub(crate) fn open(&self, indexes: &[TableIndex]) -> Result<Ctids> {
+        let cursor = |range: &IndexRange, descending: bool| {
+            indexes
+                .iter()
+                .find(|index| index.name == range.index)
+                .map(|index| index.scan(range, descending))
+                .ok_or_else(|| miette!("No index {}", range.index))
+        };
+        Ok(match self {
+            IndexAccess::Range { range, descending } => Ctids::Index(cursor(range, *descending)?),
+            IndexAccess::BitmapOr(ranges) => Ctids::Bitmap {
+                cursors: ranges
+                    .iter()
+                    .map(|range| cursor(range, false))
+                    .collect::<Result<_>>()?,
+                found: None,
+            },
+        })
+    }
+}
+
+/// The rows an [`IndexAccess`] finds, read as they are asked for.
+#[derive(Debug)]
+pub(crate) enum Ctids {
+    /// One index's ranges, read in key order a row at a time.
+    Index(IndexCursor),
+
+    /// Several ranges whose rows are gathered into one set on the first call, which drops
+    /// a row two ranges both find and sorts them into table order. Postgres builds a
+    /// bitmap of pages for the same purpose.
+    Bitmap {
+        cursors: Vec<IndexCursor>,
+        found: Option<btree_set::IntoIter<Ctid>>,
+    },
+}
+
+impl Ctids {
+    pub(crate) fn next(&mut self, pool: &mut BufferPool) -> Result<Option<Ctid>> {
+        match self {
+            Ctids::Index(cursor) => cursor.next(pool),
+            Ctids::Bitmap { cursors, found } => {
+                if found.is_none() {
+                    let mut set = BTreeSet::new();
+                    for cursor in cursors {
+                        while let Some(ctid) = cursor.next(pool)? {
+                            set.insert(ctid);
+                        }
+                    }
+                    *found = Some(set.into_iter());
+                }
+                Ok(found.as_mut().and_then(Iterator::next))
+            }
+        }
+    }
+}
+
 /// The part of one index a scan reads: its keys in one or more ranges. Made by
 /// [`TableIndex::range`], so it names the index that reads it, and only that index does.
 #[derive(Debug, Clone, PartialEq)]
@@ -563,11 +621,6 @@ pub(crate) struct IndexRange {
 }
 
 impl IndexRange {
-    /// The name of the index that reads the range.
-    pub(crate) fn index(&self) -> &str {
-        &self.index
-    }
-
     /// The column the index is on.
     pub(crate) fn column(&self) -> usize {
         self.column

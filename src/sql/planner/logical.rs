@@ -90,24 +90,17 @@ pub enum LogicalPlan {
         column_names: Vec<String>,
         source: Box<LogicalPlan>,
     },
+    /// Changes the rows `input` finds. The input is a Scan of the table, under a Filter
+    /// for a WHERE clause, so the optimizer can read it through an index as it would a
+    /// SELECT's (see [`LogicalPlan::table_scan`]).
     Update {
-        table_name: String,
+        input: Box<LogicalPlan>,
 
         /// `(column index, new value)` pairs; expressions are evaluated against the old row
         assignments: Vec<(usize, AnalyzedExpression)>,
-        filter: Option<AnalyzedExpression>,
-
-        /// What `assignments` and `filter` index. Lets EXPLAIN drop the catalog and
-        /// `handle_update` drop its second `get_table`.
-        schema: Schema,
     },
-    Delete {
-        table_name: String,
-        filter: Option<AnalyzedExpression>,
-
-        /// What `filter` indexes.
-        schema: Schema,
-    },
+    /// Deletes the rows `input` finds, which is shaped as an Update's input.
+    Delete { input: Box<LogicalPlan> },
     CreateTable {
         table_name: String,
         columns: Vec<ColumnDef>,
@@ -115,6 +108,55 @@ pub enum LogicalPlan {
 }
 
 impl LogicalPlan {
+    /// The nodes this one reads from, so a rule that looks for a pattern anywhere in the
+    /// plan can walk it without listing every kind of node.
+    ///
+    /// No `_` arm: a new node does not compile until it says what its children are.
+    pub(crate) fn children_mut(&mut self) -> Vec<&mut LogicalPlan> {
+        match self {
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Projection { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::TopN { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Update { input, .. }
+            | LogicalPlan::Delete { input }
+            | LogicalPlan::Insert { source: input, .. } => vec![input],
+            LogicalPlan::Join { left, right, .. } => vec![left, right],
+            LogicalPlan::Scan { .. }
+            | LogicalPlan::Values { .. }
+            | LogicalPlan::CreateTable { .. } => {
+                vec![]
+            }
+        }
+    }
+
+    /// The table this plan reads and the filter on it, if the plan is a Scan, perhaps
+    /// under a Filter: the shape of an Update's or Delete's input. `None` for any other
+    /// plan.
+    pub(crate) fn table_scan(&self) -> Option<TableScan<'_>> {
+        let (scan, filter) = match self {
+            LogicalPlan::Filter { input, condition } => (input.as_ref(), Some(condition)),
+            scan => (scan, None),
+        };
+        let LogicalPlan::Scan {
+            table_name,
+            schema,
+            index,
+            ..
+        } = scan
+        else {
+            return None;
+        };
+        Some(TableScan {
+            table_name,
+            schema,
+            index: index.as_ref(),
+            filter,
+        })
+    }
+
     /// The columns of every row this node produces, in row order.
     ///
     /// Derived on every call, one arm per variant, NO `_` arm: a new node does not compile
@@ -172,6 +214,16 @@ impl LogicalPlan {
             | LogicalPlan::CreateTable { .. } => RelationSchema::empty(),
         }
     }
+}
+
+/// A table read whole or through indexes, then filtered. See [`LogicalPlan::table_scan`].
+pub(crate) struct TableScan<'a> {
+    pub(crate) table_name: &'a str,
+    pub(crate) schema: &'a Schema,
+    pub(crate) index: Option<&'a IndexAccess>,
+
+    /// What each row must pass. An index may find rows that don't.
+    pub(crate) filter: Option<&'a AnalyzedExpression>,
 }
 
 /// A single aggregate computed by [`LogicalPlan::Aggregate`].

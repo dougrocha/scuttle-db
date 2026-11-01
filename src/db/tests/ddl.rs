@@ -183,11 +183,21 @@ fn test_a_table_without_its_tables_row_is_cleaned_up_on_open() {
     db.execute("INSERT INTO item VALUES (1)");
 
     // As if the database stopped after writing the columns but not the `__tables__` row
-    for (page_id, item_id, row) in db.db.get_rows_with_location("__tables__").unwrap() {
-        if row.values[0] == text("item") {
-            let page = db.db.pool.get_page_mut("__tables__", page_id);
-            page.unwrap().delete_item(item_id).unwrap();
-        }
+    let schema = db.db.get_table("__tables__").unwrap().schema.clone();
+    let mut cursor = TableCursor::open(&mut db.db.pool, "__tables__".to_string(), schema);
+    let mut found = Vec::new();
+    while cursor
+        .read_next_page(&mut db.db.pool, |page_id, item_id, row| {
+            if row.values[0] == text("item") {
+                found.push((page_id, item_id));
+            }
+            Ok(())
+        })
+        .unwrap()
+    {}
+    for (page_id, item_id) in found {
+        let page = db.db.pool.get_page_mut("__tables__", page_id);
+        page.unwrap().delete_item(item_id).unwrap();
     }
     db.db.pool.flush().unwrap();
 

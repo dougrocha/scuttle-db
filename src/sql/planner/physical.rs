@@ -1,7 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
     cmp::Ordering,
-    collections::BTreeSet,
     rc::Rc,
     time::Duration,
 };
@@ -15,7 +14,7 @@ use crate::{
         catalog::Catalog,
         table::{
             cursor::{TableCursor, fetch_row},
-            index::{Ctid, IndexAccess, IndexCursor, IndexRange},
+            index::Ctids,
             row::Row,
         },
     },
@@ -100,27 +99,7 @@ impl<'a> PhysicalPlanner<'a> {
                 index: Some(access),
                 ..
             } => {
-                let table = self.catalog.table(&table_name)?;
-                let cursor = |range: &IndexRange, descending: bool| {
-                    table
-                        .indexes
-                        .iter()
-                        .find(|index| index.name == range.index())
-                        .map(|index| index.scan(range, descending))
-                        .ok_or_else(|| miette!("No index {} on {table_name}", range.index()))
-                };
-                let ctids = match &access {
-                    IndexAccess::Range { range, descending } => {
-                        Ctids::Index(cursor(range, *descending)?)
-                    }
-                    IndexAccess::BitmapOr(ranges) => Ctids::Bitmap {
-                        cursors: ranges
-                            .iter()
-                            .map(|range| cursor(range, false))
-                            .collect::<Result<_>>()?,
-                        found: None,
-                    },
-                };
+                let ctids = access.open(&self.catalog.table(&table_name)?.indexes)?;
 
                 Ok(Box::new(IndexScanExec {
                     ctids,
@@ -322,41 +301,6 @@ impl ExecutionNode for ScanExec {
         }
 
         Ok(Some(RecordBatch { rows }))
-    }
-}
-
-/// Where an [`IndexScanExec`] finds its rows.
-#[derive(Debug)]
-enum Ctids {
-    /// One index's ranges, read in key order a row at a time.
-    Index(IndexCursor),
-
-    /// Several ranges whose rows are gathered into one set on the first call, which drops
-    /// a row two ranges both find and sorts them into table order. Postgres builds a
-    /// bitmap of pages for the same purpose.
-    Bitmap {
-        cursors: Vec<IndexCursor>,
-        found: Option<std::collections::btree_set::IntoIter<Ctid>>,
-    },
-}
-
-impl Ctids {
-    fn next(&mut self, pool: &mut BufferPool) -> Result<Option<Ctid>> {
-        match self {
-            Ctids::Index(cursor) => cursor.next(pool),
-            Ctids::Bitmap { cursors, found } => {
-                if found.is_none() {
-                    let mut set = BTreeSet::new();
-                    for cursor in cursors {
-                        while let Some(ctid) = cursor.next(pool)? {
-                            set.insert(ctid);
-                        }
-                    }
-                    *found = Some(set.into_iter());
-                }
-                Ok(found.as_mut().and_then(Iterator::next))
-            }
-        }
     }
 }
 

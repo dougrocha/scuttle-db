@@ -13,7 +13,7 @@ use crate::{
     DEFAULT_SORT_MEM, Database, Value,
     db::{
         database::QueryResponse,
-        table::{index::IndexConstraint, row::Row, table_def::TableDef},
+        table::{cursor::TableCursor, index::IndexConstraint, row::Row, table_def::TableDef},
     },
     storage::buffer_pool::UNFLUSHED,
 };
