@@ -3,7 +3,7 @@ use miette::{Result, miette};
 use crate::{
     ColumnDef, DataType, Value,
     core::timestamp::parse_timestamp,
-    db::table::Table,
+    db::{catalog::Catalog, table::Table},
     sql::{
         ast::{
             expression::{Expression, FunctionArgs},
@@ -12,7 +12,6 @@ use crate::{
             statement::{self, DeleteStatement, InsertStatement, SelectStatement, UpdateStatement},
             target::{SelectList, SelectTarget},
         },
-        catalog_context::CatalogContext,
         planner::logical::{AggregateCall, LogicalPlan, ProjectionColumn, SortKey},
     },
 };
@@ -196,13 +195,14 @@ fn coerce_timestamp_literals(
     Ok((literal_as(left, right_type)?, literal_as(right, left_type)?))
 }
 
-pub struct Analyzer<'a, 'db> {
-    context: &'a CatalogContext<'db>,
+/// Checks a statement against the tables in `catalog` and turns it into a logical plan.
+pub struct Analyzer<'a> {
+    catalog: &'a Catalog,
 }
 
-impl<'a, 'db> Analyzer<'a, 'db> {
-    pub fn new(context: &'a CatalogContext<'db>) -> Self {
-        Self { context }
+impl<'a> Analyzer<'a> {
+    pub fn new(catalog: &'a Catalog) -> Self {
+        Self { catalog }
     }
 
     /// Builds the plan `Scan -> Filter -> [Aggregate] -> [Sort] -> Projection -> [Limit]`.
@@ -325,7 +325,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             assignments,
             where_clause,
         } = statement;
-        let schema = self.context.get_table(&table_name)?.schema();
+        let schema = self.catalog.table(&table_name)?.schema();
         let scope = BindScope::single(&table_name, schema);
 
         let mut bound_assignments: Vec<(usize, AnalyzedExpression)> = Vec::new();
@@ -375,7 +375,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             table: table_name,
             where_clause,
         } = statement;
-        let schema = self.context.get_table(&table_name)?.schema();
+        let schema = self.catalog.table(&table_name)?.schema();
         let scope = BindScope::single(&table_name, schema);
 
         let filter = where_clause
@@ -395,7 +395,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
             columns,
             source,
         } = statement;
-        let table = self.context.get_table(&table_name)?;
+        let table = self.catalog.table(&table_name)?;
         let schema = table.schema();
 
         // Target columns in the order the VALUES are written: the explicit column
@@ -503,7 +503,7 @@ impl<'a, 'db> Analyzer<'a, 'db> {
 
     /// Looks up the table and builds its Scan.
     fn scan(&self, table: &statement::TableRef) -> Result<LogicalPlan> {
-        let def = self.context.get_table(&table.name)?;
+        let def = self.catalog.table(&table.name)?;
 
         Ok(LogicalPlan::Scan {
             table_name: table.name.clone(),

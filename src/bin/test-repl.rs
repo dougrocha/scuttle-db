@@ -23,7 +23,7 @@ fn main() -> Result<ExitCode> {
     db.initialize().expect("Failed to init catalog");
 
     println!("Database created successfully!");
-    println!("Tables: {:?}", db.tables.keys().collect::<Vec<_>>());
+    println!("Tables: {:?}", db.table_names());
 
     let stdin = stdin();
     let interactive = stdin.is_terminal();

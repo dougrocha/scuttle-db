@@ -7,15 +7,15 @@
 //!   indexed column.
 //! - Keep only the rows a LIMIT needs instead of sorting all of them.
 
-use std::{collections::BTreeMap, ops::Bound};
+use std::ops::Bound;
 
 use miette::Result;
 
 use crate::{
     DataType, Value,
-    db::table::{
-        index::{IndexAccess, IndexRange, KeyRange, TableIndex},
-        table_def::TableDef,
+    db::{
+        catalog::Catalog,
+        table::index::{IndexAccess, IndexRange, KeyRange, TableIndex},
     },
     sql::{
         analyzer::AnalyzedExpression,
@@ -35,12 +35,12 @@ const MAX_INDEX_FRACTION: f64 = 0.1;
 /// Reads index pages through `pool`, to count how many rows an index would find.
 pub(crate) fn optimize(
     plan: &mut LogicalPlan,
-    tables: &BTreeMap<String, TableDef>,
+    catalog: &Catalog,
     pool: &mut BufferPool,
 ) -> Result<()> {
     use_in_lists(plan);
-    use_indexes(plan, tables, pool)?;
-    use_index_order(plan, tables, pool);
+    use_indexes(plan, catalog, pool)?;
+    use_index_order(plan, catalog, pool);
     use_top_n(plan);
     Ok(())
 }
@@ -218,31 +218,23 @@ fn merge_equalities(equalities: Vec<AnalyzedExpression>) -> AnalyzedExpression {
 /// With a 1,000-page cache it took 992 ms against 530 ms, because nearly every row read
 /// a page. Postgres instead estimates how closely the index order follows the table
 /// order (the `correlation` statistic), which needs statistics we don't keep yet.
-pub(crate) fn use_index_order(
-    plan: &mut LogicalPlan,
-    tables: &BTreeMap<String, TableDef>,
-    pool: &mut BufferPool,
-) {
+pub(crate) fn use_index_order(plan: &mut LogicalPlan, catalog: &Catalog, pool: &mut BufferPool) {
     match plan {
         LogicalPlan::Limit {
             input,
             limit: Some(_),
             ..
-        } => remove_sort(input, tables, None),
-        LogicalPlan::Limit { input, .. } => remove_sort(input, tables, Some(pool)),
-        _ => remove_sort(plan, tables, Some(pool)),
+        } => remove_sort(input, catalog, None),
+        LogicalPlan::Limit { input, .. } => remove_sort(input, catalog, Some(pool)),
+        _ => remove_sort(plan, catalog, Some(pool)),
     }
 }
 
 /// `unlimited` holds the pool when every row will be read, so the rule checks the
 /// table fits in it first.
-fn remove_sort(
-    plan: &mut LogicalPlan,
-    tables: &BTreeMap<String, TableDef>,
-    unlimited: Option<&mut BufferPool>,
-) {
+fn remove_sort(plan: &mut LogicalPlan, catalog: &Catalog, unlimited: Option<&mut BufferPool>) {
     match plan {
-        LogicalPlan::Projection { input, .. } => remove_sort(input, tables, unlimited),
+        LogicalPlan::Projection { input, .. } => remove_sort(input, catalog, unlimited),
         LogicalPlan::Sort { input, keys } => {
             let [
                 SortKey {
@@ -253,7 +245,7 @@ fn remove_sort(
             else {
                 return;
             };
-            if scan_in_key_order(input, column.index, *descending, tables, unlimited, None) {
+            if scan_in_key_order(input, column.index, *descending, catalog, unlimited, None) {
                 let input = std::mem::replace(
                     input.as_mut(),
                     LogicalPlan::Values {
@@ -278,7 +270,7 @@ fn scan_in_key_order(
     plan: &mut LogicalPlan,
     column: usize,
     descending: bool,
-    tables: &BTreeMap<String, TableDef>,
+    catalog: &Catalog,
     unlimited: Option<&mut BufferPool>,
     condition: Option<&AnalyzedExpression>,
 ) -> bool {
@@ -287,15 +279,16 @@ fn scan_in_key_order(
             input,
             column,
             descending,
-            tables,
+            catalog,
             unlimited,
             Some(condition),
         ),
         LogicalPlan::Scan {
             table_name, index, ..
         } => {
-            let Some(by_column) = tables
-                .get(table_name.as_str())
+            let Some(by_column) = catalog
+                .table(table_name)
+                .ok()
                 .and_then(|table| table.indexes.iter().find(|i| i.column == column))
             else {
                 return false;
@@ -372,7 +365,7 @@ fn bound_sort(plan: &mut LogicalPlan, k: u64) {
 /// a superset of the matching rows.
 pub(crate) fn use_indexes(
     plan: &mut LogicalPlan,
-    tables: &BTreeMap<String, TableDef>,
+    catalog: &Catalog,
     pool: &mut BufferPool,
 ) -> Result<()> {
     match plan {
@@ -381,22 +374,22 @@ pub(crate) fn use_indexes(
                 table_name, index, ..
             } = input.as_mut()
             {
-                if let Some(table) = tables.get(table_name.as_str()) {
+                if let Ok(table) = catalog.table(table_name) {
                     *index = pick_index(condition, &table.indexes, pool)?;
                 }
                 Ok(())
             } else {
-                use_indexes(input, tables, pool)
+                use_indexes(input, catalog, pool)
             }
         }
         LogicalPlan::Projection { input, .. }
         | LogicalPlan::Aggregate { input, .. }
         | LogicalPlan::Sort { input, .. }
         | LogicalPlan::TopN { input, .. }
-        | LogicalPlan::Limit { input, .. } => use_indexes(input, tables, pool),
+        | LogicalPlan::Limit { input, .. } => use_indexes(input, catalog, pool),
         LogicalPlan::Join { left, right, .. } => {
-            use_indexes(left, tables, pool)?;
-            use_indexes(right, tables, pool)
+            use_indexes(left, catalog, pool)?;
+            use_indexes(right, catalog, pool)
         }
         _ => Ok(()),
     }

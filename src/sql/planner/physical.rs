@@ -11,15 +11,17 @@ use web_time::Instant;
 
 use crate::{
     Schema, Value,
-    db::table::{
-        cursor::{TableCursor, fetch_row},
-        index::{Ctid, IndexAccess, IndexCursor, IndexRange},
-        row::Row,
+    db::{
+        catalog::Catalog,
+        table::{
+            cursor::{TableCursor, fetch_row},
+            index::{Ctid, IndexAccess, IndexCursor, IndexRange},
+            row::Row,
+        },
     },
     sql::{
         analyzer::AnalyzedExpression,
         ast::statement::JoinKind,
-        catalog_context::CatalogContext,
         evaluator::{
             Evaluator, aggregate::Accumulator, compare_values, expression::ExpressionEvaluator,
             predicate::PredicateEvaluator,
@@ -33,28 +35,39 @@ use crate::{
     },
 };
 
-pub struct PhysicalPlanner<'a, 'db> {
-    context: &'a mut CatalogContext<'db>,
+/// Builds the nodes that run a logical plan, reading `catalog`'s tables through `pool`.
+pub struct PhysicalPlanner<'a> {
+    catalog: &'a Catalog,
+    pool: &'a mut BufferPool,
+
+    /// Where a sort writes what doesn't fit in memory.
+    spill: Option<Spill>,
 
     /// Set by [`PhysicalPlanner::profiled`]: one entry per node, in the order EXPLAIN
     /// prints them.
     profile: Option<Vec<Rc<NodeStats>>>,
 }
 
-impl<'a, 'db> PhysicalPlanner<'a, 'db> {
-    pub(crate) fn new(context: &'a mut CatalogContext<'db>) -> Self {
+impl<'a> PhysicalPlanner<'a> {
+    pub(crate) fn new(
+        catalog: &'a Catalog,
+        pool: &'a mut BufferPool,
+        spill: Option<Spill>,
+    ) -> Self {
         Self {
-            context,
+            catalog,
+            pool,
+            spill,
             profile: None,
         }
     }
 
-    /// A planner whose nodes count their rows and time, for EXPLAIN ANALYZE. Read the
-    /// counts with [`PhysicalPlanner::into_profile`] after the plan has run.
-    pub(crate) fn profiled(context: &'a mut CatalogContext<'db>) -> Self {
+    /// This planner, but its nodes count their rows and time, for EXPLAIN ANALYZE. Read
+    /// the counts with [`PhysicalPlanner::into_profile`] after the plan has run.
+    pub(crate) fn profiled(self) -> Self {
         Self {
-            context,
             profile: Some(Vec::new()),
+            ..self
         }
     }
 
@@ -87,13 +100,10 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                 index: Some(access),
                 ..
             } => {
-                let db = &mut *self.context.database;
-                let indexes = db
-                    .tables
-                    .get(&table_name)
-                    .map_or(&[][..], |table| &table.indexes);
+                let table = self.catalog.table(&table_name)?;
                 let cursor = |range: &IndexRange, descending: bool| {
-                    indexes
+                    table
+                        .indexes
                         .iter()
                         .find(|index| index.name == range.index())
                         .map(|index| index.scan(range, descending))
@@ -120,13 +130,9 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
             }
             LogicalPlan::Scan {
                 table_name, schema, ..
-            } => {
-                let pool = &mut self.context.database.buffer_manager;
-
-                Ok(Box::new(ScanExec {
-                    cursor: TableCursor::open(pool, table_name, schema),
-                }))
-            }
+            } => Ok(Box::new(ScanExec {
+                cursor: TableCursor::open(self.pool, table_name, schema),
+            })),
             LogicalPlan::Filter { input, condition } => {
                 let child_node = self.create_physical_plan(*input)?;
 
@@ -163,7 +169,7 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                 Ok(Box::new(SortExec {
                     child: child_node,
                     keys: keys.into(),
-                    spill: self.context.database.sort_spill(),
+                    spill: self.spill.clone(),
                     state: SortState::Start,
                 }))
             }

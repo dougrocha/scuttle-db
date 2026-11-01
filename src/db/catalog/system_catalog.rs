@@ -46,7 +46,7 @@ pub(crate) const INDEXES: &str = "__indexes__";
 
 /// Reads and writes the catalog tables.
 #[derive(Debug, Default)]
-pub struct SystemCatalog;
+pub(crate) struct SystemCatalog;
 
 impl SystemCatalog {
     /// The catalog's own tables. The code defines their schemas.

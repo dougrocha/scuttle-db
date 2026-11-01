@@ -99,10 +99,6 @@ pub struct CacheStats {
 }
 
 impl BufferPool {
-    pub fn new(data_directory: impl Into<PathBuf>) -> Self {
-        Self::with_capacity(data_directory, DEFAULT_CACHE_PAGES)
-    }
-
     /// A pool that caches at most `pages` pages (at least one).
     pub fn with_capacity(data_directory: impl Into<PathBuf>, pages: usize) -> Self {
         let data_directory = data_directory.into();
