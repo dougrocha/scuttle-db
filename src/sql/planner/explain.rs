@@ -4,9 +4,7 @@
 //! schema it reads: a scan's table columns, a join's qualified columns, a projection's
 //! output names, and so on.
 
-use std::ops::Bound;
-
-use crate::db::table::index::{IndexAccess, IndexKey, IndexRange, KeyRange};
+use crate::db::table::index::{IndexAccess, IndexRange};
 use crate::sql::analyzer::AnalyzedExpression;
 use crate::sql::planner::logical::{LogicalPlan, SortKey};
 use crate::sql::planner::relation_schema::RelationSchema;
@@ -29,20 +27,21 @@ fn write_node(plan: &LogicalPlan, depth: usize, lines: &mut Vec<String>) {
             index,
         } => {
             let mut line = match index {
-                Some(IndexAccess::Range(range)) if range.descending => {
-                    format!("{indent}IndexScan Backward: {table_name}")
-                }
-                Some(IndexAccess::Range(_)) => format!("{indent}IndexScan: {table_name}"),
+                Some(IndexAccess::Range {
+                    descending: true, ..
+                }) => format!("{indent}IndexScan Backward: {table_name}"),
+                Some(IndexAccess::Range { .. }) => format!("{indent}IndexScan: {table_name}"),
                 Some(IndexAccess::BitmapOr(_)) => format!("{indent}BitmapOr Scan: {table_name}"),
                 None => format!("{indent}Scan: {table_name}"),
             };
             if let Some(alias) = alias {
                 line.push_str(&format!(" {alias}"));
             }
-            let render =
-                |range: &IndexRange| render_range(&schema.columns[range.column].name, range);
+            let render = |range: &IndexRange| range.describe(&schema.columns[range.column()].name);
             match index {
-                Some(IndexAccess::Range(range)) => line.push_str(&format!(" ({})", render(range))),
+                Some(IndexAccess::Range { range, .. }) => {
+                    line.push_str(&format!(" ({})", render(range)))
+                }
                 Some(IndexAccess::BitmapOr(ranges)) => {
                     let ranges: Vec<String> = ranges
                         .iter()
@@ -206,7 +205,6 @@ fn write_filtered_scan(
     lines.push(format!("{}Scan: {table_name}", "  ".repeat(depth)));
 }
 
-/// An index range as the conditions it stands for: `id = 5`, or `id > 10 AND id <= 50`.
 /// ORDER BY keys as written: `age DESC, name`.
 fn render_keys(input: &LogicalPlan, keys: &[SortKey]) -> String {
     let columns = input.output_schema();
@@ -222,59 +220,6 @@ fn render_keys(input: &LogicalPlan, keys: &[SortKey]) -> String {
         })
         .collect();
     keys.join(", ")
-}
-
-fn render_range(column: &str, range: &IndexRange) -> String {
-    let points: Option<Vec<String>> = range
-        .ranges
-        .iter()
-        .map(|range| match (&range.lower, &range.upper) {
-            (Bound::Included(lo), Bound::Included(hi)) if lo == hi => Some(lo.to_string()),
-            _ => None,
-        })
-        .collect();
-    match points.as_deref() {
-        // The conditions contradict each other, such as `id = 1 AND id = 2`
-        Some([]) => "no keys".to_string(),
-        Some([key]) => format!("{column} = {key}"),
-        Some(keys) => format!("{column} IN ({})", keys.join(", ")),
-        None if range.ranges.len() == 1 => render_key_range(column, &range.ranges[0]),
-        None => range
-            .ranges
-            .iter()
-            .map(|range| format!("({})", render_key_range(column, range)))
-            .collect::<Vec<_>>()
-            .join(" OR "),
-    }
-}
-
-fn render_key_range(column: &str, range: &KeyRange) -> String {
-    // The whole index, read for its order
-    if (&range.lower, &range.upper) == (&Bound::Unbounded, &Bound::Unbounded) {
-        return format!("by {column}");
-    }
-    if let (Bound::Included(lo), Bound::Included(hi)) = (&range.lower, &range.upper)
-        && lo == hi
-    {
-        return format!("{column} = {lo}");
-    }
-
-    let lower = match &range.lower {
-        Bound::Included(key) => Some(format!("{column} >= {key}")),
-        Bound::Excluded(key) => Some(format!("{column} > {key}")),
-        Bound::Unbounded => None,
-    };
-    let upper = match &range.upper {
-        Bound::Included(key) => Some(format!("{column} <= {key}")),
-        // The bound a WHERE range has to leave out the NULLs, not one the query wrote
-        Bound::Excluded(IndexKey::Null) | Bound::Unbounded => None,
-        Bound::Excluded(key) => Some(format!("{column} < {key}")),
-    };
-    [lower, upper]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" AND ")
 }
 
 #[cfg(test)]

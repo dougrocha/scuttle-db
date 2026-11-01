@@ -92,19 +92,22 @@ impl<'a, 'db> PhysicalPlanner<'a, 'db> {
                     .tables
                     .get(&table_name)
                     .map_or(&[][..], |table| &table.indexes);
-                let cursor = |range: &IndexRange| {
+                let cursor = |range: &IndexRange, descending: bool| {
                     indexes
                         .iter()
-                        .find(|index| index.column == range.column)
-                        .map(|index| index.scan(range))
-                        .ok_or_else(|| {
-                            miette!("No index on column {} of {table_name}", range.column)
-                        })
+                        .find(|index| index.name == range.index())
+                        .map(|index| index.scan(range, descending))
+                        .ok_or_else(|| miette!("No index {} on {table_name}", range.index()))
                 };
                 let ctids = match &access {
-                    IndexAccess::Range(range) => Ctids::Index(cursor(range)?),
+                    IndexAccess::Range { range, descending } => {
+                        Ctids::Index(cursor(range, *descending)?)
+                    }
                     IndexAccess::BitmapOr(ranges) => Ctids::Bitmap {
-                        cursors: ranges.iter().map(cursor).collect::<Result<_>>()?,
+                        cursors: ranges
+                            .iter()
+                            .map(|range| cursor(range, false))
+                            .collect::<Result<_>>()?,
                         found: None,
                     },
                 };

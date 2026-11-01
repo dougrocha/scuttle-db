@@ -293,9 +293,28 @@ impl TableIndex {
         IndexKey::for_column(&self.data_type, value)
     }
 
-    /// The rows whose key is within `range`, in key order, or largest key first if the
-    /// range is `descending`. They are read as they are asked for.
-    pub(crate) fn scan(&self, range: &IndexRange) -> IndexCursor {
+    /// Every key of the index, NULLs included.
+    pub(crate) fn all_keys(&self) -> IndexRange {
+        self.range(vec![KeyRange {
+            lower: Bound::Unbounded,
+            upper: Bound::Unbounded,
+        }])
+    }
+
+    /// The part of this index between each of `ranges`, which must be sorted and not
+    /// overlap.
+    pub(crate) fn range(&self, ranges: Vec<KeyRange>) -> IndexRange {
+        IndexRange {
+            index: self.name.clone(),
+            column: self.column,
+            ranges,
+        }
+    }
+
+    /// The rows whose key is within `range`, in key order, or largest key first if
+    /// `descending`. They are read as they are asked for.
+    pub(crate) fn scan(&self, range: &IndexRange, descending: bool) -> IndexCursor {
+        debug_assert_eq!(range.index, self.name, "a range is read by its own index");
         let encode = |bound: &Bound<IndexKey>| {
             bound.as_ref().map(|key| {
                 let mut bytes = Vec::new();
@@ -308,14 +327,14 @@ impl TableIndex {
             .iter()
             .map(|range| (encode(&range.lower), encode(&range.upper)))
             .collect();
-        if range.descending {
+        if descending {
             ranges.make_contiguous().reverse();
         }
         IndexCursor {
             tree: self.tree.clone(),
             ranges,
             current: None,
-            descending: range.descending,
+            descending,
         }
     }
 
@@ -330,7 +349,7 @@ impl TableIndex {
         range: &IndexRange,
         limit: usize,
     ) -> Result<usize> {
-        let mut cursor = self.scan(range);
+        let mut cursor = self.scan(range, false);
         let mut count = 0;
         while count < limit && cursor.next(pool)?.is_some() {
             count += 1;
@@ -375,13 +394,9 @@ impl TableIndex {
             if !self.unique || key == IndexKey::Null {
                 continue;
             }
-            let range = IndexRange {
-                column: self.column,
-                ranges: vec![KeyRange::point(key.clone())],
-                descending: false,
-            };
+            let range = self.range(vec![KeyRange::point(key.clone())]);
             let mut taken = false;
-            let mut rows = self.scan(&range);
+            let mut rows = self.scan(&range, false);
             while let Some(ctid) = rows.next(pool)? {
                 if !replacing.contains(&ctid) {
                     taken = true;
@@ -525,8 +540,9 @@ fn next_down(
 /// How a Scan reads its table through indexes.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum IndexAccess {
-    /// The rows in one index's ranges, in key order.
-    Range(IndexRange),
+    /// The rows in one index's ranges, in key order, or largest key first if
+    /// `descending` (for an `ORDER BY ... DESC`).
+    Range { range: IndexRange, descending: bool },
 
     /// The rows that any of the ranges find, perhaps in different indexes, each once and
     /// in table order. For `a = 1 OR b = 2` with an index on each column. Postgres calls
@@ -534,29 +550,52 @@ pub(crate) enum IndexAccess {
     BitmapOr(Vec<IndexRange>),
 }
 
-/// The part of one index a scan reads: keys of `column` in one or more ranges.
+/// The part of one index a scan reads: its keys in one or more ranges. Made by
+/// [`TableIndex::range`], so it names the index that reads it, and only that index does.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IndexRange {
-    pub(crate) column: usize,
+    index: String,
+    column: usize,
 
     /// Sorted and not overlapping, so reading them in turn returns rows in key order,
     /// each once. `id IN (1, 5)` is two ranges of one key each.
-    pub(crate) ranges: Vec<KeyRange>,
-
-    /// Read the ranges largest key first, for an `ORDER BY ... DESC`.
-    pub(crate) descending: bool,
+    ranges: Vec<KeyRange>,
 }
 
 impl IndexRange {
-    /// Every key of `column`, NULLs included.
-    pub(crate) fn all(column: usize) -> Self {
-        Self {
-            column,
-            ranges: vec![KeyRange {
-                lower: Bound::Unbounded,
-                upper: Bound::Unbounded,
-            }],
-            descending: false,
+    /// The name of the index that reads the range.
+    pub(crate) fn index(&self) -> &str {
+        &self.index
+    }
+
+    /// The column the index is on.
+    pub(crate) fn column(&self) -> usize {
+        self.column
+    }
+
+    /// The range as the conditions it stands for, with `column` as the column's name:
+    /// `id = 5`, `id > 10 AND id <= 50`, `id IN (1, 5)`, or `by id` for the whole index.
+    pub(crate) fn describe(&self, column: &str) -> String {
+        let points: Option<Vec<String>> = self
+            .ranges
+            .iter()
+            .map(|range| match (&range.lower, &range.upper) {
+                (Bound::Included(lo), Bound::Included(hi)) if lo == hi => Some(lo.to_string()),
+                _ => None,
+            })
+            .collect();
+        match points.as_deref() {
+            // The conditions contradict each other, such as `id = 1 AND id = 2`
+            Some([]) => "no keys".to_string(),
+            Some([key]) => format!("{column} = {key}"),
+            Some(keys) => format!("{column} IN ({})", keys.join(", ")),
+            None if self.ranges.len() == 1 => self.ranges[0].describe(column),
+            None => self
+                .ranges
+                .iter()
+                .map(|range| format!("({})", range.describe(column)))
+                .collect::<Vec<_>>()
+                .join(" OR "),
         }
     }
 }
@@ -569,6 +608,15 @@ pub(crate) struct KeyRange {
 }
 
 impl KeyRange {
+    /// Every key but NULL's. No comparison is true for NULL, so a WHERE clause's ranges
+    /// start from this one, which stops before the NULLs at the end of the index.
+    pub(crate) fn not_null() -> Self {
+        Self {
+            lower: Bound::Unbounded,
+            upper: Bound::Excluded(IndexKey::Null),
+        }
+    }
+
     /// The keys equal to `key`.
     pub(crate) fn point(key: IndexKey) -> Self {
         Self {
@@ -590,6 +638,35 @@ impl KeyRange {
             _ => false,
         };
         (!empty).then_some(KeyRange { lower, upper })
+    }
+
+    fn describe(&self, column: &str) -> String {
+        // The whole index, read for its order
+        if (&self.lower, &self.upper) == (&Bound::Unbounded, &Bound::Unbounded) {
+            return format!("by {column}");
+        }
+        if let (Bound::Included(lo), Bound::Included(hi)) = (&self.lower, &self.upper)
+            && lo == hi
+        {
+            return format!("{column} = {lo}");
+        }
+
+        let lower = match &self.lower {
+            Bound::Included(key) => Some(format!("{column} >= {key}")),
+            Bound::Excluded(key) => Some(format!("{column} > {key}")),
+            Bound::Unbounded => None,
+        };
+        let upper = match &self.upper {
+            Bound::Included(key) => Some(format!("{column} <= {key}")),
+            // The bound of `not_null`, which the query didn't write
+            Bound::Excluded(IndexKey::Null) | Bound::Unbounded => None,
+            Bound::Excluded(key) => Some(format!("{column} < {key}")),
+        };
+        [lower, upper]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" AND ")
     }
 }
 
@@ -698,8 +775,8 @@ mod tests {
                 }
             }
 
-            let read = |pool: &mut BufferPool, range: &IndexRange| {
-                let mut cursor = index.scan(range);
+            let read = |pool: &mut BufferPool, range: &IndexRange, descending: bool| {
+                let mut cursor = index.scan(range, descending);
                 std::iter::from_fn(|| cursor.next(pool).unwrap()).collect::<Vec<_>>()
             };
             let keys: Vec<IndexKey> = values.iter().filter_map(|v| index.key_for(v)).collect();
@@ -710,19 +787,14 @@ mod tests {
             }
             for lower in &bounds {
                 for upper in &bounds {
-                    let mut range = IndexRange {
-                        column: 0,
-                        ranges: vec![KeyRange {
-                            lower: lower.clone(),
-                            upper: upper.clone(),
-                        }],
-                        descending: false,
-                    };
-                    let mut forward = read(&mut pool, &range);
-                    range.descending = true;
+                    let range = index.range(vec![KeyRange {
+                        lower: lower.clone(),
+                        upper: upper.clone(),
+                    }]);
+                    let mut forward = read(&mut pool, &range, false);
                     forward.reverse();
                     assert_eq!(
-                        read(&mut pool, &range),
+                        read(&mut pool, &range, true),
                         forward,
                         "{data_type:?} from {lower:?} to {upper:?}"
                     );

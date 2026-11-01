@@ -14,7 +14,7 @@ use miette::Result;
 use crate::{
     DataType, Value,
     db::table::{
-        index::{IndexAccess, IndexKey, IndexRange, KeyRange, TableIndex},
+        index::{IndexAccess, IndexRange, KeyRange, TableIndex},
         table_def::TableDef,
     },
     sql::{
@@ -308,8 +308,11 @@ fn scan_in_key_order(
             }
             match index {
                 // The WHERE clause already reads this index, and a range comes out in order
-                Some(IndexAccess::Range(range)) if range.column == column => {
-                    range.descending = descending;
+                Some(IndexAccess::Range {
+                    range,
+                    descending: reversed,
+                }) if range.column() == column => {
+                    *reversed = descending;
                     true
                 }
                 // Another column's order, or a BitmapOr's table order
@@ -319,10 +322,9 @@ fn scan_in_key_order(
                     if let Some(condition) = condition {
                         split(condition, Operator::And, &mut conjuncts);
                     }
-                    let mut range =
-                        narrow(by_column, &conjuncts).unwrap_or_else(|| IndexRange::all(column));
-                    range.descending = descending;
-                    *index = Some(IndexAccess::Range(range));
+                    let range =
+                        narrow(by_column, &conjuncts).unwrap_or_else(|| by_column.all_keys());
+                    *index = Some(IndexAccess::Range { range, descending });
                     true
                 }
             }
@@ -416,8 +418,10 @@ fn pick_index(
     let mut conjuncts = Vec::new();
     split(condition, Operator::And, &mut conjuncts);
 
-    let mut best = best_range(&conjuncts, indexes, pool, limit)?
-        .map(|(rows, range)| (rows, IndexAccess::Range(range)));
+    let mut best = best_range(&conjuncts, indexes, pool, limit)?.map(|(rows, range)| {
+        let descending = false;
+        (rows, IndexAccess::Range { range, descending })
+    });
     for conjunct in &conjuncts {
         let limit = best.as_ref().map_or(limit, |(rows, _)| *rows);
         if let Some(found) = bitmap_or(conjunct, indexes, pool, limit)? {
@@ -481,11 +485,7 @@ fn bitmap_or(
 /// The keys of `index` that the conditions allow, or `None` if none of them is about
 /// the index's column.
 fn narrow(index: &TableIndex, conjuncts: &[&AnalyzedExpression]) -> Option<IndexRange> {
-    // No comparison is true for NULL, so the ranges stop before the NULLs at the end
-    let mut ranges = vec![KeyRange {
-        lower: Bound::Unbounded,
-        upper: Bound::Excluded(IndexKey::Null),
-    }];
+    let mut ranges = vec![KeyRange::not_null()];
     let mut narrowed = false;
 
     for conjunct in conjuncts {
@@ -501,11 +501,7 @@ fn narrow(index: &TableIndex, conjuncts: &[&AnalyzedExpression]) -> Option<Index
         narrowed = true;
     }
 
-    narrowed.then_some(IndexRange {
-        column: index.column,
-        ranges,
-        descending: false,
-    })
+    narrowed.then(|| index.range(ranges))
 }
 
 /// The keys of `index` that `conjunct` allows, sorted and not overlapping, or `None` if
