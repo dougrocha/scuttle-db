@@ -76,7 +76,7 @@ When k is close to M, TopN is still slower than a plain sort, because it compare
 | What | Where | Peak memory on 1M rows |
 |---|---|---|
 | The buffer pool never evicts, so every page read stays cached | `src/storage/buffer_pool.rs` | 330 MB after one scan |
-| Results are collected into a `Vec` before returning | `handle_select`, `src/db/database.rs` | +290 MB for `SELECT *` |
+| Results are collected into a `Vec` before returning | `handle_select`, `src/db/query.rs` | +290 MB for `SELECT *` |
 | Sort holds every row it sorts | `SortExec` | +290 MB for `ORDER BY` with no LIMIT |
 
 A table bigger than RAM crashes on the first scan. This phase puts a cap on each one.
@@ -270,6 +270,21 @@ g.**
 **Verify:**
 - `ORDER BY id DESC LIMIT 10` has no Sort node, and IndexScan shows about 1024 rows, not 1M.
 - `id IN (5, 500000, 999999)` shows rows=3.
+
+---
+
+## Between 5 and 6: architecture cleanup
+
+Done:
+- An index scan names the index it reads. Before, the executor found the index again by column, so with two indexes on one column it could read a different one than the optimizer measured. Only a single-index scan has a direction, and a BitmapOr has none.
+- A `Catalog` (`src/db/catalog/`) owns the table definitions and keeps them in step with the catalog tables on disk. The analyzer, optimizer and physical planner take `&Catalog` instead of the whole `Database`. Phase 6's statistics belong next to it.
+- `Database` is split by statement kind into `query.rs`, `dml.rs` and `ddl.rs`, and its tests by area into `src/db/tests/`.
+- Optimizer rules walk a plan with `LogicalPlan::children_mut`. UPDATE and DELETE read their rows from a Scan input, under a Filter for a WHERE clause, so they use indexes the same way SELECT does.
+
+Still open, from the same review:
+- Check a WHERE clause is boolean in the analyzer, send CREATE TABLE and CREATE INDEX through it, use one error type, and decode corrupt pages as errors instead of panics.
+- Keep each `DataType`'s SQL name, catalog name and encoding in one place.
+- Remove the `Table` trait and other wrappers that only forward, and share one SQL renderer.
 
 ---
 
